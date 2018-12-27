@@ -7,7 +7,7 @@
 extern int fd_list_migration;
 
 unsigned long ft_get_flushcnt();
-int ft_dup_pipe(struct pipe *source, struct pipe *dest);
+int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
 #endif
 
 #endif

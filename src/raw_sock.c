@@ -228,8 +228,8 @@ int t_flag = 0;
 		pipe_buf = get_pipe();
 		pipe_dup = get_pipe();
 
-		ft_dup_pipe(pipe, pipe_buf);
-		ft_dup_pipe(pipe, pipe_dup);
+		ft_dup_pipe(pipe, pipe_buf, 0);
+		ft_dup_pipe(pipe, pipe_dup, 1);
 	}
 	fdtab[conn->handle.fd].enable_migration = 1;
 
@@ -246,7 +246,7 @@ int t_flag = 0;
 			pipe_trace = pipe_trace->next;
 
 			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data && !(pipe_trace->trans_suspend)) {
-				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace);
+				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, 0);
 			}
 		}
 	}
@@ -286,6 +286,10 @@ int t_flag = 0;
 		pipe_trans->data -= ret;
 		pipe_trans->transfer_cnt++;
 		pipe_trans->trans_suspend = 0;
+
+		if (pipe_trans->next != NULL) {
+			pipe_trans = pipe_trans->next;
+		}
 	}
 
 #else

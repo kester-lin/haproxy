@@ -208,7 +208,7 @@ SMALL_OPTS =
 # Currently defined DEBUG macros include DEBUG_FULL, DEBUG_MEMORY, DEBUG_FSM,
 # DEBUG_HASH, DEBUG_AUTH, DEBUG_SPOE, DEBUG_UAF and DEBUG_THREAD. Please check
 # sources for exact meaning or do not use at all.
-DEBUG =
+DEBUG = -DEBUG_FULL
 
 #### Trace options
 # Use TRACE=1 to trace function calls to file "trace.out" or to stderr if not
@@ -242,11 +242,12 @@ EXTRA =
 # feed CPU_CFLAGS, which in turn feed CFLAGS, so it is not mandatory to use
 # them. You should not have to change these options. Better use CPU_CFLAGS or
 # even CFLAGS instead.
-CPU_CFLAGS.generic    = -O2
-CPU_CFLAGS.native     = -O2 -march=native
-CPU_CFLAGS.i586       = -O2 -march=i586
-CPU_CFLAGS.i686       = -O2 -march=i686
-CPU_CFLAGS.ultrasparc = -O6 -mcpu=v9 -mtune=ultrasparc
+#debug
+CPU_CFLAGS.generic    = -O0
+CPU_CFLAGS.native     = -O0 -march=native
+CPU_CFLAGS.i586       = -O0 -march=i586
+CPU_CFLAGS.i686       = -O0 -march=i686
+CPU_CFLAGS.ultrasparc = -O0 -mcpu=v9 -mtune=ultrasparc
 CPU_CFLAGS            = $(CPU_CFLAGS.$(CPU))
 
 #### ARCH dependant flags, may be overridden by CPU flags
