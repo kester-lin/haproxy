@@ -36,6 +36,7 @@
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 
+#include <types/global.h>
 #include <types/pipe.h>
 
 /* functions used by default on a detached stream-interface */
@@ -638,10 +639,17 @@ int si_cs_send(struct conn_stream *cs)
 			did_send = 1;
 		}
 
+#if ENABLE_CUJU_FT
+		if (!oc->pipe->data && !oc->pipe->next) {
+			put_pipe(oc->pipe);
+			oc->pipe = NULL;
+		}
+#else
 		if (!oc->pipe->data) {
 			put_pipe(oc->pipe);
 			oc->pipe = NULL;
 		}
+#endif		
 
 		if (conn->flags & CO_FL_ERROR || cs->flags & (CS_FL_ERROR|CS_FL_ERR_PENDING)) {
 			si->flags |= SI_FL_ERR;
@@ -707,9 +715,19 @@ int si_cs_send(struct conn_stream *cs)
 	}
 
  end:
+ 
 	/* We couldn't send all of our data, let the mux know we'd like to send more */
+#if ENABLE_CUJU_FT
+	/* more data to transmit  */
+	if(!fdtab[conn->handle.fd].enable_migration)
+		if (!channel_is_empty(oc))
+			conn->mux->subscribe(cs, SUB_RETRY_SEND, &si->wait_event);
+
+#else
 	if (!channel_is_empty(oc))
 		conn->mux->subscribe(cs, SUB_RETRY_SEND, &si->wait_event);
+#endif
+
 	return did_send;
 }
 
@@ -1229,10 +1247,17 @@ int si_cs_recv(struct conn_stream *cs)
 	}
 
  abort_splice:
+ #if ENABLE_CUJU_FT
+ 	if (ic->pipe && (!ic->pipe->data) && (!ic->pipe->next)) {
+		put_pipe(ic->pipe);
+		ic->pipe = NULL;
+	}
+ #else
 	if (ic->pipe && unlikely(!ic->pipe->data)) {
 		put_pipe(ic->pipe);
 		ic->pipe = NULL;
 	}
+#endif	
 
 	/* now we'll need a input buffer for the stream */
 	if (!si_alloc_ibuf(si, &(si_strm(si)->buffer_wait)))

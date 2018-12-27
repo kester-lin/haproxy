@@ -1,0 +1,59 @@
+#define _GNU_SOURCE
+
+#include <common/splice.h>
+#include <errno.h>
+#include <types/cuju_ft.h>
+
+#ifdef DEBUG_FULL
+#include <assert.h>
+#endif
+
+#if ENABLE_CUJU_FT
+int fd_list_migration = 0;
+
+unsigned long ft_get_flushcnt() 
+{
+    static unsigned long flush_count = 0;
+
+    return flush_count++;
+}
+
+int ft_dup_pipe(struct pipe *source, struct pipe *dest)
+{
+    int ret = 0;
+    static unsigned long retry_cnt = 0;
+
+    if (!source->data) {
+        return 0;
+    }
+    if (dest->data) {
+#ifdef DEBUG_FULL        
+        assert(1);
+#else
+        return 0;
+#endif        
+    }
+
+    while (1) {
+        ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
+
+        if (ret < 0) {
+            if (errno == EAGAIN) {
+                retry_cnt++;
+                ret = 0;
+                continue;
+            }
+            
+            return ret;
+        }
+
+        break;
+    }
+
+    dest->data = source->data;
+    dest->in_fd = source->in_fd;
+    dest->out_fd = source->out_fd;
+
+    return ret;
+}
+#endif

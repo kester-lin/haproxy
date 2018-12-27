@@ -25,6 +25,7 @@
 #include <common/config.h>
 #include <common/hathreads.h>
 #include <types/port_range.h>
+#include <types/global.h>
 
 /* Direction for each FD event update */
 enum {
@@ -123,6 +124,11 @@ struct fdtab {
 	unsigned char ev;                    /* event seen in return of poll() : FD_POLL_* */
 	unsigned char linger_risk:1;         /* 1 if we must kill lingering before closing */
 	unsigned char cloned:1;              /* 1 if a cloned socket, requires EPOLL_CTL_DEL on close */
+
+#if ENABLE_CUJU_FT
+	int enable_migration;
+	int pipe_conut;	
+#endif
 };
 
 /* less often used information */

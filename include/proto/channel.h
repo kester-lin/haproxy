@@ -408,7 +408,15 @@ static inline void channel_htx_forward_forever(struct channel *chn, struct htx *
  */
 static inline unsigned int channel_is_empty(const struct channel *c)
 {
+#if ENABLE_EXTEND_CHECK
+	unsigned int ret = 0;
+
+	ret = !(co_data(c) | (long)c->pipe);
+
+	return ret;
+#else
 	return !(co_data(c) | (long)c->pipe);
+#endif
 }
 
 /* Returns non-zero if the channel is rewritable, which means that the buffer
