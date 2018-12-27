@@ -183,14 +183,14 @@ enum {
 
 	/* below we have all handshake flags grouped into one */
 	CO_FL_HANDSHAKE     = CO_FL_SEND_PROXY | CO_FL_SSL_WAIT_HS | CO_FL_ACCEPT_PROXY | CO_FL_ACCEPT_CIP,
-
+	/* CO_FL_HANDSHAKE is  0x0F00 0000 */
 	/* when any of these flags is set, polling is defined by socket-layer
 	 * operations, as opposed to data-layer. Transport is explicitly not
 	 * mentionned here to avoid any confusion, since it can be the same
 	 * as DATA or SOCK on some implementations.
 	 */
 	CO_FL_POLL_SOCK     = CO_FL_HANDSHAKE | CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN,
-
+	/* CO_FL_POLL_SOCK is 0x0FC0 0000  */
 	/* This connection may not be shared between clients */
 	CO_FL_PRIVATE       = 0x10000000,
 

@@ -33,6 +33,8 @@
 #include <types/fd.h>
 #include <proto/activity.h>
 
+#include <types/cuju_ft.h>
+
 /* public variables */
 
 extern volatile struct fdlist fd_cache;
@@ -209,7 +211,13 @@ static inline void fd_update_cache(int fd)
  */
 static inline int fd_recv_state(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = ((unsigned)fdtab[fd].state >> (4 * DIR_RD)) & FD_EV_STATUS;
+	return ret;
+#else	
 	return ((unsigned)fdtab[fd].state >> (4 * DIR_RD)) & FD_EV_STATUS;
+#endif
 }
 
 /*
@@ -217,7 +225,13 @@ static inline int fd_recv_state(const int fd)
  */
 static inline int fd_recv_active(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret =  (unsigned)fdtab[fd].state & FD_EV_ACTIVE_R;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_ACTIVE_R;
+#endif
 }
 
 /*
@@ -225,7 +239,13 @@ static inline int fd_recv_active(const int fd)
  */
 static inline int fd_recv_ready(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_READY_R;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_READY_R;
+#endif
 }
 
 /*
@@ -233,7 +253,13 @@ static inline int fd_recv_ready(const int fd)
  */
 static inline int fd_recv_polled(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_POLLED_R;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_POLLED_R;
+#endif
 }
 
 /*
@@ -241,7 +267,13 @@ static inline int fd_recv_polled(const int fd)
  */
 static inline int fd_send_state(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = ((unsigned)fdtab[fd].state >> (4 * DIR_WR)) & FD_EV_STATUS;
+	return ret;
+#else	
 	return ((unsigned)fdtab[fd].state >> (4 * DIR_WR)) & FD_EV_STATUS;
+#endif
 }
 
 /*
@@ -249,7 +281,13 @@ static inline int fd_send_state(const int fd)
  */
 static inline int fd_send_active(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_ACTIVE_W;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_ACTIVE_W;
+#endif
 }
 
 /*
@@ -257,7 +295,13 @@ static inline int fd_send_active(const int fd)
  */
 static inline int fd_send_ready(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_READY_W;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_READY_W;
+#endif	
 }
 
 /*
@@ -265,7 +309,13 @@ static inline int fd_send_ready(const int fd)
  */
 static inline int fd_send_polled(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_POLLED_W;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_POLLED_W;
+#endif	
 }
 
 /*
@@ -273,7 +323,13 @@ static inline int fd_send_polled(const int fd)
  */
 static inline int fd_active(const int fd)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (unsigned)fdtab[fd].state & FD_EV_ACTIVE_RW;
+	return ret;
+#else	
 	return (unsigned)fdtab[fd].state & FD_EV_ACTIVE_RW;
+#endif	
 }
 
 /* Disable processing recv events on fd <fd> */

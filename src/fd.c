@@ -435,7 +435,7 @@ static inline void fdlist_process_cached_events(volatile struct fdlist *fdlist)
 		}
 
 		e = fdtab[fd].state;
-		fdtab[fd].ev &= FD_POLL_STICKY;
+		fdtab[fd].ev &= FD_POLL_STICKY; 
 
 		if ((e & (FD_EV_READY_R | FD_EV_ACTIVE_R)) == (FD_EV_READY_R | FD_EV_ACTIVE_R))
 			fdtab[fd].ev |= FD_POLL_IN;

@@ -63,13 +63,25 @@ int conn_sock_drain(struct connection *conn);
 /* returns true is the transport layer is ready */
 static inline int conn_xprt_ready(const struct connection *conn)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (conn->flags & CO_FL_XPRT_READY);
+	return ret;
+#else	
 	return (conn->flags & CO_FL_XPRT_READY);
+#endif
 }
 
 /* returns true is the control layer is ready */
 static inline int conn_ctrl_ready(const struct connection *conn)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	ret = (conn->flags & CO_FL_CTRL_READY);
+	return ret;
+#else	
 	return (conn->flags & CO_FL_CTRL_READY);
+#endif	
 }
 
 /* Calls the init() function of the transport layer if any and if not done yet,
@@ -175,7 +187,7 @@ void conn_update_xprt_polling(struct connection *c);
  * has already done it.
  */
 static inline void conn_refresh_polling_flags(struct connection *conn)
-{
+{	
 	if (conn_ctrl_ready(conn) && !(conn->flags & CO_FL_WILL_UPDATE)) {
 		unsigned int flags = conn->flags;
 
@@ -203,12 +215,26 @@ static inline void conn_refresh_polling_flags(struct connection *conn)
  */
 static inline unsigned int conn_xprt_polling_changes(const struct connection *c)
 {
+#if ENABLE_EXTEND_CHECK
+	int ret = 0;
+	unsigned int f = c->flags;
+
+	f &= CO_FL_XPRT_WR_ENA | CO_FL_XPRT_RD_ENA | CO_FL_CURR_WR_ENA |
+	     CO_FL_CURR_RD_ENA | CO_FL_ERROR;
+
+	f = (f ^ (f << 1)) & (CO_FL_CURR_WR_ENA|CO_FL_CURR_RD_ENA);    /* test C ^ D */
+
+	ret = f & (CO_FL_CURR_WR_ENA | CO_FL_CURR_RD_ENA | CO_FL_ERROR);
+
+	return ret;
+#else	
 	unsigned int f = c->flags;
 	f &= CO_FL_XPRT_WR_ENA | CO_FL_XPRT_RD_ENA | CO_FL_CURR_WR_ENA |
 	     CO_FL_CURR_RD_ENA | CO_FL_ERROR;
 
 	f = (f ^ (f << 1)) & (CO_FL_CURR_WR_ENA|CO_FL_CURR_RD_ENA);    /* test C ^ D */
 	return f & (CO_FL_CURR_WR_ENA | CO_FL_CURR_RD_ENA | CO_FL_ERROR);
+#endif	
 }
 
 /* inspects c->flags and returns non-zero if SOCK ENA changes from the CURR ENA

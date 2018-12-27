@@ -103,9 +103,9 @@ void conn_fd_handler(int fd)
 	 */
 	if (conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
 		return;
-
+		
 	if (conn->xprt && fd_send_ready(fd) &&
-	    ((conn->flags & (CO_FL_XPRT_WR_ENA|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_WR_ENA)) {
+		((conn->flags & (CO_FL_XPRT_WR_ENA|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_WR_ENA)) {
 		/* force reporting of activity by clearing the previous flags :
 		 * we'll have at least ERROR or CONNECTED at the end of an I/O,
 		 * both of which will be detected below.

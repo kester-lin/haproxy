@@ -29,6 +29,7 @@
 #include <proto/fd.h>
 #include <proto/signal.h>
 
+#include <types/cuju_ft.h>
 
 /* private data */
 static THREAD_LOCAL struct epoll_event *epoll_events = NULL;
@@ -112,6 +113,11 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	int wait_time;
 	int old_fd;
 
+#if ENABLE_EPOLL_MIGRATION
+	int pb_event = 0;
+	static unsigned long pb_cnt = 0;
+#endif
+
 	/* first, scan the update list to find polling changes */
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
@@ -144,6 +150,13 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		_update_fd(fd);
 	}
 
+#if ENABLE_EPOLL_MIGRATION
+	/* Check Pipe Buffer event */
+	if(fd_list_migration) {
+		pb_event = 1;
+	}
+#endif
+
 	thread_harmless_now();
 
 	/* now let's wait for polled events */
@@ -156,8 +169,14 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		status = epoll_wait(epoll_fd[tid], epoll_events, global.tune.maxpollevents, timeout);
 		tv_update_date(timeout, status);
 
-		if (status)
+		if (status) {
 			break;
+		}
+#if ENABLE_EPOLL_MIGRATION
+		if (pb_event)
+			pb_cnt++;
+			break;
+#endif
 		if (timeout || !wait_time)
 			break;
 		if (signal_queue_len)
@@ -214,6 +233,14 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		fd_update_events(fd, n);
 	}
 	/* the caller will take care of cached events */
+
+#if ENABLE_EPOLL_MIGRATION
+	if (pb_event && !(status) && fd_list_migration) {
+		fd_want_send(fd_list_migration);
+		fd_update_events(fd_list_migration, FD_POLL_OUT);
+		return;
+	}
+#endif	
 }
 
 static int init_epoll_per_thread()

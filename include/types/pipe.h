@@ -23,6 +23,8 @@
 #define _TYPES_PIPE_H
 
 #include <common/config.h>
+#include <types/global.h>
+#include <types/cuju_ft.h>
 
 /* A pipe is described by its read and write FDs, and the data remaining in it.
  * The FDs are valid if there are data pending. The user is not allowed to
@@ -33,6 +35,15 @@ struct pipe {
 	int prod;	/* FD the producer must write to ; -1 if none */
 	int cons;	/* FD the consumer must read from ; -1 if none */
 	struct pipe *next;
+
+#if ENABLE_CUJU_FT
+  int in_fd;
+  int out_fd;
+  int trans_suspend;
+  struct pipe *pipe_dup;
+  unsigned long flush_count;
+  unsigned long transfer_cnt; 
+#endif
 };
 
 #endif /* _TYPES_PIPE_H */

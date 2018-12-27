@@ -40,8 +40,7 @@
 #include <proto/task.h>
 
 #include <types/global.h>
-
-
+#include <types/cuju_ft.h>
 #if defined(CONFIG_HAP_LINUX_SPLICE)
 #include <common/splice.h>
 
@@ -83,6 +82,10 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 
 	conn_refresh_polling_flags(conn);
 	errno = 0;
+
+#if ENABLE_CUJU_FT
+	pipe->in_fd = conn->handle.fd;
+#endif
 
 	/* Under Linux, if FD_POLL_HUP is set, we have reached the end.
 	 * Since older splice() implementations were buggy and returned
@@ -202,6 +205,14 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 {
 	int ret, done;
 
+#if ENABLE_CUJU_FT
+struct pipe *pipe_trace = pipe;
+struct pipe *pipe_buf;
+struct pipe *pipe_dup;
+struct pipe *pipe_trans;
+int t_flag = 0;
+#endif
+
 	if (!conn_ctrl_ready(conn))
 		return 0;
 
@@ -209,6 +220,75 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 		return 0;
 
 	conn_refresh_polling_flags(conn);
+
+#if ENABLE_CUJU_FT
+	pipe->out_fd = conn->handle.fd;
+
+	if (pipe->data) {
+		pipe_buf = get_pipe();
+		pipe_dup = get_pipe();
+
+		ft_dup_pipe(pipe, pipe_buf);
+		ft_dup_pipe(pipe, pipe_dup);
+	}
+	fdtab[conn->handle.fd].enable_migration = 1;
+
+	if (pipe->next) {
+		/* search next is empty insert new incoming to the pipe buffer tail */
+		while (1) {
+			if (pipe_trace->next == NULL) {
+				if(pipe->data) {
+					pipe_trace->next = pipe_buf;
+					pipe_trace->next->pipe_dup = pipe_dup;
+				}
+				break;
+			}
+			pipe_trace = pipe_trace->next;
+
+			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data && !(pipe_trace->trans_suspend)) {
+				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace);
+			}
+		}
+	}
+	else {
+		pipe->next = pipe_buf;
+		pipe->next->pipe_dup = pipe_dup;
+	}
+
+	done = 0;
+
+	pipe_trans = pipe->next;
+	pipe->data = 0;
+
+	pipe_trans->flush_count = ft_get_flushcnt();
+ 
+	while (pipe_trans->data) {
+		ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL, 
+					 pipe_trans->data, SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
+
+		if (ret <= 0) {
+			t_flag = (errno == EAGAIN);
+			if (ret == 0 || t_flag) {
+				pipe_trans->trans_suspend = 1;
+				fd_cant_send(conn->handle.fd);
+				break;
+			}
+			else if (errno == EINTR) {
+				continue;
+			}
+
+			/* here we have another error */
+			conn->flags |= CO_FL_ERROR;
+			break;
+		}
+
+		done += ret;
+		pipe_trans->data -= ret;
+		pipe_trans->transfer_cnt++;
+		pipe_trans->trans_suspend = 0;
+	}
+
+#else
 	done = 0;
 	while (pipe->data) {
 		ret = splice(pipe->cons, NULL, conn->handle.fd, NULL, pipe->data,
@@ -230,10 +310,20 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 		done += ret;
 		pipe->data -= ret;
 	}
+#endif
+
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
 	conn_cond_update_sock_polling(conn);
+
+#if ENABLE_CUJU_FT
+	if (fdtab[conn->handle.fd].enable_migration) {
+		fd_list_migration = pipe_trans->out_fd;
+		conn->flags |= CO_FL_XPRT_WR_ENA;
+	}
+#endif	
+
 	return done;
 }
 
