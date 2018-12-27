@@ -18,7 +18,7 @@ unsigned long ft_get_flushcnt()
     return flush_count++;
 }
 
-int ft_dup_pipe(struct pipe *source, struct pipe *dest)
+int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 {
     int ret = 0;
     static unsigned long retry_cnt = 0;
@@ -35,7 +35,13 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest)
     }
 
     while (1) {
-        ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
+        if (clean) {
+		    ret = splice(source->cons, NULL, dest->prod, NULL, 
+					     source->data, SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
+        }
+        else {
+            ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
+        }
 
         if (ret < 0) {
             if (errno == EAGAIN) {
