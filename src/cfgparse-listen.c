@@ -679,7 +679,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
-	else if (!strcmp(args[0], "bind")) {  /* new listen addresses */
+	else if (!strcmp(args[0], "bind") || !strcmp(args[0], "cuju-ipc")) {  /* new listen addresses */
 		struct listener *l;
 		int cur_arg;
 

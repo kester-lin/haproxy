@@ -1515,6 +1515,7 @@ static void init(int argc, char **argv)
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	int ideal_maxconn;
+	unsigned int ipc_port = 0;
 
 	global.mode = MODE_STARTING;
 	next_argv = copy_argv(argc, argv);
@@ -1763,6 +1764,12 @@ static void init(int argc, char **argv)
 					}
 					break;
 				case 'p' : cfg_pidfile = *argv; break;
+				case 'I' : 
+					ipc_port = atoi(*argv);
+					if (ipc_port < 1 || ipc_port > 65535) {
+						ha_alert("Cuju IPC port number error (%d)\n", ipc_port);
+					}
+					break;
 				default: usage(progname);
 				}
 			}
