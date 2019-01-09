@@ -539,6 +539,12 @@ int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
 		/* tcpv4_add_listener */
 		proto->add(l, port); 
 
+#if ENABLE_CUJU_FT
+		if (bc->cujuipc_idx) {
+			l->cujuipc_idx = 1;
+		}
+#endif
+
 		if (inherited)
 			l->options |= LI_O_INHERITED;
 
