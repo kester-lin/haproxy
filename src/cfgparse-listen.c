@@ -16,6 +16,7 @@
 
 #include <types/capture.h>
 #include <types/compression.h>
+#include <types/cuju_ft_def.h>
 
 #include <proto/acl.h>
 #include <proto/checks.h>
@@ -704,6 +705,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		bind_conf->ux.uid  = global.unix_bind.ux.uid;
 		bind_conf->ux.gid  = global.unix_bind.ux.gid;
 		bind_conf->ux.mode = global.unix_bind.ux.mode;
+
+#if ENABLE_CUJU_FT
+		if(!strcmp(args[0], "cuju-ipc")) {
+			bind_conf->cujuipc_idx = 1;
+		}
+#endif
 
 		/* NOTE: the following line might create several listeners if there
 		 * are comma-separated IPs or port ranges. So all further processing

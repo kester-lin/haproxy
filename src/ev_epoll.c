@@ -30,6 +30,7 @@
 #include <proto/signal.h>
 
 #include <types/cuju_ft.h>
+#include <types/cuju_ft_def.h>
 
 /* private data */
 static THREAD_LOCAL struct epoll_event *epoll_events = NULL;

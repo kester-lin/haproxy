@@ -24,6 +24,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <types/cuju_ft_def.h>
 
 #ifdef USE_OPENSSL
 #include <openssl/ssl.h>
@@ -180,6 +181,9 @@ struct bind_conf {
 		gid_t gid;         /* -1 to leave unchanged */
 		mode_t mode;       /* 0 to leave unchanged */
 	} ux;
+#if ENABLE_CUJU_FT
+	int cujuipc_idx;
+#endif
 };
 
 /* The listener will be directly referenced by the fdtab[] which holds its
@@ -229,6 +233,9 @@ struct listener {
 	struct {
 		struct eb32_node id;	/* place in the tree of used IDs */
 	} conf;				/* config information */
+#if ENABLE_CUJU_FT
+	int cujuipc_idx;
+#endif	
 };
 
 /* Descriptor for a "bind" keyword. The ->parse() function returns 0 in case of

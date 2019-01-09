@@ -34,13 +34,6 @@
 #include <types/task.h>
 #include <types/vars.h>
 
-#define ENABLE_CUJU_FT 1
-
-#if ENABLE_CUJU_FT
-#define ENABLE_EPOLL_MIGRATION 1
-#define ENABLE_EXTEND_CHECK	0
-#endif
-
 #if 0
 #define ENABLE_EPOLL
 #define USE_ACCEPT4

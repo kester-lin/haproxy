@@ -3,6 +3,10 @@
 #include <common/splice.h>
 #include <errno.h>
 #include <types/cuju_ft.h>
+#include <types/global.h>
+#include <types/fd.h>
+
+#include <proto/fd.h>
 
 #ifdef DEBUG_FULL
 #include <assert.h>
@@ -61,5 +65,20 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
     dest->out_fd = source->out_fd;
 
     return ret;
+}
+
+
+
+/* Cuju IPC handler callback */
+void cuju_fd_handler(int fd)
+{
+	struct connection *conn = fdtab[fd].owner;
+
+	if (unlikely(!conn))
+		return;
+
+    printf("cuju_fd_handler fd is %d\n", fd);
+
+	return;
 }
 #endif
