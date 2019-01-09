@@ -601,18 +601,7 @@ static inline void fd_insert(int fd, void *owner, void (*iocb)(int fd), unsigned
 	if (locked)
 		HA_SPIN_LOCK(FD_LOCK, &fdtab[fd].lock);
 	fdtab[fd].owner = owner;
-
-#if ENABLE_CUJU_FT
-	if (((struct listener *)owner)->cujuipc_idx) {
-		fdtab[fd].iocb = cuju_fd_handler;
-	}
-	else {
-		fdtab[fd].iocb = iocb;
-	}
-#else	
 	fdtab[fd].iocb = iocb;
-#endif	
-
 	fdtab[fd].ev = 0;
 	fdtab[fd].linger_risk = 0;
 	fdtab[fd].cloned = 0;
