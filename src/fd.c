@@ -647,8 +647,8 @@ int init_pollers()
 
 		if (!bp || bp->pref == 0)
 			break;
-
-		if (bp->init(bp)) {
+		/* _do_init */
+		if (bp->init(bp)) { 
 			memcpy(&cur_poller, bp, sizeof(*bp));
 			return 1;
 		}
