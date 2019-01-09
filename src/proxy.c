@@ -849,7 +849,7 @@ int start_proxies(int verbose)
 		list_for_each_entry(listener, &curproxy->conf.listeners, by_fe) {
 			if (listener->state != LI_ASSIGNED)
 				continue; /* already started */
-
+			/* uxst_bind_listener, tcp_bind_listener */
 			lerr = listener->proto->bind(listener, msg, sizeof(msg));
 
 			/* errors are reported if <verbose> is set or if they are fatal */

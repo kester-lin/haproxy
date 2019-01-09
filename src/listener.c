@@ -536,8 +536,8 @@ int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
 		memcpy(&l->addr, ss, sizeof(*ss));
 		LIST_INIT(&l->wait_queue);
 		l->state = LI_INIT;
-
-		proto->add(l, port);
+		/* tcpv4_add_listener */
+		proto->add(l, port); 
 
 		if (inherited)
 			l->options |= LI_O_INHERITED;

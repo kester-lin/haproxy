@@ -1989,7 +1989,7 @@ static void init(int argc, char **argv)
 	init_buffer();
 
 	list_for_each_entry(pcf, &post_check_list, list) {
-		err_code |= pcf->fct();
+		err_code |= pcf->fct(); /* start_checks */
 		if (err_code & (ERR_ABORT|ERR_FATAL))
 			exit(1);
 	}
