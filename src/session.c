@@ -160,6 +160,12 @@ int session_accept_fd(struct listener *l, int cfd, struct sockaddr_storage *addr
 	cli_conn->target = &l->obj_type;
 	cli_conn->proxy_netns = l->netns;
 
+#if ENABLE_CUJU_FT
+	if (l->cujuipc_idx) {
+		cli_conn->cujuipc_idx = 1;
+	}
+#endif	
+
 	conn_prepare(cli_conn, l->proto, l->bind_conf->xprt);
 	conn_ctrl_init(cli_conn);
 

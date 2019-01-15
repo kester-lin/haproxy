@@ -208,7 +208,7 @@ SMALL_OPTS =
 # Currently defined DEBUG macros include DEBUG_FULL, DEBUG_MEMORY, DEBUG_FSM,
 # DEBUG_HASH, DEBUG_AUTH, DEBUG_SPOE, DEBUG_UAF and DEBUG_THREAD. Please check
 # sources for exact meaning or do not use at all.
-DEBUG = -DEBUG_FULL
+DEBUG = -DDEBUG_FULL
 
 #### Trace options
 # Use TRACE=1 to trace function calls to file "trace.out" or to stderr if not

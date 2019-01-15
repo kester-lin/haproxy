@@ -1076,9 +1076,8 @@ int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen)
 	listener->state = LI_LISTEN;
 
 #if ENABLE_CUJU_FT
-	if (listener->cujuipc_idx) {
-		listener->proto->accept = cuju_fd_handler;
-	}
+	if(listener->bind_conf->cujuipc_idx)
+		listener->cujuipc_idx = listener->bind_conf->cujuipc_idx;
 #endif
 
 	fd_insert(fd, listener, listener->proto->accept,

@@ -1158,6 +1158,28 @@ static void sess_prepare_conn_req(struct stream *s)
 	}
 
 	/* Try to assign a server */
+#if ENABLE_CUJU_FT	
+	if (!s->sess->listener->cujuipc_idx) {	
+		if (srv_redispatch_connect(s) != 0) {
+			/* We did not get a server. Either we queued the
+			* connection request, or we encountered an error.
+			*/
+			if (si->state == SI_ST_QUE)
+				return;
+
+			/* we did not get any server, let's check the cause */
+			si_shutr(si);
+			si_shutw(si);
+			s->req.flags |= CF_WRITE_ERROR;
+			if (!si->err_type)
+				si->err_type = SI_ET_CONN_OTHER;
+			si->state = SI_ST_CLO;
+			if (s->srv_error)
+				s->srv_error(s, si);
+			return;
+		}
+	}
+#else 
 	if (srv_redispatch_connect(s) != 0) {
 		/* We did not get a server. Either we queued the
 		 * connection request, or we encountered an error.
@@ -1176,6 +1198,9 @@ static void sess_prepare_conn_req(struct stream *s)
 			s->srv_error(s, si);
 		return;
 	}
+#endif
+
+
 
 	/* The server is assigned */
 	s->logs.t_queue = tv_ms_elapsed(&s->logs.tv_accept, &now);
@@ -1703,7 +1728,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	si_b = &s->si[1];
 
 	/* First, attempt to receive pending data from I/O layers */
-	si_sync_recv(si_f);
+ 	si_sync_recv(si_f);
 	si_sync_recv(si_b);
 
 redo:
@@ -1729,11 +1754,11 @@ redo:
 
 	/* update pending events */
 	s->pending_events |= (state & TASK_WOKEN_ANY);
-
+	
 	/* 1a: Check for low level timeouts if needed. We just set a flag on
 	 * stream interfaces when their timeouts have expired.
 	 */
-	if (unlikely(s->pending_events & TASK_WOKEN_TIMER)) {
+	if (unlikely(s->pending_events & TASK_WOKEN_TIMER)) { /* not for IPC */
 		si_check_timeouts(si_f);
 		si_check_timeouts(si_b);
 
@@ -1744,7 +1769,7 @@ redo:
 		 */
 
 		channel_check_timeouts(req);
-
+		/* Frontend -> Haproxy -> Backend */
 		if (unlikely((req->flags & (CF_SHUTW|CF_WRITE_TIMEOUT)) == CF_WRITE_TIMEOUT)) {
 			si_b->flags |= SI_FL_NOLINGER;
 			si_shutw(si_b);
@@ -1757,7 +1782,7 @@ redo:
 		}
 
 		channel_check_timeouts(res);
-
+		/* Backend -> Haproxy -> Frontend */
 		if (unlikely((res->flags & (CF_SHUTW|CF_WRITE_TIMEOUT)) == CF_WRITE_TIMEOUT)) {
 			si_f->flags |= SI_FL_NOLINGER;
 			si_shutw(si_f);
@@ -1825,7 +1850,7 @@ redo:
 			}
 		}
 	}
-
+	/* not for IPC */
 	if (unlikely(si_b->flags & SI_FL_ERR)) {
 		if (si_b->state == SI_ST_EST || si_b->state == SI_ST_DIS) {
 			si_shutr(si_b);
@@ -1846,7 +1871,7 @@ redo:
 			}
 		}
 		/* note: maybe we should process connection errors here ? */
-	}
+	} 
 
 	if (si_b->state == SI_ST_CON) {
 		/* we were trying to establish a connection on the server side,
@@ -2254,11 +2279,21 @@ redo:
 		channel_shutr_now(req);
 
 	/* shutdown(read) pending */
+#if ENABLE_CUJU_FT
+	if (!sess->listener->cujuipc_idx) { 
+		if (unlikely((req->flags & (CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTR_NOW)) {
+			if (si_f->flags & SI_FL_NOHALF)
+				si_f->flags |= SI_FL_NOLINGER;
+			si_shutr(si_f);
+		}
+	}
+#else
 	if (unlikely((req->flags & (CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTR_NOW)) {
 		if (si_f->flags & SI_FL_NOHALF)
 			si_f->flags |= SI_FL_NOLINGER;
 		si_shutr(si_f);
 	}
+#endif	
 
 	/* it's possible that an upper layer has requested a connection setup or abort.
 	 * There are 2 situations where we decide to establish a new connection :
