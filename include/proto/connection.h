@@ -67,7 +67,7 @@ static inline int conn_xprt_ready(const struct connection *conn)
 	int ret = 0;
 	ret = (conn->flags & CO_FL_XPRT_READY);
 	return ret;
-#else	
+#else
 	return (conn->flags & CO_FL_XPRT_READY);
 #endif
 }
@@ -79,9 +79,9 @@ static inline int conn_ctrl_ready(const struct connection *conn)
 	int ret = 0;
 	ret = (conn->flags & CO_FL_CTRL_READY);
 	return ret;
-#else	
+#else
 	return (conn->flags & CO_FL_CTRL_READY);
-#endif	
+#endif
 }
 
 /* Calls the init() function of the transport layer if any and if not done yet,
@@ -125,10 +125,28 @@ static inline void conn_ctrl_init(struct connection *conn)
 	if (!conn_ctrl_ready(conn)) {
 		int fd = conn->handle.fd;
 
+#if ENABLE_CUJU_FT
+		if (conn->cujuipc_idx) {
+			fd_insert(fd, conn, cuju_fd_handler, tid_bit);
+		}
+		else{
+			fd_insert(fd, conn, conn_fd_handler, tid_bit);
+		}
+#else
 		fd_insert(fd, conn, conn_fd_handler, tid_bit);
+#endif
+
 		/* mark the fd as ready so as not to needlessly poll at the beginning */
 		fd_may_recv(fd);
+
+#if ENABLE_CUJU_FT
+		if (!conn->cujuipc_idx) {
+			fd_may_send(fd);
+		}
+#else
 		fd_may_send(fd);
+#endif
+
 		conn->flags |= CO_FL_CTRL_READY;
 	}
 }
@@ -187,7 +205,7 @@ void conn_update_xprt_polling(struct connection *c);
  * has already done it.
  */
 static inline void conn_refresh_polling_flags(struct connection *conn)
-{	
+{
 	if (conn_ctrl_ready(conn) && !(conn->flags & CO_FL_WILL_UPDATE)) {
 		unsigned int flags = conn->flags;
 
@@ -220,21 +238,21 @@ static inline unsigned int conn_xprt_polling_changes(const struct connection *c)
 	unsigned int f = c->flags;
 
 	f &= CO_FL_XPRT_WR_ENA | CO_FL_XPRT_RD_ENA | CO_FL_CURR_WR_ENA |
-	     CO_FL_CURR_RD_ENA | CO_FL_ERROR;
+		 CO_FL_CURR_RD_ENA | CO_FL_ERROR;
 
 	f = (f ^ (f << 1)) & (CO_FL_CURR_WR_ENA|CO_FL_CURR_RD_ENA);    /* test C ^ D */
 
 	ret = f & (CO_FL_CURR_WR_ENA | CO_FL_CURR_RD_ENA | CO_FL_ERROR);
 
 	return ret;
-#else	
+#else
 	unsigned int f = c->flags;
 	f &= CO_FL_XPRT_WR_ENA | CO_FL_XPRT_RD_ENA | CO_FL_CURR_WR_ENA |
-	     CO_FL_CURR_RD_ENA | CO_FL_ERROR;
+		 CO_FL_CURR_RD_ENA | CO_FL_ERROR;
 
 	f = (f ^ (f << 1)) & (CO_FL_CURR_WR_ENA|CO_FL_CURR_RD_ENA);    /* test C ^ D */
 	return f & (CO_FL_CURR_WR_ENA | CO_FL_CURR_RD_ENA | CO_FL_ERROR);
-#endif	
+#endif
 }
 
 /* inspects c->flags and returns non-zero if SOCK ENA changes from the CURR ENA
@@ -254,7 +272,7 @@ static inline unsigned int conn_sock_polling_changes(const struct connection *c)
 {
 	unsigned int f = c->flags;
 	f &= CO_FL_SOCK_WR_ENA | CO_FL_SOCK_RD_ENA | CO_FL_CURR_WR_ENA |
-	     CO_FL_CURR_RD_ENA | CO_FL_ERROR;
+		 CO_FL_CURR_RD_ENA | CO_FL_ERROR;
 
 	f = (f ^ (f << 2)) & (CO_FL_CURR_WR_ENA|CO_FL_CURR_RD_ENA);    /* test C ^ S */
 	return f & (CO_FL_CURR_WR_ENA | CO_FL_CURR_RD_ENA | CO_FL_ERROR);
@@ -290,8 +308,8 @@ static inline void conn_cond_update_sock_polling(struct connection *c)
 static inline void conn_stop_polling(struct connection *c)
 {
 	c->flags &= ~(CO_FL_CURR_RD_ENA | CO_FL_CURR_WR_ENA |
-		      CO_FL_SOCK_RD_ENA | CO_FL_SOCK_WR_ENA |
-		      CO_FL_XPRT_RD_ENA | CO_FL_XPRT_WR_ENA);
+				  CO_FL_SOCK_RD_ENA | CO_FL_SOCK_WR_ENA |
+				  CO_FL_XPRT_RD_ENA | CO_FL_XPRT_WR_ENA);
 	if (!(c->flags & CO_FL_WILL_UPDATE) && conn_ctrl_ready(c))
 		fd_stop_both(c->handle.fd);
 }
@@ -764,8 +782,8 @@ static inline void conn_get_from_addr(struct connection *conn)
 		return;
 
 	if (conn->ctrl->get_src(conn->handle.fd, (struct sockaddr *)&conn->addr.from,
-	                        sizeof(conn->addr.from),
-	                        obj_type(conn->target) != OBJ_TYPE_LISTENER) == -1)
+							sizeof(conn->addr.from),
+							obj_type(conn->target) != OBJ_TYPE_LISTENER) == -1)
 		return;
 	conn->flags |= CO_FL_ADDR_FROM_SET;
 }
@@ -780,8 +798,8 @@ static inline void conn_get_to_addr(struct connection *conn)
 		return;
 
 	if (conn->ctrl->get_dst(conn->handle.fd, (struct sockaddr *)&conn->addr.to,
-	                        sizeof(conn->addr.to),
-	                        obj_type(conn->target) != OBJ_TYPE_LISTENER) == -1)
+							sizeof(conn->addr.to),
+							obj_type(conn->target) != OBJ_TYPE_LISTENER) == -1)
 		return;
 	conn->flags |= CO_FL_ADDR_TO_SET;
 }
@@ -856,7 +874,7 @@ static inline struct wait_event *wl_set_waitcb(struct wait_event *wl, struct tas
  * Returns < 0 on error.
  */
 static inline int conn_install_mux(struct connection *conn, const struct mux_ops *mux,
-                                   void *ctx, struct proxy *prx, struct session *sess)
+								   void *ctx, struct proxy *prx, struct session *sess)
 {
 	int ret;
 
@@ -1004,7 +1022,7 @@ static inline void list_mux_proto(FILE *out)
 	char *mode, *side;
 
 	fprintf(out, "Available multiplexer protocols :\n"
-		"(protocols marked as <default> cannot be specified using 'proto' keyword)\n");
+				 "(protocols marked as <default> cannot be specified using 'proto' keyword)\n");
 	list_for_each_entry(item, &mux_proto_list.list, list) {
 		proto = item->token;
 
@@ -1031,7 +1049,7 @@ static inline void list_mux_proto(FILE *out)
 			side = "NONE";
 
 		fprintf(out, " %15s : mode=%-10s side=%s\n",
-			(proto.len ? proto.ptr : "<default>"), mode, side);
+				(proto.len ? proto.ptr : "<default>"), mode, side);
 	}
 }
 
@@ -1042,8 +1060,8 @@ static inline void list_mux_proto(FILE *out)
  * null if the code improperly registered the default mux to use as a fallback.
  */
 static inline const struct mux_proto_list *conn_get_best_mux_entry(
-        const struct ist mux_proto,
-        int proto_side, int proto_mode)
+	const struct ist mux_proto,
+	int proto_side, int proto_mode)
 {
 	struct mux_proto_list *item;
 	struct mux_proto_list *fallback = NULL;
@@ -1069,8 +1087,8 @@ static inline const struct mux_proto_list *conn_get_best_mux_entry(
  * null if the code improperly registered the default mux to use as a fallback.
  */
 static inline const struct mux_ops *conn_get_best_mux(struct connection *conn,
-						      const struct ist mux_proto,
-						      int proto_side, int proto_mode)
+													  const struct ist mux_proto,
+													  int proto_side, int proto_mode)
 {
 	const struct mux_proto_list *item;
 

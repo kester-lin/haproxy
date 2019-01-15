@@ -1273,8 +1273,9 @@ int si_cs_recv(struct conn_stream *cs)
 	       (!(cs->flags & (CS_FL_ERROR|CS_FL_EOS))) && !(ic->flags & CF_SHUTR))) {
 		/* <max> may be null. This is the mux responsibility to set
 		 * CS_FL_RCV_MORE on the CS if more space is needed.
-		 */
+		 */  
 		max = channel_recv_max(ic);
+		/* mux_pt_rcv_buf -> raw_sock_to_buf */
 		ret = cs->conn->mux->rcv_buf(cs, &ic->buf, max,
 		          flags |
 		          (co_data(ic) ? CO_RFL_BUF_WET : 0) |

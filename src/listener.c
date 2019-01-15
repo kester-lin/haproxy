@@ -223,7 +223,12 @@ static void enable_listener(struct listener *listener)
 	HA_SPIN_LOCK(LISTENER_LOCK, &listener->lock);
 	if (listener->state == LI_LISTEN) {
 		if ((global.mode & (MODE_DAEMON | MODE_MWORKER)) &&
+<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 		    !(proc_mask(listener->bind_conf->bind_proc) & pid_bit)) {
+=======
+			listener->bind_conf->bind_proc &&
+			!(listener->bind_conf->bind_proc & pid_bit)) {
+>>>>>>> Add: Cuju IPC 0.04 version
 			/* we don't want to enable this listener and don't
 			 * want any fd event to reach it.
 			 */
@@ -244,8 +249,8 @@ static void enable_listener(struct listener *listener)
 	}
 	/* if this listener is supposed to be only in the master, close it in the workers */
 	if ((global.mode & MODE_MWORKER) &&
-	    (listener->options & LI_O_MWORKER) &&
-	    master == 0) {
+		(listener->options & LI_O_MWORKER) &&
+		master == 0) {
 		do_unbind_listener(listener, 1);
 	}
 	HA_SPIN_UNLOCK(LISTENER_LOCK, &listener->lock);
@@ -264,7 +269,7 @@ static void disable_listener(struct listener *listener)
 		fd_stop_recv(listener->fd);
 	LIST_DEL_LOCKED(&listener->wait_queue);
 	listener->state = LI_LISTEN;
-  end:
+end:
 	HA_SPIN_UNLOCK(LISTENER_LOCK, &listener->lock);
 }
 
@@ -302,7 +307,7 @@ int pause_listener(struct listener *l)
 
 	fd_stop_recv(l->fd);
 	l->state = LI_PAUSED;
-  end:
+end:
 	HA_SPIN_UNLOCK(LISTENER_LOCK, &l->lock);
 	return ret;
 }
@@ -324,7 +329,12 @@ int resume_listener(struct listener *l)
 	HA_SPIN_LOCK(LISTENER_LOCK, &l->lock);
 
 	if ((global.mode & (MODE_DAEMON | MODE_MWORKER)) &&
+<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 	    !(proc_mask(l->bind_conf->bind_proc) & pid_bit))
+=======
+		l->bind_conf->bind_proc &&
+		!(l->bind_conf->bind_proc & pid_bit))
+>>>>>>> Add: Cuju IPC 0.04 version
 		goto end;
 
 	if (l->state == LI_ASSIGNED) {
@@ -349,8 +359,13 @@ int resume_listener(struct listener *l)
 	}
 
 	if (l->proto->sock_prot == IPPROTO_TCP &&
+<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 	    l->state == LI_PAUSED &&
 	    listen(l->fd, listener_backlog(l)) != 0) {
+=======
+		l->state == LI_PAUSED &&
+		listen(l->fd, l->backlog ? l->backlog : l->maxconn) != 0) {
+>>>>>>> Add: Cuju IPC 0.04 version
 		ret = 0;
 		goto end;
 	}
@@ -367,7 +382,7 @@ int resume_listener(struct listener *l)
 
 	fd_want_recv(l->fd);
 	l->state = LI_READY;
-  end:
+end:
 	HA_SPIN_UNLOCK(LISTENER_LOCK, &l->lock);
 	return ret;
 }
@@ -510,7 +525,7 @@ int unbind_all_listeners(struct protocol *proto)
  * set in <err>.
  */
 int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
-                     int portl, int porth, int fd, int inherited, char **err)
+					 int portl, int porth, int fd, int inherited, char **err)
 {
 	struct protocol *proto = protocol_by_family(ss->ss_family);
 	struct listener *l;
@@ -538,13 +553,6 @@ int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
 		l->state = LI_INIT;
 		/* tcpv4_add_listener */
 		proto->add(l, port); 
-
-#if ENABLE_CUJU_FT
-		if (bc->cujuipc_idx) {
-			l->cujuipc_idx = 1;
-		}
-#endif
-
 		if (inherited)
 			l->options |= LI_O_INHERITED;
 
@@ -618,6 +626,10 @@ void listener_accept(int fd)
 		return;
 	p = l->bind_conf->frontend;
 	max_accept = l->maxaccept ? l->maxaccept : 1;
+
+#if ENABLE_CUJU_FT
+
+#endif
 
 	if (!(l->options & LI_O_UNLIMITED) && global.sps_lim) {
 		int max = freq_ctr_remain(&global.sess_per_sec, global.sps_lim, 0);
@@ -751,13 +763,13 @@ void listener_accept(int fd)
 		} else
 
 #ifdef USE_ACCEPT4
-		/* only call accept4() if it's known to be safe, otherwise
+			/* only call accept4() if it's known to be safe, otherwise
 		 * fallback to the legacy accept() + fcntl().
 		 */
-		if (unlikely(accept4_broken ||
-			((cfd = accept4(fd, (struct sockaddr *)&addr, &laddr, SOCK_NONBLOCK)) == -1 &&
-			(errno == ENOSYS || errno == EINVAL || errno == EBADF) &&
-			(accept4_broken = 1))))
+			if (unlikely(accept4_broken ||
+						 ((cfd = accept4(fd, (struct sockaddr *)&addr, &laddr, SOCK_NONBLOCK)) == -1 &&
+						  (errno == ENOSYS || errno == EINVAL || errno == EBADF) &&
+						  (accept4_broken = 1))))
 #endif
 			if ((cfd = accept(fd, (struct sockaddr *)&addr, &laddr)) != -1)
 				fcntl(cfd, F_SETFL, O_NONBLOCK);
@@ -790,21 +802,21 @@ void listener_accept(int fd)
 			case ENFILE:
 				if (p)
 					send_log(p, LOG_EMERG,
-						 "Proxy %s reached system FD limit (maxsock=%d). Please check system tunables.\n",
-						 p->id, global.maxsock);
+							 "Proxy %s reached system FD limit (maxsock=%d). Please check system tunables.\n",
+							 p->id, global.maxsock);
 				goto transient_error;
 			case EMFILE:
 				if (p)
 					send_log(p, LOG_EMERG,
-						 "Proxy %s reached process FD limit (maxsock=%d). Please check 'ulimit-n' and restart.\n",
-						 p->id, global.maxsock);
+							 "Proxy %s reached process FD limit (maxsock=%d). Please check 'ulimit-n' and restart.\n",
+							 p->id, global.maxsock);
 				goto transient_error;
 			case ENOBUFS:
 			case ENOMEM:
 				if (p)
 					send_log(p, LOG_EMERG,
-						 "Proxy %s reached system memory limit (maxsock=%d). Please check system tunables.\n",
-						 p->id, global.maxsock);
+							 "Proxy %s reached system memory limit (maxsock=%d). Please check system tunables.\n",
+							 p->id, global.maxsock);
 				goto transient_error;
 			default:
 				/* unexpected result, let's give up and let other tasks run */
@@ -832,8 +844,8 @@ void listener_accept(int fd)
 
 		if (unlikely(cfd >= global.maxsock)) {
 			send_log(p, LOG_EMERG,
-				 "Proxy %s reached the configured maximum connection limit. Please check the global 'maxconn' value.\n",
-				 p->id);
+					 "Proxy %s reached the configured maximum connection limit. Please check the global 'maxconn' value.\n",
+					 p->id);
 			close(cfd);
 			limit_listener(l, &global_listener_queue);
 			task_schedule(global_listener_queue_task, tick_add(now_ms, 1000)); /* try again in 1 second */
@@ -927,17 +939,18 @@ void listener_accept(int fd)
 	} /* end of for (max_accept--) */
 
 	/* we've exhausted max_accept, so there is no need to poll again */
- stop:
+stop:
 	fd_done_recv(fd);
 	goto end;
 
- transient_error:
+transient_error:
 	/* pause the listener and try again in 100 ms */
 	expire = tick_add(now_ms, 100);
 
- wait_expire:
+wait_expire:
 	limit_listener(l, &global_listener_queue);
 	task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
+<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
  end:
 	if (next_conn)
 		HA_ATOMIC_SUB(&l->nbconn, 1);
@@ -961,6 +974,10 @@ void listener_accept(int fd)
 		    (!p->fe_sps_lim || freq_ctr_remain(&p->fe_sess_per_sec, p->fe_sps_lim, 0) > 0))
 			dequeue_all_listeners(&p->listener_queue);
 	}
+=======
+end:
+	HA_SPIN_UNLOCK(LISTENER_LOCK, &l->lock);
+>>>>>>> Add: Cuju IPC 0.04 version
 }
 
 /* Notify the listener that a connection initiated from it was released. This
@@ -986,7 +1003,7 @@ void listener_release(struct listener *l)
 		dequeue_all_listeners(&global_listener_queue);
 
 	if (!LIST_ISEMPTY(&fe->listener_queue) &&
-	    (!fe->fe_sps_lim || freq_ctr_remain(&fe->fe_sess_per_sec, fe->fe_sps_lim, 0) > 0))
+		(!fe->fe_sps_lim || freq_ctr_remain(&fe->fe_sess_per_sec, fe->fe_sps_lim, 0) > 0))
 		dequeue_all_listeners(&fe->listener_queue);
 }
 
@@ -1020,7 +1037,7 @@ struct bind_kw *bind_find_kw(const char *kw)
 	list_for_each_entry(kwl, &bind_keywords.list, list) {
 		for (index = 0; kwl->kw[index].kw != NULL; index++) {
 			if ((strncmp(kwl->kw[index].kw, kw, kwend - kw) == 0) &&
-			    kwl->kw[index].kw[kwend-kw] == 0) {
+				kwl->kw[index].kw[kwend-kw] == 0) {
 				if (kwl->kw[index].parse)
 					return &kwl->kw[index]; /* found it !*/
 				else
@@ -1044,12 +1061,12 @@ void bind_dump_kws(char **out)
 	list_for_each_entry(kwl, &bind_keywords.list, list) {
 		for (index = 0; kwl->kw[index].kw != NULL; index++) {
 			if (kwl->kw[index].parse ||
-			    bind_find_kw(kwl->kw[index].kw) == &kwl->kw[index]) {
+				bind_find_kw(kwl->kw[index].kw) == &kwl->kw[index]) {
 				memprintf(out, "%s[%4s] %s%s%s\n", *out ? *out : "",
-				          kwl->scope,
-				          kwl->kw[index].kw,
-				          kwl->kw[index].skip ? " <arg>" : "",
-				          kwl->kw[index].parse ? "" : " (not supported)");
+						  kwl->scope,
+						  kwl->kw[index].kw,
+						  kwl->kw[index].skip ? " <arg>" : "",
+						  kwl->kw[index].parse ? "" : " (not supported)");
 			}
 		}
 	}
@@ -1170,7 +1187,7 @@ static int bind_parse_id(char **args, int cur_arg, struct proxy *px, struct bind
 	struct listener *l, *new;
 	char *error;
 
-	if (conf->listeners.n != conf->listeners.p) {
+	if (conf->listeners.n != conf->listeners.p) { 
 		memprintf(err, "'%s' can only be used with a single socket", args[cur_arg]);
 		return ERR_ALERT | ERR_FATAL;
 	}
@@ -1197,8 +1214,8 @@ static int bind_parse_id(char **args, int cur_arg, struct proxy *px, struct bind
 	if (node) {
 		l = container_of(node, struct listener, conf.id);
 		memprintf(err, "'%s' : custom id %d already used at %s:%d ('bind %s')",
-		          args[cur_arg], l->luid, l->bind_conf->file, l->bind_conf->line,
-		          l->bind_conf->arg);
+				  args[cur_arg], l->luid, l->bind_conf->file, l->bind_conf->line,
+				  l->bind_conf->arg);
 		return ERR_ALERT | ERR_FATAL;
 	}
 
