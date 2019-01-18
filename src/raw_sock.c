@@ -413,13 +413,6 @@ static size_t raw_sock_to_buf(struct connection *conn, struct buffer *buf, size_
 			goto read0;
 		}
 		else if (errno == EAGAIN || errno == ENOTCONN) {
-#ifdef DEBUG_FULL
-			if (errno == EAGAIN)
-				printf("EAGAIN\n");
-
-			if (errno == ENOTCONN)
-				printf("ENOTCONN\n");
-#endif
 			fd_cant_recv(conn->handle.fd);
 			break;
 		}
