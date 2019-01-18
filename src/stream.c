@@ -2036,6 +2036,12 @@ redo:
 
  resync_response:
 	/* Analyse response */
+#if ENABLE_CUJU_FT
+	if (!sess->listener->cujuipc_idx) { 
+		si_b->state = SI_ST_CLO;
+	}
+#endif	
+
 
 	if (((res->flags & ~rpf_last) & CF_MASK_ANALYSER) ||
 		 (res->flags ^ rpf_last) & CF_MASK_STATIC ||

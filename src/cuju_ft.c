@@ -230,6 +230,38 @@ process_handshake:
 	return;
 }
 
+
+
+int cuju_process(struct conn_stream *cs)
+{
+	struct connection *conn = cs->conn;
+	struct stream_interface *si = cs->data;
+	struct channel *ic = si_ic(si);
+	//struct channel *oc = si_oc(si);
+
+	printf("%s\n", __func__);
+
+	if (ic->buf.data) {
+
+		printf("%s\n", ic->buf.area);
+	}
+
+	/* clear */
+	ic->buf.data = 0;	
+
+	if (cs->conn->cujuipc_idx) {
+		cs->conn->flags &= ~CO_FL_CURR_RD_ENA;
+
+		conn_update_xprt_polling(conn);
+
+		fd_cant_recv(conn->handle.fd);
+
+	}
+
+
+	return 0;
+}
+
 #if 0
 /* Processes the client, server, request and response jobs of a stream task,
  * then puts it back to the wait queue in a clean state, or cleans up its

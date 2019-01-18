@@ -749,9 +749,18 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 		ret = si_cs_send(cs);
 	if (!(si->wait_event.events & SUB_RETRY_RECV))
 		ret |= si_cs_recv(cs);
+#if ENABLE_CUJU_FT
+	if (!(cs->conn->cujuipc_idx)) {
+		if (ret != 0)
+			si_cs_process(cs);
+	}
+	else {
+		cuju_process(cs);
+	}
+#else		
 	if (ret != 0)
 		si_cs_process(cs);
-
+#endif
 	return (NULL);
 }
 
@@ -1345,6 +1354,8 @@ int si_cs_recv(struct conn_stream *cs)
 		 * right now.
 		 */
 		if (si_rx_blocked(si))
+			break;
+		if (cs->conn->cujuipc_idx && cur_read > 0)
 			break;
 	} /* while !flags */
 
