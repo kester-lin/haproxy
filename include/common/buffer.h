@@ -139,7 +139,7 @@ static inline void b_free(struct buffer *buf)
  */
 static inline struct buffer *b_alloc_margin(struct buffer *buf, int margin)
 {
-	char *area;
+	char *area = NULL;
 	ssize_t idx;
 	unsigned int cached;
 

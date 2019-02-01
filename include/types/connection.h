@@ -456,6 +456,7 @@ struct connection {
 	unsigned int idle_time;                 /* Time the connection was added to the idle list, or 0 if not in the idle list */
 #if ENABLE_CUJU_FT
 	int cujuipc_idx;
+	struct gctl_ipc gctl_ipc;
 #endif	
 
 };
