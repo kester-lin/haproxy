@@ -44,6 +44,10 @@
 #if defined(CONFIG_HAP_LINUX_SPLICE)
 #include <common/splice.h>
 
+#ifdef DEBUG_FULL
+#include <assert.h>
+#endif
+
 /* A pipe contains 16 segments max, and it's common to see segments of 1448 bytes
  * because of timestamps. Use this as a hint for not looping on splice().
  */
@@ -203,7 +207,7 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
  */
 int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 {
-	int ret, done;
+	int ret, done;	
 
 #if ENABLE_CUJU_FT
 struct pipe *pipe_trace = pipe;
@@ -211,6 +215,7 @@ struct pipe *pipe_buf;
 struct pipe *pipe_dup;
 struct pipe *pipe_trans;
 int t_flag = 0;
+u_int32_t curr_epoch_id;
 #endif
 
 	if (!conn_ctrl_ready(conn))
@@ -228,8 +233,12 @@ int t_flag = 0;
 		pipe_buf = get_pipe();
 		pipe_dup = get_pipe();
 
+		ft_clean_pipe(pipe_buf);
+		ft_clean_pipe(pipe_dup);
+
 		ft_dup_pipe(pipe, pipe_buf, 0);
 		ft_dup_pipe(pipe, pipe_dup, 1);
+		fd_pipe_cnt++;
 	}
 	fdtab[conn->handle.fd].enable_migration = 1;
 
@@ -245,14 +254,24 @@ int t_flag = 0;
 			}
 			pipe_trace = pipe_trace->next;
 
-			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data && !(pipe_trace->trans_suspend)) {
+			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data &&
+			   !(pipe_trace->trans_suspend) && !(pipe_trace->data)) {
 				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, 0);
 			}
 		}
 	}
 	else {
+		if (pipe_buf == NULL || pipe_dup == NULL) {
+#if DEBUG_FULL			
+			assert(1);
+#else
+			return 0;
+#endif				
+		}
+
 		pipe->next = pipe_buf;
 		pipe->next->pipe_dup = pipe_dup;
+			  //0x0	
 	}
 
 	done = 0;
@@ -260,20 +279,52 @@ int t_flag = 0;
 	pipe_trans = pipe->next;
 	pipe->data = 0;
 
-	pipe_trans->flush_count = ft_get_flushcnt();
- 
+	if (pipe_trans == NULL) {
+		printf("pipe_trans is NULL\n");
+		assert(1);
+	}
+
+
+#if 0
+	pipe_trans->epoch_id = ft_get_flushcnt();
+#else
+	curr_epoch_id = ft_get_flushcnt();
+
+	if(pipe_trans->epoch_idx) {
+		/* check for release */
+		ft_release_pipe(pipe, curr_epoch_id, fd_pipe_cnt);
+		pipe_trans = pipe->next;
+
+		if (pipe_trans == NULL) {
+			printf("pipe_trans is NULL\n");
+			empty_pipe = 1;
+			goto after_send;
+		}
+
+	}
+	else {
+		pipe_trans->epoch_idx = 1;
+		pipe_trans->epoch_id = curr_epoch_id;
+	}
+#endif	
+	/* WRITE */
 	while (pipe_trans->data) {
 		ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL, 
 					 pipe_trans->data, SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
 
 		if (ret <= 0) {
+			//pipe_trans->trans_suspend = 1;
 			t_flag = (errno == EAGAIN);
+
+			//printf("RET is %d  t_flag is %d\n", ret, t_flag);
 			if (ret == 0 || t_flag) {
-				pipe_trans->trans_suspend = 1;
+				printf("ret == 0 || t_flag\n");
+				pipe_trans->trans_suspend = 1;				
 				fd_cant_send(conn->handle.fd);
 				break;
 			}
 			else if (errno == EINTR) {
+				//printf("errno == EINTR\n");
 				continue;
 			}
 
@@ -316,16 +367,26 @@ int t_flag = 0;
 	}
 #endif
 
+after_send:
+
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
 	conn_cond_update_sock_polling(conn);
 
 #if ENABLE_CUJU_FT
+	if (pipe->next == NULL) {
+		fd_list_migration = 0;
+		fdtab[conn->handle.fd].enable_migration = 0;
+		return done;
+	}
+ 
 	if (fdtab[conn->handle.fd].enable_migration) {
 		fd_list_migration = pipe_trans->out_fd;
 		conn->flags |= CO_FL_XPRT_WR_ENA;
 	}
+
+
 #endif	
 
 	return done;

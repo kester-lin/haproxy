@@ -1,7 +1,8 @@
 #define _GNU_SOURCE
 
-#include <common/splice.h>
 #include <errno.h>
+
+#include <common/splice.h>
 #include <types/cuju_ft.h>
 #include <types/global.h>
 #include <types/fd.h>
@@ -17,67 +18,131 @@
 
 #if ENABLE_CUJU_FT
 int fd_list_migration = 0;
+int fd_pipe_cnt = 0;
+int empty_pipe = 0;
 
-unsigned long ft_get_flushcnt() 
+struct gctl_ipc gctl_ipc;
+
+//unsigned long flush_count = 0;
+unsigned long ft_get_flushcnt()
 {
-    static unsigned long flush_count = 0;
+	/* FAKE */
+	//static unsigned long flush_count = 0;
 
-    return flush_count++;
+	/* REAL */
+	unsigned long flush_count = gctl_ipc.ephch_id;
+
+	return flush_count++;
 }
 
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 {
-    int ret = 0;
-    static unsigned long retry_cnt = 0;
+	int ret = 0;
+	static unsigned long retry_cnt = 0;
 
-    if (!source->data) {
-        return 0;
-    }
-    if (dest->data) {
-#ifdef DEBUG_FULL        
-        assert(1);
+	if (!source->data) {
+#ifdef DEBUG_FULL
+		printf("assert in %s source data is zero\n", __func__);
+		assert(1);
 #else
-        return 0;
-#endif        
-    }
+		return 0;
+#endif
+	}
 
-    while (1) {
-        if (clean) {
-		    ret = splice(source->cons, NULL, dest->prod, NULL, 
-					     source->data, SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
-        }
-        else {
-            ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
-        }
+	if (dest->data) {
+#ifdef DEBUG_FULL
+		printf("assert in %s dest data is not empty\n", __func__);
+		assert(1);
+#else
+		return 0;
+#endif
+	}
 
-        if (ret < 0) {
-            if (errno == EAGAIN) {
-                retry_cnt++;
-                ret = 0;
-                continue;
-            }
-            
-            return ret;
-        }
+	while (1) {
+		if (clean) {
+			ret = splice(source->cons, NULL, dest->prod, NULL,
+						 source->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+		}
+		else {
+			ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
+		}
 
-        break;
-    }
+		if (ret < 0) {
+			if (errno == EAGAIN) {
+				retry_cnt++;
+				ret = 0;
+				continue;
+			}
 
-    dest->data = source->data;
-    dest->in_fd = source->in_fd;
-    dest->out_fd = source->out_fd;
+			return ret;
+		}
 
-    return ret;
+		break;
+	}
+
+	dest->data = source->data;
+	dest->in_fd = source->in_fd;
+	dest->out_fd = source->out_fd;
+
+	return ret;
 }
 
+int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int pipe_cnt)
+{
+	int ret = 0;
+	struct pipe *pipe_trace = pipe;
+	struct pipe *pipe_prev = NULL;
 
+	if (pipe->next)
+	{
+		/* search next is empty insert new incoming to the pipe buffer tail */
+		while (1)
+		{
+			if (pipe_trace == NULL)
+			{
+				break;
+			}
+
+			if (pipe_trace->next == NULL) {
+				break;
+			}
+			
+			pipe_prev = pipe_trace;
+			pipe_trace = pipe_trace->next;
+
+			/* TODO: consider overflow */
+			if (pipe_trace->epoch_id < epoch_id)
+			{
+				pipe_prev->next = pipe_trace->next;
+				put_pipe(pipe_trace->pipe_dup);
+				put_pipe(pipe_trace);
+				fd_pipe_cnt--;
+				pipe_trace = pipe_prev->next;
+				pipe_cnt--;
+			}
+		}
+	}
+
+	return ret;
+}
+
+void ft_clean_pipe(struct pipe *pipe)
+{
+	pipe->pipe_dup = NULL;
+	pipe->epoch_id = 0;
+	pipe->epoch_idx = 0;
+	pipe->in_fd = 0;
+	pipe->out_fd = 0;
+	pipe->trans_suspend = 0;
+	pipe->transfer_cnt = 0;
+}
 
 /* Cuju IPC handler callback */
 void cuju_fd_handler(int fd)
 {
 	struct connection *conn = fdtab[fd].owner;
-    unsigned int flags;
-    int io_available = 0;
+	unsigned int flags;
+	int io_available = 0;
 
 	if (unlikely(!conn))
 		return;
@@ -85,12 +150,12 @@ void cuju_fd_handler(int fd)
 	conn_refresh_polling_flags(conn);
 	conn->flags |= CO_FL_WILL_UPDATE;
 
-    /* ensure to call the wake handler upon error */
-	flags = conn->flags & ~CO_FL_ERROR;         
+	/* ensure to call the wake handler upon error */
+	flags = conn->flags & ~CO_FL_ERROR;
 
-    printf("cuju_fd_handler fd is %d\n", fd);
+	printf("cuju_fd_handler fd is %d\n", fd);
 
-    //fd_stop_recv(fd);
+	//fd_stop_recv(fd);
 process_handshake:
 	/* The handshake callbacks are called in sequence. If either of them is
 	 * missing something, it must enable the required polling at the socket
@@ -100,7 +165,8 @@ process_handshake:
 	 * handling is also performed here in order to reduce the number of tests
 	 * around.
 	 */
-	while (unlikely(conn->flags & (CO_FL_HANDSHAKE | CO_FL_ERROR))) {
+	while (unlikely(conn->flags & (CO_FL_HANDSHAKE | CO_FL_ERROR)))
+	{
 		if (unlikely(conn->flags & CO_FL_ERROR))
 			goto leave;
 
@@ -135,9 +201,9 @@ process_handshake:
 	 */
 	if (conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
 		return;
-		
+
 	if (conn->xprt && fd_send_ready(fd) &&
-		((conn->flags & (CO_FL_XPRT_WR_ENA|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_WR_ENA)) {
+		((conn->flags & (CO_FL_XPRT_WR_ENA | CO_FL_ERROR | CO_FL_HANDSHAKE)) == CO_FL_XPRT_WR_ENA)) {
 		/* force reporting of activity by clearing the previous flags :
 		 * we'll have at least ERROR or CONNECTED at the end of an I/O,
 		 * both of which will be detected below.
@@ -157,7 +223,7 @@ process_handshake:
 	 * changes due to a quick unexpected close().
 	 */
 	if (conn->xprt && fd_recv_ready(fd) &&
-	    ((conn->flags & (CO_FL_XPRT_RD_ENA|CO_FL_WAIT_ROOM|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_RD_ENA)) {
+		((conn->flags & (CO_FL_XPRT_RD_ENA | CO_FL_WAIT_ROOM | CO_FL_ERROR | CO_FL_HANDSHAKE)) == CO_FL_XPRT_RD_ENA)) {
 		/* force reporting of activity by clearing the previous flags :
 		 * we'll have at least ERROR or CONNECTED at the end of an I/O,
 		 * both of which will be detected below.
@@ -169,6 +235,7 @@ process_handshake:
 			conn->recv_wait = NULL;
 		} else
 			io_available = 1;
+		
 		__conn_xprt_stop_recv(conn);
 	}
 
@@ -186,7 +253,7 @@ process_handshake:
 		if (!tcp_connect_probe(conn))
 			goto leave;
 	}
- leave:
+leave:
 	/* Verify if the connection just established. */
 	if (unlikely(!(conn->flags & (CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN | CO_FL_CONNECTED))))
 		conn->flags |= CO_FL_CONNECTED;
@@ -198,7 +265,7 @@ process_handshake:
 	 * unregister itself once called.
 	 */
 	if (((conn->flags ^ flags) & CO_FL_NOTIFY_DONE) &&
-	    conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
+		conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
 		return;
 
 	/* The wake callback is normally used to notify the data layer about
@@ -217,20 +284,17 @@ process_handshake:
 	 * the fd (and return < 0 in this case).
 	 */
 	if ((io_available || (((conn->flags ^ flags) & CO_FL_NOTIFY_DATA) ||
-	     ((flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) != CO_FL_CONNECTED &&
-	      (conn->flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) == CO_FL_CONNECTED))) &&
-	    conn->mux->wake && conn->mux->wake(conn) < 0)
+						  ((flags & (CO_FL_CONNECTED | CO_FL_HANDSHAKE)) != CO_FL_CONNECTED &&
+						   (conn->flags & (CO_FL_CONNECTED | CO_FL_HANDSHAKE)) == CO_FL_CONNECTED))) &&
+		conn->mux->wake && conn->mux->wake(conn) < 0)
 		return;
 
 	/* commit polling changes */
 	conn->flags &= ~CO_FL_WILL_UPDATE;
 	conn_cond_update_polling(conn);
 
- 
 	return;
 }
-
-
 
 int cuju_process(struct conn_stream *cs)
 {
@@ -239,7 +303,7 @@ int cuju_process(struct conn_stream *cs)
 	struct channel *ic = si_ic(si);
 	//struct channel *oc = si_oc(si);
 	//unsigned int idx = 0;
-	struct proto_ipc* ipc_ptr = NULL;
+	struct proto_ipc *ipc_ptr = NULL;
 
 	*(((char *)ic->buf.area) + ic->buf.data) = '\0';
 
@@ -258,24 +322,29 @@ int cuju_process(struct conn_stream *cs)
 		if (idx % 16 == 15)
 			printf("\n"); 
 	}
-	printf("============================================================\n"); 
+	printf("============================================================\n");
 #endif
 
-	ipc_ptr = (struct proto_ipc*)ic->buf.area;
+	ipc_ptr = (struct proto_ipc *)ic->buf.area;
 
+	printf("ipc_ptr->ephch_id: %d\n", ipc_ptr->ephch_id);
+#if 0
 	printf("ipc_ptr->transmit_cnt: %d\n", ipc_ptr->transmit_cnt);
 	printf("ipc_ptr->ipc_mode: %d\n", ipc_ptr->ipc_mode);
 	printf("ipc_ptr->cuju_ft_mode: %d\n", ipc_ptr->cuju_ft_mode);
 	printf("ipc_ptr->gft_id: %d\n", ipc_ptr->gft_id);
-	printf("ipc_ptr->ephch_id: %d\n", ipc_ptr->ephch_id);
 	printf("ipc_ptr->packet_cnt: %d\n", ipc_ptr->packet_cnt);
 	printf("ipc_ptr->packet_size: %d\n", ipc_ptr->packet_size);
 	printf("ipc_ptr->time_interval: %d\n", ipc_ptr->time_interval);
 	printf("ipc_ptr->nic_count: %d\n", ipc_ptr->nic_count);
 	printf("ipc_ptr->conn_count: %d\n", ipc_ptr->conn_count);
+#endif
+	/* Set GCTL */
+
+	gctl_ipc.ephch_id = ipc_ptr->ephch_id;
 
 	/* clear */
-	ic->buf.data = 0;	
+	ic->buf.data = 0;
 
 	if (cs->conn->cujuipc_idx) {
 		cs->conn->flags &= ~CO_FL_CURR_RD_ENA;
@@ -287,6 +356,5 @@ int cuju_process(struct conn_stream *cs)
 
 	return 0;
 }
-
 
 #endif

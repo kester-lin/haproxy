@@ -634,16 +634,16 @@ int si_cs_send(struct conn_stream *cs)
 
 	if (oc->pipe && conn->xprt->snd_pipe && conn->mux->snd_pipe) {
 		ret = conn->mux->snd_pipe(cs, oc->pipe);
-		if (ret > 0) {
+		if ((ret > 0) || empty_pipe) {
 			oc->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
 			did_send = 1;
 		}
 
 #if ENABLE_CUJU_FT
-		if (!oc->pipe->data && !oc->pipe->next) {
-			put_pipe(oc->pipe);
-			oc->pipe = NULL;
-		}
+			if (!oc->pipe->data && !oc->pipe->next) {
+				put_pipe(oc->pipe);
+				oc->pipe = NULL;
+			}
 #else
 		if (!oc->pipe->data) {
 			put_pipe(oc->pipe);

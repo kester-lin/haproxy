@@ -2036,10 +2036,20 @@ redo:
 
  resync_response:
 	/* Analyse response */
-#if ENABLE_CUJU_FT
-	if (!sess->listener->cujuipc_idx) { 
+#if 0//ENABLE_CUJU_FT
+ 	printf("###################################################################\n");
+	printf("sess->listener->cujuipc_idx:  %d\n", sess->listener->cujuipc_idx);
+	printf("Front State:  %d\n", si_f->state);
+	printf("Back State:  %d\n", si_b->state);
+	if ((sess->listener->cujuipc_idx == 1) && (sess->listener->set_cuju == 0)) {
+		printf("!!!!!!!!!!!!!!!!!!!!!!\n");
+		sess->listener->set_cuju = 1; 
 		si_b->state = SI_ST_CLO;
 	}
+	printf("sess->listener->cujuipc_idx:  %d\n", sess->listener->cujuipc_idx);
+	printf("Front State:  %d\n", si_f->state);
+	printf("Back State:  %d\n", si_b->state);
+    printf("###################################################################\n");
 #endif	
 
 

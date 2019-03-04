@@ -37,12 +37,13 @@ struct pipe {
 	struct pipe *next;
 
 #if ENABLE_CUJU_FT
+  struct pipe *pipe_dup;
+  unsigned long epoch_id;
+  u_int32_t epoch_idx;
   int in_fd;
   int out_fd;
   int trans_suspend;
-  struct pipe *pipe_dup;
-  unsigned long flush_count;
-  unsigned long transfer_cnt; 
+  unsigned long transfer_cnt;  
 #endif
 };
 
