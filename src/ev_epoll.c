@@ -153,8 +153,12 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 
 #if ENABLE_EPOLL_MIGRATION
 	/* Check Pipe Buffer event */
-	if(fd_list_migration) {
+	//fd_list_migration
+	if(fd_pipe_cnt) {
 		pb_event = 1;
+	}
+	else {
+		pb_event = 0;
 	}
 #endif
 
@@ -171,12 +175,15 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		tv_update_date(timeout, status);
 
 		if (status) {
+			printf("GET EVENT CHANGE!!!!!!!!!!!!!!!!\n");
+			pb_event = 0;
 			break;
 		}
 #if ENABLE_EPOLL_MIGRATION
-		if (pb_event)
+		if (pb_event) {
 			pb_cnt++;
 			break;
+		}
 #endif
 		if (timeout || !wait_time)
 			break;
@@ -236,7 +243,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	/* the caller will take care of cached events */
 
 #if ENABLE_EPOLL_MIGRATION
-	if (pb_event && !(status) && fd_list_migration) {
+	if (pb_event && !(status) && fd_list_migration && fd_pipe_cnt) {
 		fd_want_send(fd_list_migration);
 		fd_update_events(fd_list_migration, FD_POLL_OUT);
 		return;

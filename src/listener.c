@@ -223,12 +223,7 @@ static void enable_listener(struct listener *listener)
 	HA_SPIN_LOCK(LISTENER_LOCK, &listener->lock);
 	if (listener->state == LI_LISTEN) {
 		if ((global.mode & (MODE_DAEMON | MODE_MWORKER)) &&
-<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 		    !(proc_mask(listener->bind_conf->bind_proc) & pid_bit)) {
-=======
-			listener->bind_conf->bind_proc &&
-			!(listener->bind_conf->bind_proc & pid_bit)) {
->>>>>>> Add: Cuju IPC 0.04 version
 			/* we don't want to enable this listener and don't
 			 * want any fd event to reach it.
 			 */
@@ -329,12 +324,7 @@ int resume_listener(struct listener *l)
 	HA_SPIN_LOCK(LISTENER_LOCK, &l->lock);
 
 	if ((global.mode & (MODE_DAEMON | MODE_MWORKER)) &&
-<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 	    !(proc_mask(l->bind_conf->bind_proc) & pid_bit))
-=======
-		l->bind_conf->bind_proc &&
-		!(l->bind_conf->bind_proc & pid_bit))
->>>>>>> Add: Cuju IPC 0.04 version
 		goto end;
 
 	if (l->state == LI_ASSIGNED) {
@@ -359,13 +349,8 @@ int resume_listener(struct listener *l)
 	}
 
 	if (l->proto->sock_prot == IPPROTO_TCP &&
-<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
 	    l->state == LI_PAUSED &&
 	    listen(l->fd, listener_backlog(l)) != 0) {
-=======
-		l->state == LI_PAUSED &&
-		listen(l->fd, l->backlog ? l->backlog : l->maxconn) != 0) {
->>>>>>> Add: Cuju IPC 0.04 version
 		ret = 0;
 		goto end;
 	}
@@ -950,7 +935,6 @@ transient_error:
 wait_expire:
 	limit_listener(l, &global_listener_queue);
 	task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
-<<<<<<< 5a2c4f5aba8a747070cfa062f7f6a206130617df
  end:
 	if (next_conn)
 		HA_ATOMIC_SUB(&l->nbconn, 1);
@@ -974,10 +958,6 @@ wait_expire:
 		    (!p->fe_sps_lim || freq_ctr_remain(&p->fe_sess_per_sec, p->fe_sps_lim, 0) > 0))
 			dequeue_all_listeners(&p->listener_queue);
 	}
-=======
-end:
-	HA_SPIN_UNLOCK(LISTENER_LOCK, &l->lock);
->>>>>>> Add: Cuju IPC 0.04 version
 }
 
 /* Notify the listener that a connection initiated from it was released. This

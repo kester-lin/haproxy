@@ -1,6 +1,8 @@
 #ifndef _TYPES_CUKU_FT_DEF_H
 #define _TYPES_CUKU_FT_DEF_H
 
+#include <common/hathreads.h>
+
 
 #define ENABLE_CUJU_FT 1
 
@@ -22,7 +24,16 @@ struct gctl_ipc
     /* control variable */
     u_int32_t packet_cnt : 16;
     u_int32_t packet_size : 16;
+    
+    uint32_t ephch_id;
+    
     struct timeval last_trans_time;
     struct timeval target_time;
+
+
+    __decl_hathreads(HA_RWLOCK_T lock);
 };
+
+extern struct gctl_ipc gctl_ipc;
+
 #endif

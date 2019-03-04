@@ -236,6 +236,7 @@ struct listener {
 	} conf;				/* config information */
 #if ENABLE_CUJU_FT
 	int cujuipc_idx;
+	int set_cuju;
 #endif	
 };
 
