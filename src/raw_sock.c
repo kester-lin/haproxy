@@ -77,7 +77,6 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 	int ret;
 	int retval = 0;
 
-
 	if (!conn_ctrl_ready(conn))
 		return 0;
 
@@ -113,7 +112,7 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 			count = MAX_SPLICE_AT_ONCE;
 
 		ret = splice(conn->handle.fd, NULL, pipe->prod, NULL, count,
-			     SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
+					 SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
 
 		if (ret <= 0) {
 			if (ret == 0) {
@@ -193,11 +192,11 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && retval)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
- leave:
+leave:
 	conn_cond_update_sock_polling(conn);
 	return retval;
 
- out_read0:
+out_read0:
 	conn_sock_read0(conn);
 	conn->flags &= ~CO_FL_WAIT_L4_CONN;
 	goto leave;
@@ -207,15 +206,15 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
  */
 int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 {
-	int ret, done;	
+	int ret, done;
 
 #if ENABLE_CUJU_FT
-struct pipe *pipe_trace = pipe;
-struct pipe *pipe_buf;
-struct pipe *pipe_dup;
-struct pipe *pipe_trans;
-int t_flag = 0;
-u_int32_t curr_epoch_id;
+	struct pipe *pipe_trace = pipe;
+	struct pipe *pipe_buf = NULL;
+	struct pipe *pipe_dup = NULL;
+	struct pipe *pipe_trans = NULL;
+	int t_flag = 0;
+	u_int32_t curr_epoch_id;
 #endif
 
 	if (!conn_ctrl_ready(conn))
@@ -233,12 +232,10 @@ u_int32_t curr_epoch_id;
 		pipe_buf = get_pipe();
 		pipe_dup = get_pipe();
 
-		ft_clean_pipe(pipe_buf);
-		ft_clean_pipe(pipe_dup);
-
 		ft_dup_pipe(pipe, pipe_buf, 0);
 		ft_dup_pipe(pipe, pipe_dup, 1);
 		fd_pipe_cnt++;
+		printf("Pipe CNT:%d\n", fd_pipe_cnt);
 	}
 	fdtab[conn->handle.fd].enable_migration = 1;
 
@@ -255,23 +252,23 @@ u_int32_t curr_epoch_id;
 			pipe_trace = pipe_trace->next;
 
 			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data &&
-			   !(pipe_trace->trans_suspend) && !(pipe_trace->data)) {
+				!(pipe_trace->trans_suspend) && !(pipe_trace->data)) {
 				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, 0);
 			}
 		}
 	}
 	else {
 		if (pipe_buf == NULL || pipe_dup == NULL) {
-#if DEBUG_FULL			
+#if DEBUG_FULL
 			assert(1);
 #else
 			return 0;
-#endif				
+#endif
 		}
 
 		pipe->next = pipe_buf;
 		pipe->next->pipe_dup = pipe_dup;
-			  //0x0	
+		//0x0
 	}
 
 	done = 0;
@@ -279,11 +276,10 @@ u_int32_t curr_epoch_id;
 	pipe_trans = pipe->next;
 	pipe->data = 0;
 
-	if (pipe_trans == NULL) {
+	if (pipe_trans == NULL) { 
 		printf("pipe_trans is NULL\n");
 		assert(1);
 	}
-
 
 #if 0
 	pipe_trans->epoch_id = ft_get_flushcnt();
@@ -300,54 +296,62 @@ u_int32_t curr_epoch_id;
 			empty_pipe = 1;
 			goto after_send;
 		}
-
 	}
 	else {
 		pipe_trans->epoch_idx = 1;
 		pipe_trans->epoch_id = curr_epoch_id;
 	}
-#endif	
+#endif
 	/* WRITE */
 	while (pipe_trans->data) {
-		ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL, 
-					 pipe_trans->data, SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
+		if (!pipe_trans->transfered) {
+			ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
+						 pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-		if (ret <= 0) {
-			//pipe_trans->trans_suspend = 1;
-			t_flag = (errno == EAGAIN);
+			if (ret <= 0) {
+				//pipe_trans->trans_suspend = 1;
+				t_flag = (errno == EAGAIN);
 
-			//printf("RET is %d  t_flag is %d\n", ret, t_flag);
-			if (ret == 0 || t_flag) {
-				printf("ret == 0 || t_flag\n");
-				pipe_trans->trans_suspend = 1;				
-				fd_cant_send(conn->handle.fd);
+				//printf("RET is %d  t_flag is %d\n", ret, t_flag);
+				if (ret == 0 || t_flag) {
+					//printf("ret == 0 || t_flag\n");
+					pipe_trans->trans_suspend = 1;
+					fd_cant_send(conn->handle.fd);
+					break;
+				}
+				else if (errno == EINTR) {
+					//printf("errno == EINTR\n");
+					continue;
+				}
+
+				//printf("CO_FL_ERROR\n");
+				/* here we have another error */
+				conn->flags |= CO_FL_ERROR;
 				break;
 			}
-			else if (errno == EINTR) {
-				//printf("errno == EINTR\n");
-				continue;
-			}
 
-			/* here we have another error */
-			conn->flags |= CO_FL_ERROR;
-			break;
+			done += ret;
+			pipe_trans->data -= ret;
+			pipe_trans->transfer_cnt++;
+			pipe_trans->trans_suspend = 0;
+			pipe_trans->transfered = 1;
+			//printf("Transfered\n");
 		}
-
-		done += ret;
-		pipe_trans->data -= ret;
-		pipe_trans->transfer_cnt++;
-		pipe_trans->trans_suspend = 0;
 
 		if (pipe_trans->next != NULL) {
 			pipe_trans = pipe_trans->next;
+			//printf("Transfered then goto next\n");
 		}
+		else {
+			break;
+		}		
 	}
 
 #else
 	done = 0;
 	while (pipe->data) {
 		ret = splice(pipe->cons, NULL, conn->handle.fd, NULL, pipe->data,
-			     SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
+					 SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
 
 		if (ret <= 0) {
 			if (ret == 0 || errno == EAGAIN) {
@@ -380,20 +384,18 @@ after_send:
 		fdtab[conn->handle.fd].enable_migration = 0;
 		return done;
 	}
- 
+
 	if (fdtab[conn->handle.fd].enable_migration) {
 		fd_list_migration = pipe_trans->out_fd;
 		conn->flags |= CO_FL_XPRT_WR_ENA;
 	}
 
-
-#endif	
+#endif
 
 	return done;
 }
 
 #endif /* CONFIG_HAP_LINUX_SPLICE */
-
 
 /* Receive up to <count> bytes from connection <conn>'s socket and store them
  * into buffer <buf>. Only one call to recv() is performed, unless the
@@ -463,7 +465,7 @@ static size_t raw_sock_to_buf(struct connection *conn, struct buffer *buf, size_
 					goto read0;
 
 				if ((!fdtab[conn->handle.fd].linger_risk) ||
-				    (cur_poller.flags & HAP_POLL_F_RDHUP)) {
+					(cur_poller.flags & HAP_POLL_F_RDHUP)) {
 					fd_done_recv(conn->handle.fd);
 					break;
 				}
@@ -486,11 +488,11 @@ static size_t raw_sock_to_buf(struct connection *conn, struct buffer *buf, size_
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
- leave:
+leave:
 	conn_cond_update_sock_polling(conn);
 	return done;
 
- read0:
+read0:
 	conn_sock_read0(conn);
 	conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
@@ -505,7 +507,6 @@ static size_t raw_sock_to_buf(struct connection *conn, struct buffer *buf, size_
 		conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 	goto leave;
 }
-
 
 /* Send up to <count> pending bytes from buffer <buf> to connection <conn>'s
  * socket. <flags> may contain some CO_SFL_* flags to hint the system about
@@ -574,7 +575,6 @@ static size_t raw_sock_from_buf(struct connection *conn, const struct buffer *bu
 	return done;
 }
 
-
 /* transport-layer operations for RAW sockets */
 static struct xprt_ops raw_sock = {
 	.snd_buf  = raw_sock_from_buf,
@@ -591,8 +591,7 @@ static struct xprt_ops raw_sock = {
 	.name     = "RAW",
 };
 
-
-__attribute__((constructor))
+__attribute__((constructor)) 
 static void __raw_sock_init(void)
 {
 	xprt_register(XPRT_RAW, &raw_sock);
