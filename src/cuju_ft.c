@@ -23,7 +23,7 @@ int empty_pipe = 0;
 
 struct gctl_ipc gctl_ipc;
 
-//unsigned long flush_count = 0;
+unsigned long flush_count = 0;
 unsigned long ft_get_flushcnt()
 {
 	/* FAKE */
@@ -32,7 +32,7 @@ unsigned long ft_get_flushcnt()
 	/* REAL */
 	unsigned long flush_count = gctl_ipc.ephch_id;
 
-	return flush_count++;
+	return flush_count;
 }
 
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
@@ -114,8 +114,13 @@ int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int pipe_cnt)
 			if (pipe_trace->epoch_id < epoch_id)
 			{
 				pipe_prev->next = pipe_trace->next;
+				
+				ft_clean_pipe(pipe_trace->pipe_dup);
 				put_pipe(pipe_trace->pipe_dup);
+				
+				ft_clean_pipe(pipe_trace);				
 				put_pipe(pipe_trace);
+				
 				fd_pipe_cnt--;
 				pipe_trace = pipe_prev->next;
 				pipe_cnt--;
@@ -135,7 +140,8 @@ void ft_clean_pipe(struct pipe *pipe)
 	pipe->out_fd = 0;
 	pipe->trans_suspend = 0;
 	pipe->transfer_cnt = 0;
-}
+	pipe->transfered = 0;
+}	
 
 /* Cuju IPC handler callback */
 void cuju_fd_handler(int fd)

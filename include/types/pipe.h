@@ -43,7 +43,8 @@ struct pipe {
   int in_fd;
   int out_fd;
   int trans_suspend;
-  unsigned long transfer_cnt;  
+  unsigned long transfer_cnt;
+  int transfered;  
 #endif
 };
 
