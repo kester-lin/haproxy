@@ -398,9 +398,9 @@ static void display_build_opts()
 	       "\n  OPTIONS = " BUILD_OPTIONS
 #endif
 	       "\n\nDefault settings :"
-	       "\n  maxconn = %d, bufsize = %d, maxrewrite = %d, maxpollevents = %d"
+	       "\n  bufsize = %d, maxrewrite = %d, maxpollevents = %d"
 	       "\n\n",
-	       DEFAULT_MAXCONN, BUFSIZE, MAXREWRITE, MAX_POLL_EVENTS);
+	       BUFSIZE, MAXREWRITE, MAX_POLL_EVENTS);
 
 	list_for_each_entry(item, &build_opts_list, list) {
 		puts(item->str);
@@ -437,7 +437,7 @@ static void usage(char *name)
 #endif
 		"        -q quiet mode : don't display messages\n"
 		"        -c check mode : only check config files and exit\n"
-		"        -n sets the maximum total # of connections (%d)\n"
+		"        -n sets the maximum total # of connections (uses ulimit -n)\n"
 		"        -m limits the usable amount of memory (in MB)\n"
 		"        -N sets the default, per-proxy maximum # of connections (%d)\n"
 		"        -L set local peer name (default to hostname)\n"
@@ -466,7 +466,7 @@ static void usage(char *name)
 		"        -x <unix_socket> get listening sockets from a unix socket\n"
 		"        -S <unix_socket>[,<bind options>...] new stats socket for the master\n"
 		"\n",
-		name, DEFAULT_MAXCONN, cfg_maxpconn);
+		name, cfg_maxpconn);
 	exit(1);
 }
 
@@ -1452,9 +1452,11 @@ static int compute_ideal_maxpipes()
 /* considers global.maxsocks, global.maxpipes, async engines, SSL frontends and
  * rlimits and computes an ideal maxconn. It's meant to be called only when
  * maxsock contains the sum of listening FDs, before it is updated based on
- * maxconn and pipes. If there are not enough FDs left, 100 is returned as it
- * is expected that it will even run on tight environments. The system will
- * emit a warning indicating how many FDs are missing anyway.
+ * maxconn and pipes. If there are not enough FDs left, DEFAULT_MAXCONN (by
+ * default 100) is returned as it is expected that it will even run on tight
+ * environments, and will maintain compatibility with previous packages that
+ * used to rely on this value as the default one. The system will emit a
+ * warning indicating how many FDs are missing anyway if needed.
  */
 static int compute_ideal_maxconn()
 {
@@ -1495,7 +1497,7 @@ static int compute_ideal_maxconn()
 		maxconn = remain / (2 + engine_fds);
 	}
 
-	return MAX(maxconn, 100);
+	return MAX(maxconn, DEFAULT_MAXCONN);
 }
 
 /*
@@ -2072,8 +2074,8 @@ static void init(int argc, char **argv)
 		global.maxconn = MIN(global.maxconn, ideal_maxconn);
 		global.maxconn = round_2dig(global.maxconn);
 #ifdef SYSTEM_MAXCONN
-		if (global.maxconn > DEFAULT_MAXCONN)
-			global.maxconn = DEFAULT_MAXCONN;
+		if (global.maxconn > SYSTEM_MAXCONN)
+			global.maxconn = SYSTEM_MAXCONN;
 #endif /* SYSTEM_MAXCONN */
 		global.maxsslconn = sides * global.maxconn;
 		if (global.mode & (MODE_VERBOSE|MODE_DEBUG))
@@ -2137,8 +2139,8 @@ static void init(int argc, char **argv)
 		global.maxconn = MIN(global.maxconn, ideal_maxconn);
 		global.maxconn = round_2dig(global.maxconn);
 #ifdef SYSTEM_MAXCONN
-		if (global.maxconn > DEFAULT_MAXCONN)
-			global.maxconn = DEFAULT_MAXCONN;
+		if (global.maxconn > SYSTEM_MAXCONN)
+			global.maxconn = SYSTEM_MAXCONN;
 #endif /* SYSTEM_MAXCONN */
 
 		if (clearmem <= 0 || !global.maxconn) {
@@ -2746,11 +2748,11 @@ static void run_poll_loop()
 		else if (signal_queue_len && tid == 0)
 			activity[tid].wake_signal++;
 		else {
-			HA_ATOMIC_OR(&sleeping_thread_mask, tid_bit);
-			__ha_barrier_store();
+			_HA_ATOMIC_OR(&sleeping_thread_mask, tid_bit);
+			__ha_barrier_atomic_store();
 			if (active_tasks_mask & tid_bit) {
 				activity[tid].wake_tasks++;
-				HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
+				_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
 			} else
 				exp = next;
 		}
@@ -2758,7 +2760,7 @@ static void run_poll_loop()
 		/* The poller will ensure it returns around <next> */
 		cur_poller.poll(&cur_poller, exp);
 		if (sleeping_thread_mask & tid_bit)
-			HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
+			_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
 		fd_process_cached_events();
 
 		activity[tid].loops++;
@@ -2794,7 +2796,7 @@ static void *run_thread_poll_loop(void *data)
 		ptdf->fct();
 
 #ifdef USE_THREAD
-	HA_ATOMIC_AND(&all_threads_mask, ~tid_bit);
+	_HA_ATOMIC_AND(&all_threads_mask, ~tid_bit);
 	if (tid > 0)
 		pthread_exit(NULL);
 #endif

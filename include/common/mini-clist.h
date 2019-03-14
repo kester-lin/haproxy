@@ -89,6 +89,18 @@ struct cond_wordlist {
 /* removes an element from a list and returns it */
 #define LIST_DEL(el) ({ typeof(el) __ret = (el); (el)->n->p = (el)->p; (el)->p->n = (el)->n; (__ret); })
 
+/* removes an element from a list, initializes it and returns it.
+ * This is faster than LIST_DEL+LIST_INIT as we avoid reloading the pointers.
+ */
+#define LIST_DEL_INIT(el) ({ \
+	typeof(el) __ret = (el);                        \
+	typeof(__ret->n) __n = __ret->n;                \
+	typeof(__ret->p) __p = __ret->p;                \
+	__n->p = __p; __p->n = __n;                     \
+	__ret->n = __ret->p = __ret;                    \
+	__ret;                                          \
+})
+
 /* returns a pointer of type <pt> to a structure containing a list head called
  * <el> at address <lh>. Note that <lh> can be the result of a function or macro
  * since it's used only once.
@@ -180,7 +192,7 @@ struct cond_wordlist {
 			n = HA_ATOMIC_XCHG(&(lh)->n, LLIST_BUSY);          \
 			if (n == LLIST_BUSY)                               \
 			        continue;                                  \
-			__ha_barrier_store();                              \
+			__ha_barrier_atomic_store();                       \
 			p = HA_ATOMIC_XCHG(&n->p, LLIST_BUSY);             \
 			if (p == LLIST_BUSY) {                             \
 				(lh)->n = n;                               \
@@ -216,9 +228,9 @@ struct cond_wordlist {
 			(el)->n = n;                                       \
 			(el)->p = p;                                       \
 			__ha_barrier_store();                              \
-			n->n = (el);                                       \
+			p->n = (el);                                       \
 			__ha_barrier_store();                              \
-			p->p = (el);                                       \
+			n->p = (el);                                       \
 			__ha_barrier_store();                              \
 			break;                                             \
 		}                                                          \
@@ -251,7 +263,7 @@ struct cond_wordlist {
 			        n2 = HA_ATOMIC_XCHG(&n->p, LLIST_BUSY);    \
 				if (n2 == LLIST_BUSY) {                    \
 					if (p2 != NULL)                    \
-						p2->n = (el);              \
+						p->n = p2;                 \
 					(el)->p = p;                       \
 					(el)->n = n;                       \
 					__ha_barrier_store();              \

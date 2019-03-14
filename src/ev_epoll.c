@@ -74,8 +74,8 @@ static void _update_fd(int fd)
 		if (!(fdtab[fd].thread_mask & tid_bit) || !(en & FD_EV_POLLED_RW)) {
 			/* fd removed from poll list */
 			opcode = EPOLL_CTL_DEL;
-			HA_ATOMIC_AND(&polled_mask[fd], ~tid_bit);
-		} 
+			_HA_ATOMIC_AND(&polled_mask[fd], ~tid_bit);
+		}
 		else {
 			/* fd status changed */
 			opcode = EPOLL_CTL_MOD;
@@ -84,7 +84,7 @@ static void _update_fd(int fd)
 	else if ((fdtab[fd].thread_mask & tid_bit) && (en & FD_EV_POLLED_RW)) {
 		/* new fd in the poll list */
 		opcode = EPOLL_CTL_ADD;
-		HA_ATOMIC_OR(&polled_mask[fd], tid_bit);
+		_HA_ATOMIC_OR(&polled_mask[fd], tid_bit);
 	}
 	else {
 		return;
@@ -123,7 +123,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
 
-		HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
+		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
 		if (!fdtab[fd].owner) {
 			activity[tid].poll_drop++;
 			continue;
@@ -214,7 +214,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			/* FD has been migrated */
 			activity[tid].poll_skip++;
 			epoll_ctl(epoll_fd[tid], EPOLL_CTL_DEL, fd, &ev);
-			HA_ATOMIC_AND(&polled_mask[fd], ~tid_bit);
+			_HA_ATOMIC_AND(&polled_mask[fd], ~tid_bit);
 			continue;
 		}
 
@@ -236,7 +236,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 
 		/* always remap RDHUP to HUP as they're used similarly */
 		if (e & EPOLLRDHUP) {
-			HA_ATOMIC_OR(&cur_poller.flags, HAP_POLL_F_RDHUP);
+			_HA_ATOMIC_OR(&cur_poller.flags, HAP_POLL_F_RDHUP);
 			n |= FD_POLL_HUP;
 		}
 		fd_update_events(fd, n);

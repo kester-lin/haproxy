@@ -124,14 +124,14 @@ static inline void updt_fd_polling(const int fd)
 		if (HA_ATOMIC_BTS(&fdtab[fd].update_mask, tid))
 			return;
 
-		oldupdt = HA_ATOMIC_ADD(&fd_nbupdt, 1) - 1;
+		oldupdt = _HA_ATOMIC_ADD(&fd_nbupdt, 1) - 1;
 		fd_updt[oldupdt] = fd;
 	} else {
 		unsigned long update_mask = fdtab[fd].update_mask;
 		do {
 			if (update_mask == fdtab[fd].thread_mask)
 				return;
-		} while (!HA_ATOMIC_CAS(&fdtab[fd].update_mask, &update_mask,
+		} while (!_HA_ATOMIC_CAS(&fdtab[fd].update_mask, &update_mask,
 		    fdtab[fd].thread_mask));
 		fd_add_to_fd_list(&update_list, fd, offsetof(struct fdtab, update));
 	}
@@ -146,12 +146,10 @@ static inline void done_update_polling(int fd)
 {
 	unsigned long update_mask;
 
-	update_mask = HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
+	update_mask = _HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
 	while ((update_mask & all_threads_mask)== 0) {
 		/* If we were the last one that had to update that entry, remove it from the list */
 		fd_rm_from_fd_list(&update_list, fd, offsetof(struct fdtab, update));
-		if (update_list.first == fd)
-			abort();
 		update_mask = (volatile unsigned long)fdtab[fd].update_mask;
 		if ((update_mask & all_threads_mask) != 0) {
 			/* Maybe it's been re-updated in the meanwhile, and we
@@ -174,7 +172,7 @@ static inline void done_update_polling(int fd)
  */
 static inline void fd_alloc_cache_entry(const int fd)
 {
-	HA_ATOMIC_OR(&fd_cache_mask, fdtab[fd].thread_mask);
+	_HA_ATOMIC_OR(&fd_cache_mask, fdtab[fd].thread_mask);
 	if (!(fdtab[fd].thread_mask & (fdtab[fd].thread_mask - 1)))
 		fd_add_to_fd_list(&fd_cache_local[my_ffsl(fdtab[fd].thread_mask) - 1], fd,  offsetof(struct fdtab, cache));
 	else
@@ -346,7 +344,7 @@ static inline void fd_stop_recv(int fd)
 			return;
 		new = old & ~FD_EV_ACTIVE_R;
 		new &= ~FD_EV_POLLED_R;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_R)
 		updt_fd_polling(fd);
@@ -371,7 +369,7 @@ static inline void fd_stop_send(int fd)
 			return;
 		new = old & ~FD_EV_ACTIVE_W;
 		new &= ~FD_EV_POLLED_W;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_W)
 		updt_fd_polling(fd);
@@ -396,7 +394,7 @@ static inline void fd_stop_both(int fd)
 			return;
 		new = old & ~FD_EV_ACTIVE_RW;
 		new &= ~FD_EV_POLLED_RW;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_RW)
 		updt_fd_polling(fd);
@@ -422,7 +420,7 @@ static inline void fd_cant_recv(const int fd)
 		new = old & ~FD_EV_READY_R;
 		if (new & FD_EV_ACTIVE_R)
 			new |= FD_EV_POLLED_R;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_R)
 		updt_fd_polling(fd);
@@ -441,7 +439,7 @@ static inline void fd_may_recv(const int fd)
 	unsigned long locked;
 
 	/* marking ready never changes polled status */
-	HA_ATOMIC_OR(&fdtab[fd].state, FD_EV_READY_R);
+	_HA_ATOMIC_OR(&fdtab[fd].state, FD_EV_READY_R);
 
 	locked = atleast2(fdtab[fd].thread_mask);
 	if (locked)
@@ -468,7 +466,7 @@ static inline void fd_done_recv(const int fd)
 		new = old & ~FD_EV_READY_R;
 		if (new & FD_EV_ACTIVE_R)
 			new |= FD_EV_POLLED_R;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_R)
 		updt_fd_polling(fd);
@@ -494,7 +492,7 @@ static inline void fd_cant_send(const int fd)
 		new = old & ~FD_EV_READY_W;
 		if (new & FD_EV_ACTIVE_W)
 			new |= FD_EV_POLLED_W;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_W)
 		updt_fd_polling(fd);
@@ -513,7 +511,7 @@ static inline void fd_may_send(const int fd)
 	unsigned long locked;
 
 	/* marking ready never changes polled status */
-	HA_ATOMIC_OR(&fdtab[fd].state, FD_EV_READY_W);
+	_HA_ATOMIC_OR(&fdtab[fd].state, FD_EV_READY_W);
 
 	locked = atleast2(fdtab[fd].thread_mask);
 	if (locked)
@@ -536,7 +534,7 @@ static inline void fd_want_recv(int fd)
 		new = old | FD_EV_ACTIVE_R;
 		if (!(new & FD_EV_READY_R))
 			new |= FD_EV_POLLED_R;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_R)
 		updt_fd_polling(fd);
@@ -562,7 +560,7 @@ static inline void fd_want_send(int fd)
 		new = old | FD_EV_ACTIVE_W;
 		if (!(new & FD_EV_READY_W))
 			new |= FD_EV_POLLED_W;
-	} while (unlikely(!HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&fdtab[fd].state, &old, new)));
 
 	if ((old ^ new) & FD_EV_POLLED_W)
 		updt_fd_polling(fd);
@@ -642,12 +640,12 @@ static inline int compute_poll_timeout(int next)
 /* These are replacements for FD_SET, FD_CLR, FD_ISSET, working on uints */
 static inline void hap_fd_set(int fd, unsigned int *evts)
 {
-	HA_ATOMIC_OR(&evts[fd / (8*sizeof(*evts))], 1U << (fd & (8*sizeof(*evts) - 1)));
+	_HA_ATOMIC_OR(&evts[fd / (8*sizeof(*evts))], 1U << (fd & (8*sizeof(*evts) - 1)));
 }
 
 static inline void hap_fd_clr(int fd, unsigned int *evts)
 {
-	HA_ATOMIC_AND(&evts[fd / (8*sizeof(*evts))], ~(1U << (fd & (8*sizeof(*evts) - 1))));
+	_HA_ATOMIC_AND(&evts[fd / (8*sizeof(*evts))], ~(1U << (fd & (8*sizeof(*evts) - 1))));
 }
 
 static inline unsigned int hap_fd_isset(int fd, unsigned int *evts)

@@ -528,9 +528,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.maxconn = atol(args[1]);
 #ifdef SYSTEM_MAXCONN
-		if (global.maxconn > DEFAULT_MAXCONN && cfg_maxconn <= DEFAULT_MAXCONN) {
-			ha_alert("parsing [%s:%d] : maxconn value %d too high for this system.\nLimiting to %d. Please use '-n' to force the value.\n", file, linenum, global.maxconn, DEFAULT_MAXCONN);
-			global.maxconn = DEFAULT_MAXCONN;
+		if (global.maxconn > SYSTEM_MAXCONN && cfg_maxconn <= SYSTEM_MAXCONN) {
+			ha_alert("parsing [%s:%d] : maxconn value %d too high for this system.\nLimiting to %d. Please use '-n' to force the value.\n", file, linenum, global.maxconn, SYSTEM_MAXCONN);
+			global.maxconn = SYSTEM_MAXCONN;
 			err_code |= ERR_ALERT;
 		}
 #endif /* SYSTEM_MAXCONN */
@@ -942,7 +942,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			ha_alert("parsing [%s:%d] : %s expects a process number "
 				 " ('all', 'odd', 'even', a number from 1 to %d or a range), "
 				 " followed by a list of CPU ranges with numbers from 0 to %d.\n",
-				 file, linenum, args[0], MAX_PROCS, LONGBITS - 1);
+				 file, linenum, args[0], LONGBITS, LONGBITS - 1);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -950,14 +950,18 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		if ((slash = strchr(args[1], '/')) != NULL)
 			*slash = 0;
 
-		if (parse_process_number(args[1], &proc, MAX_PROCS, &autoinc, &errmsg)) {
+		/* note: we silently ignore processes over MAX_PROCS and
+		 * threads over MAX_THREADS so as not to make configurations a
+		 * pain to maintain.
+		 */
+		if (parse_process_number(args[1], &proc, LONGBITS, &autoinc, &errmsg)) {
 			ha_alert("parsing [%s:%d] : %s : %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
 
 		if (slash) {
-			if (parse_process_number(slash+1, &thread, MAX_THREADS, NULL, &errmsg)) {
+			if (parse_process_number(slash+1, &thread, LONGBITS, NULL, &errmsg)) {
 				ha_alert("parsing [%s:%d] : %s : %s\n", file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;

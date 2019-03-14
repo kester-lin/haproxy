@@ -124,7 +124,7 @@ int accept_queue_push_mp(struct accept_queue_ring *ring, int fd,
 			next = 0;
 		if (next == ring->head)
 			return 0; // ring full
-	} while (unlikely(!HA_ATOMIC_CAS(&ring->tail, &pos, next)));
+	} while (unlikely(!_HA_ATOMIC_CAS(&ring->tail, &pos, next)));
 
 
 	e = &ring->entry[pos];
@@ -162,7 +162,7 @@ static struct task *accept_queue_process(struct task *t, void *context, unsigned
 		if (fd < 0)
 			break;
 
-		HA_ATOMIC_ADD(&li->thr_conn[tid], 1);
+		_HA_ATOMIC_ADD(&li->thr_conn[tid], 1);
 		ret = li->accept(li, fd, &addr);
 		if (ret <= 0) {
 			/* connection was terminated by the application */
@@ -449,7 +449,7 @@ void dequeue_all_listeners(struct list *list)
  */
 void do_unbind_listener(struct listener *listener, int do_close)
 {
-	if (listener->state == LI_READY)
+	if (listener->state == LI_READY && fd_updt)
 		fd_stop_recv(listener->fd);
 
 	LIST_DEL_LOCKED(&listener->wait_queue);
@@ -542,8 +542,8 @@ int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
 			l->options |= LI_O_INHERITED;
 
 		HA_SPIN_INIT(&l->lock);
-		HA_ATOMIC_ADD(&jobs, 1);
-		HA_ATOMIC_ADD(&listeners, 1);
+		_HA_ATOMIC_ADD(&jobs, 1);
+		_HA_ATOMIC_ADD(&listeners, 1);
 	}
 	return 1;
 }
@@ -561,8 +561,8 @@ void delete_listener(struct listener *listener)
 		listener->state = LI_INIT;
 		LIST_DEL(&listener->proto_list);
 		listener->proto->nb_listeners--;
-		HA_ATOMIC_SUB(&jobs, 1);
-		HA_ATOMIC_SUB(&listeners, 1);
+		_HA_ATOMIC_SUB(&jobs, 1);
+		_HA_ATOMIC_SUB(&listeners, 1);
 	}
 	HA_SPIN_UNLOCK(LISTENER_LOCK, &listener->lock);
 }
@@ -596,6 +596,7 @@ void listener_accept(int fd)
 {
 	struct listener *l = fdtab[fd].owner;
 	struct proxy *p;
+	__decl_hathreads(unsigned long mask);
 	int max_accept;
 	int next_conn = 0;
 	int next_feconn = 0;
@@ -693,7 +694,7 @@ void listener_accept(int fd)
 				goto end;
 			}
 			next_conn = count + 1;
-		} while (!HA_ATOMIC_CAS(&l->nbconn, &count, next_conn));
+		} while (!_HA_ATOMIC_CAS(&l->nbconn, &count, next_conn));
 
 		if (l->maxconn && next_conn == l->maxconn) {
 			/* we filled it, mark it full */
@@ -711,7 +712,7 @@ void listener_accept(int fd)
 					goto end;
 				}
 				next_feconn = count + 1;
-			} while (!HA_ATOMIC_CAS(&p->feconn, &count, next_feconn));
+			} while (!_HA_ATOMIC_CAS(&p->feconn, &count, next_feconn));
 
 			if (unlikely(next_feconn == p->maxconn)) {
 				/* we just filled it */
@@ -730,7 +731,7 @@ void listener_accept(int fd)
 					goto end;
 				}
 				next_actconn = count + 1;
-			} while (!HA_ATOMIC_CAS(&actconn, &count, next_actconn));
+			} while (!_HA_ATOMIC_CAS(&actconn, &count, next_actconn));
 
 			if (unlikely(next_actconn == global.maxconn)) {
 				limit_listener(l, &global_listener_queue);
@@ -778,11 +779,11 @@ void listener_accept(int fd)
 				goto transient_error;
 			case EINTR:
 			case ECONNABORTED:
-				HA_ATOMIC_SUB(&l->nbconn, 1);
+				_HA_ATOMIC_SUB(&l->nbconn, 1);
 				if (p)
-					HA_ATOMIC_SUB(&p->feconn, 1);
+					_HA_ATOMIC_SUB(&p->feconn, 1);
 				if (!(l->options & LI_O_UNLIMITED))
-					HA_ATOMIC_SUB(&actconn, 1);
+					_HA_ATOMIC_SUB(&actconn, 1);
 				continue;
 			case ENFILE:
 				if (p)
@@ -847,53 +848,120 @@ void listener_accept(int fd)
 		next_actconn = 0;
 
 #if defined(USE_THREAD)
-		count = l->bind_conf->thr_count;
-		if (count > 1 && (global.tune.options & GTUNE_LISTENER_MQ)) {
+		mask = thread_mask(l->bind_conf->bind_thread) & all_threads_mask;
+		if (atleast2(mask) && (global.tune.options & GTUNE_LISTENER_MQ)) {
 			struct accept_queue_ring *ring;
-			int r, t1, t2, q1, q2;
+			unsigned int t, t0, t1, t2;
 
-			/* pick two small distinct random values and drop lower bits */
-			r = (random() >> 8) % ((count - 1) * count);
-			t2 = r / count; // 0..thr_count-2
-			t1 = r % count; // 0..thr_count-1
-			t2 += t1 + 1;   // necessarily different from t1
-
-			if (t2 >= count)
-				t2 -= count;
-
-			t1 = bind_map_thread_id(l->bind_conf, t1);
-			t2 = bind_map_thread_id(l->bind_conf, t2);
-
-			q1 = accept_queue_rings[t1].tail - accept_queue_rings[t1].head + ACCEPT_QUEUE_SIZE;
-			if (q1 >= ACCEPT_QUEUE_SIZE)
-				q1 -= ACCEPT_QUEUE_SIZE;
-
-			q2 = accept_queue_rings[t2].tail - accept_queue_rings[t2].head + ACCEPT_QUEUE_SIZE;
-			if (q2 >= ACCEPT_QUEUE_SIZE)
-				q2 -= ACCEPT_QUEUE_SIZE;
-
-			/* make t1 the lowest loaded thread */
-			if (q1 >= ACCEPT_QUEUE_SIZE || l->thr_conn[t1] + q1 > l->thr_conn[t2] + q2)
-				t1 = t2;
-
-			/* We use deferred accepts even if it's the local thread because
-			 * tests show that it's the best performing model, likely due to
-			 * better cache locality when processing this loop.
+			/* The principle is that we have two running indexes,
+			 * each visiting in turn all threads bound to this
+			 * listener. The connection will be assigned to the one
+			 * with the least connections, and the other one will
+			 * be updated. This provides a good fairness on short
+			 * connections (round robin) and on long ones (conn
+			 * count), without ever missing any idle thread.
 			 */
-			ring = &accept_queue_rings[t1];
+
+			/* keep a copy for the final update. thr_idx is composite
+			 * and made of (t2<<16) + t1.
+			 */
+			t0 = l->thr_idx;
+			do {
+				unsigned long m1, m2;
+				int q1, q2;
+
+				t2 = t1 = t0;
+				t2 >>= 16;
+				t1 &= 0xFFFF;
+
+				/* t1 walks low to high bits ;
+				 * t2 walks high to low.
+				 */
+				m1 = mask >> t1;
+				m2 = mask & (t2 ? nbits(t2 + 1) : ~0UL);
+
+				if (unlikely((signed long)m2 >= 0)) {
+					/* highest bit not set */
+					if (!m2)
+						m2 = mask;
+
+					t2 = my_flsl(m2) - 1;
+				}
+
+				if (unlikely(!(m1 & 1) || t1 == t2)) {
+					m1 &= ~1UL;
+					if (!m1) {
+						m1 = mask;
+						t1 = 0;
+					}
+					t1 += my_ffsl(m1) - 1;
+				}
+
+				/* now we have two distinct thread IDs belonging to the mask */
+				q1 = accept_queue_rings[t1].tail - accept_queue_rings[t1].head + ACCEPT_QUEUE_SIZE;
+				if (q1 >= ACCEPT_QUEUE_SIZE)
+					q1 -= ACCEPT_QUEUE_SIZE;
+
+				q2 = accept_queue_rings[t2].tail - accept_queue_rings[t2].head + ACCEPT_QUEUE_SIZE;
+				if (q2 >= ACCEPT_QUEUE_SIZE)
+					q2 -= ACCEPT_QUEUE_SIZE;
+
+				/* we have 3 possibilities now :
+				 *   q1 < q2 : t1 is less loaded than t2, so we pick it
+				 *             and update t2 (since t1 might still be
+				 *             lower than another thread)
+				 *   q1 > q2 : t2 is less loaded than t1, so we pick it
+				 *             and update t1 (since t2 might still be
+				 *             lower than another thread)
+				 *   q1 = q2 : both are equally loaded, thus we pick t1
+				 *             and update t1 as it will become more loaded
+				 *             than t2.
+				 */
+
+				q1 += l->thr_conn[t1];
+				q2 += l->thr_conn[t2];
+
+				if (q1 - q2 < 0) {
+					t = t1;
+					t2 = t2 ? t2 - 1 : LONGBITS - 1;
+				}
+				else if (q1 - q2 > 0) {
+					t = t2;
+					t1++;
+					if (t1 >= LONGBITS)
+						t1 = 0;
+				}
+				else {
+					t = t1;
+					t1++;
+					if (t1 >= LONGBITS)
+						t1 = 0;
+				}
+
+				/* new value for thr_idx */
+				t1 += (t2 << 16);
+			} while (unlikely(!_HA_ATOMIC_CAS(&l->thr_idx, &t0, t1)));
+
+			/* We successfully selected the best thread "t" for this
+			 * connection. We use deferred accepts even if it's the
+			 * local thread because tests show that it's the best
+			 * performing model, likely due to better cache locality
+			 * when processing this loop.
+			 */
+			ring = &accept_queue_rings[t];
 			if (accept_queue_push_mp(ring, cfd, l, &addr, laddr)) {
-				HA_ATOMIC_ADD(&activity[t1].accq_pushed, 1);
+				_HA_ATOMIC_ADD(&activity[t].accq_pushed, 1);
 				task_wakeup(ring->task, TASK_WOKEN_IO);
 				continue;
 			}
 			/* If the ring is full we do a synchronous accept on
 			 * the local thread here.
 			 */
-			HA_ATOMIC_ADD(&activity[t1].accq_full, 1);
+			_HA_ATOMIC_ADD(&activity[t].accq_full, 1);
 		}
 #endif // USE_THREAD
 
-		HA_ATOMIC_ADD(&l->thr_conn[tid], 1);
+		_HA_ATOMIC_ADD(&l->thr_conn[tid], 1);
 		ret = l->accept(l, cfd, &addr);
 		if (unlikely(ret <= 0)) {
 			/* The connection was closed by stream_accept(). Either
@@ -937,13 +1005,13 @@ wait_expire:
 	task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
  end:
 	if (next_conn)
-		HA_ATOMIC_SUB(&l->nbconn, 1);
+		_HA_ATOMIC_SUB(&l->nbconn, 1);
 
 	if (p && next_feconn)
-		HA_ATOMIC_SUB(&p->feconn, 1);
+		_HA_ATOMIC_SUB(&p->feconn, 1);
 
 	if (next_actconn)
-		HA_ATOMIC_SUB(&actconn, 1);
+		_HA_ATOMIC_SUB(&actconn, 1);
 
 	if ((l->state == LI_FULL && (!l->maxconn || l->nbconn < l->maxconn)) ||
 	    (l->state == LI_LIMITED && ((!p || p->feconn < p->maxconn) && (actconn < global.maxconn)))) {
@@ -969,11 +1037,11 @@ void listener_release(struct listener *l)
 	struct proxy *fe = l->bind_conf->frontend;
 
 	if (!(l->options & LI_O_UNLIMITED))
-		HA_ATOMIC_SUB(&actconn, 1);
+		_HA_ATOMIC_SUB(&actconn, 1);
 	if (fe)
-		HA_ATOMIC_SUB(&fe->feconn, 1);
-	HA_ATOMIC_SUB(&l->nbconn, 1);
-	HA_ATOMIC_SUB(&l->thr_conn[tid], 1);
+		_HA_ATOMIC_SUB(&fe->feconn, 1);
+	_HA_ATOMIC_SUB(&l->nbconn, 1);
+	_HA_ATOMIC_SUB(&l->thr_conn[tid], 1);
 
 	if (l->state == LI_FULL || l->state == LI_LIMITED)
 		resume_listener(l);
@@ -1050,33 +1118,6 @@ void bind_dump_kws(char **out)
 			}
 		}
 	}
-}
-
-/* recompute the bit counts per parity for the bind_thread value. This will be
- * used to quickly map a thread number from 1 to #thread to a thread ID among
- * the ones bound. This is the preparation phase of the bit rank counting algo
- * described here: https://graphics.stanford.edu/~seander/bithacks.html
- */
-void bind_recount_thread_bits(struct bind_conf *conf)
-{
-	unsigned long m;
-
-	m = thread_mask(conf->bind_thread);
-	conf->thr_count = my_popcountl(m);
-	mask_prep_rank_map(m, &conf->thr_2, &conf->thr_4, &conf->thr_8, &conf->thr_16);
-}
-
-/* Report the ID of thread <r> in bind_conf <conf> according to its thread_mask.
- * <r> must be between 0 and LONGBITS-1. This makes use of the pre-computed
- * bits resulting from bind_recount_thread_bits. See this function for more
- * info.
- */
-unsigned int bind_map_thread_id(const struct bind_conf *conf, unsigned int r)
-{
-	unsigned long m;
-
-	m = thread_mask(conf->bind_thread);
-	return mask_find_rank_bit_fast(r, m, conf->thr_2, conf->thr_4, conf->thr_8, conf->thr_16);
 }
 
 /************************************************************************/
@@ -1289,7 +1330,6 @@ static int bind_parse_process(char **args, int cur_arg, struct proxy *px, struct
 
 	conf->bind_proc |= proc;
 	conf->bind_thread |= thread;
-	bind_recount_thread_bits(conf);
 	return 0;
 }
 
