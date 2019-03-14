@@ -59,7 +59,7 @@ void conn_fd_handler(int fd)
 
 	flags = conn->flags & ~CO_FL_ERROR; /* ensure to call the wake handler upon error */
 
- process_handshake:
+process_handshake:
 	/* The handshake callbacks are called in sequence. If either of them is
 	 * missing something, it must enable the required polling at the socket
 	 * layer of the connection. Polling state is not guaranteed when entering
@@ -103,7 +103,7 @@ void conn_fd_handler(int fd)
 	 */
 	if (conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
 		return;
-		
+
 	if (conn->xprt && fd_send_ready(fd) &&
 		((conn->flags & (CO_FL_XPRT_WR_ENA|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_WR_ENA)) {
 		/* force reporting of activity by clearing the previous flags :
@@ -125,7 +125,7 @@ void conn_fd_handler(int fd)
 	 * changes due to a quick unexpected close().
 	 */
 	if (conn->xprt && fd_recv_ready(fd) &&
-	    ((conn->flags & (CO_FL_XPRT_RD_ENA|CO_FL_WAIT_ROOM|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_RD_ENA)) {
+		((conn->flags & (CO_FL_XPRT_RD_ENA|CO_FL_WAIT_ROOM|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_XPRT_RD_ENA)) {
 		/* force reporting of activity by clearing the previous flags :
 		 * we'll have at least ERROR or CONNECTED at the end of an I/O,
 		 * both of which will be detected below.
@@ -154,7 +154,7 @@ void conn_fd_handler(int fd)
 		if (!tcp_connect_probe(conn))
 			goto leave;
 	}
- leave:
+leave:
 	/* Verify if the connection just established. */
 	if (unlikely(!(conn->flags & (CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN | CO_FL_CONNECTED))))
 		conn->flags |= CO_FL_CONNECTED;
@@ -166,7 +166,7 @@ void conn_fd_handler(int fd)
 	 * unregister itself once called.
 	 */
 	if (((conn->flags ^ flags) & CO_FL_NOTIFY_DONE) &&
-	    conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
+		conn->xprt_done_cb && conn->xprt_done_cb(conn) < 0)
 		return;
 
 	/* The wake callback is normally used to notify the data layer about
@@ -185,9 +185,9 @@ void conn_fd_handler(int fd)
 	 * the fd (and return < 0 in this case).
 	 */
 	if ((io_available || (((conn->flags ^ flags) & CO_FL_NOTIFY_DATA) ||
-	     ((flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) != CO_FL_CONNECTED &&
-	      (conn->flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) == CO_FL_CONNECTED))) &&
-	    conn->mux->wake && conn->mux->wake(conn) < 0)
+						  ((flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) != CO_FL_CONNECTED &&
+						   (conn->flags & (CO_FL_CONNECTED|CO_FL_HANDSHAKE)) == CO_FL_CONNECTED))) &&
+		conn->mux->wake && conn->mux->wake(conn) < 0)
 		return;
 
 	/* commit polling changes */
@@ -311,7 +311,7 @@ int conn_sock_send(struct connection *conn, const void *buf, int len, int flags)
 		fd_cant_send(conn->handle.fd);
 		return 0;
 	}
- fail:
+fail:
 	conn->flags |= CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH | CO_FL_ERROR;
 	return ret;
 }
@@ -406,7 +406,7 @@ int conn_sock_drain(struct connection *conn)
 		if (len == -1 && errno == EFAULT)
 #endif
 			len = recv(conn->handle.fd, trash.area, trash.size,
-				   MSG_DONTWAIT | MSG_NOSIGNAL);
+					   MSG_DONTWAIT | MSG_NOSIGNAL);
 
 		if (len == 0)
 			goto shut;
@@ -429,7 +429,7 @@ int conn_sock_drain(struct connection *conn)
 	/* some data are still present, give up */
 	return 0;
 
- shut:
+shut:
 	/* we're certain the connection was shut down */
 	fdtab[conn->handle.fd].linger_risk = 0;
 	conn->flags |= CO_FL_SOCK_RD_SH;
@@ -636,7 +636,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	trash.data = line - trash.area;
 	goto eat_header;
 
- not_v1:
+not_v1:
 	/* try PPv2 */
 	if (trash.data < PP2_HEADER_LEN)
 		goto missing;
@@ -644,7 +644,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	hdr_v2 = (struct proxy_hdr_v2 *) trash.area;
 
 	if (memcmp(hdr_v2->sig, v2sig, PP2_SIGNATURE_LEN) != 0 ||
-	    (hdr_v2->ver_cmd & PP2_VERSION_MASK) != PP2_VERSION) {
+		(hdr_v2->ver_cmd & PP2_VERSION_MASK) != PP2_VERSION) {
 		conn->err_code = CO_ER_PRX_NOT_HDR;
 		goto fail;
 	}
@@ -728,7 +728,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	trash.data = PP2_HEADER_LEN + ntohs(hdr_v2->len);
 	goto eat_header;
 
- eat_header:
+eat_header:
 	/* remove the PROXY line from the request. For this we re-read the
 	 * exact line at once. If we don't get the exact same result, we
 	 * fail.
@@ -745,7 +745,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	conn->flags |= CO_FL_RCVD_PROXY;
 	return 1;
 
- missing:
+missing:
 	/* Missing data. Since we're using MSG_PEEK, we can only poll again if
 	 * we have not read anything. Otherwise we need to fail because we won't
 	 * be able to poll anymore.
@@ -753,17 +753,17 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	conn->err_code = CO_ER_PRX_TRUNCATED;
 	goto fail;
 
- bad_header:
+bad_header:
 	/* This is not a valid proxy protocol header */
 	conn->err_code = CO_ER_PRX_BAD_HDR;
 	goto fail;
 
- recv_abort:
+recv_abort:
 	conn->err_code = CO_ER_PRX_ABORT;
 	conn->flags |= CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 	goto fail;
 
- fail:
+fail:
 	__conn_sock_stop_both(conn);
 	conn->flags |= CO_FL_ERROR;
 	return 0;
@@ -841,7 +841,7 @@ int conn_recv_netscaler_cip(struct connection *conn, int flag)
 		line += 8;
 	}
 	/* Standard CIP protocol */
-	else if (trash.area[8] == 0x00) {
+	else if (trash.area[8] == 0x00) { 
 		hdr_len = ntohs(*(uint32_t *)(line+10));
 		line += 12;
 	}
@@ -943,7 +943,7 @@ int conn_recv_netscaler_cip(struct connection *conn, int flag)
 	conn->flags &= ~flag;
 	return 1;
 
- missing:
+missing:
 	/* Missing data. Since we're using MSG_PEEK, we can only poll again if
 	 * we have not read anything. Otherwise we need to fail because we won't
 	 * be able to poll anymore.
@@ -951,16 +951,16 @@ int conn_recv_netscaler_cip(struct connection *conn, int flag)
 	conn->err_code = CO_ER_CIP_TRUNCATED;
 	goto fail;
 
- bad_magic:
+bad_magic:
 	conn->err_code = CO_ER_CIP_BAD_MAGIC;
 	goto fail;
 
- recv_abort:
+recv_abort:
 	conn->err_code = CO_ER_CIP_ABORT;
 	conn->flags |= CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 	goto fail;
 
- fail:
+fail:
 	__conn_sock_stop_both(conn);
 	conn->flags |= CO_FL_ERROR;
 	return 0;
@@ -1002,8 +1002,8 @@ int make_proxy_line_v1(char *buf, int buf_len, struct sockaddr_storage *src, str
 
 	if (   !src
 	    || !dst
-	    || (src->ss_family != AF_INET && src->ss_family != AF_INET6)
-	    || (dst->ss_family != AF_INET && dst->ss_family != AF_INET6)) {
+		|| (src->ss_family != AF_INET && src->ss_family != AF_INET6)
+		|| (dst->ss_family != AF_INET && dst->ss_family != AF_INET6)) {
 		/* unknown family combination */
 		ret = snprintf(buf, buf_len, "PROXY UNKNOWN\r\n");
 		if (ret >= buf_len)
@@ -1101,10 +1101,10 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 	}
 
 	/* At least one of src or dst is not of AF_INET or AF_INET6 */
-	if (  !src
-	   || !dst
-	   || (src->ss_family != AF_INET && src->ss_family != AF_INET6)
-	   || (dst->ss_family != AF_INET && dst->ss_family != AF_INET6)) {
+	if (  !src 
+	    || !dst
+		|| (src->ss_family != AF_INET && src->ss_family != AF_INET6)
+		|| (dst->ss_family != AF_INET && dst->ss_family != AF_INET6)) {
 		if (buf_len < PP2_HDR_LEN_UNSPEC)
 			return 0;
 		hdr->ver_cmd = PP2_VERSION | PP2_CMD_LOCAL;
@@ -1204,16 +1204,16 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 				struct buffer *cn_trash = get_trash_chunk();
 				if (ssl_sock_get_remote_common_name(remote, cn_trash) > 0) {
 					ssl_tlv_len += make_tlv(&buf[ret+ssl_tlv_len], (buf_len - ret - ssl_tlv_len), PP2_SUBTYPE_SSL_CN,
-								cn_trash->data,
-								cn_trash->area);
+											cn_trash->data,
+											cn_trash->area);
 				}
 			}
 			if (srv->pp_opts & SRV_PP_V2_SSL_KEY_ALG) {
 				struct buffer *pkey_trash = get_trash_chunk();
 				if (ssl_sock_get_pkey_algo(remote, pkey_trash) > 0) {
 					ssl_tlv_len += make_tlv(&buf[ret+ssl_tlv_len], (buf_len - ret - ssl_tlv_len), PP2_SUBTYPE_SSL_KEY_ALG,
-								pkey_trash->data,
-								pkey_trash->area);
+											pkey_trash->data,
+											pkey_trash->area);
 				}
 			}
 			if (srv->pp_opts & SRV_PP_V2_SSL_SIG_ALG) {
@@ -1258,7 +1258,7 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 static int
 smp_fetch_fc_http_major(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct connection *conn = (kw[0] != 'b') ? objt_conn(smp->sess->origin) :
+	struct connection *conn = (kw[0] != 'b') ? objt_conn(smp->sess->origin) : 
 										smp->strm ? cs_conn(objt_cs(smp->strm->si[1].end)) : NULL;
 
 	smp->data.type = SMP_T_SINT;

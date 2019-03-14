@@ -23,6 +23,7 @@ int empty_pipe = 0;
 
 struct gctl_ipc gctl_ipc;
 
+/* FAKE */
 unsigned long flush_count = 0;
 unsigned long ft_get_flushcnt()
 {
@@ -87,7 +88,50 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 	return ret;
 }
 
-int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int pipe_cnt)
+
+int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
+{
+	int ret = 0;
+	struct pipe *pipe_trace = pipe;
+	struct pipe *pipe_prev = NULL;
+
+	if (pipe->next)
+	{
+		/* search next is empty insert new incoming to the pipe buffer tail */
+		while (1)
+		{
+			if (pipe_trace == NULL)
+			{
+				break;
+			}
+
+			if (pipe_trace->next == NULL) {
+				break;
+			}
+			
+			pipe_prev = pipe_trace;
+			pipe_trace = pipe_trace->next;
+
+			pipe_prev->next = pipe_trace->next;
+
+			//if () {
+
+				ft_clean_pipe(pipe_trace->pipe_dup);
+				put_pipe(pipe_trace->pipe_dup);
+					
+				ft_clean_pipe(pipe_trace);				
+				put_pipe(pipe_trace);
+				(*pipe_cnt)--;	
+
+			//}
+			
+			pipe_trace = pipe_prev->next;
+		}
+	}
+	return ret;
+}
+
+int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt)
 {
 	int ret = 0;
 	struct pipe *pipe_trace = pipe;
@@ -121,9 +165,8 @@ int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int pipe_cnt)
 				ft_clean_pipe(pipe_trace);				
 				put_pipe(pipe_trace);
 				
-				fd_pipe_cnt--;
+				(*pipe_cnt)--;
 				pipe_trace = pipe_prev->next;
-				pipe_cnt--;
 			}
 		}
 	}
@@ -141,6 +184,7 @@ void ft_clean_pipe(struct pipe *pipe)
 	pipe->trans_suspend = 0;
 	pipe->transfer_cnt = 0;
 	pipe->transfered = 0;
+	pipe->next = NULL;
 }	
 
 /* Cuju IPC handler callback */
@@ -311,6 +355,7 @@ int cuju_process(struct conn_stream *cs)
 	//unsigned int idx = 0;
 	struct proto_ipc *ipc_ptr = NULL;
 
+	/* area may be zero */
 	*(((char *)ic->buf.area) + ic->buf.data) = '\0';
 
 	if (!ic->buf.data) {

@@ -640,10 +640,11 @@ int si_cs_send(struct conn_stream *cs)
 		}
 
 #if ENABLE_CUJU_FT
-			if (!oc->pipe->data && !oc->pipe->next) {
-				put_pipe(oc->pipe);
-				oc->pipe = NULL;
-			}
+		if (!oc->pipe->data && !oc->pipe->next) {
+			ft_clean_pipe(oc->pipe);				
+			put_pipe(oc->pipe);
+			oc->pipe = NULL;
+		}
 #else
 		if (!oc->pipe->data) {
 			put_pipe(oc->pipe);
@@ -750,7 +751,7 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 	if (!(si->wait_event.events & SUB_RETRY_RECV))
 		ret |= si_cs_recv(cs);
 #if ENABLE_CUJU_FT
-	if (!(cs->conn->cujuipc_idx)) {
+	if (!(cs->conn->cujuipc_idx == 1)) {
 		if (ret != 0)
 			si_cs_process(cs);
 	}
