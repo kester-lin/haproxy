@@ -58,7 +58,8 @@ unsigned long ft_get_flushcnt();
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
 void cuju_fd_handler(int fd);
 int cuju_process(struct conn_stream *cs);
-int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int pipe_cnt);
+int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt);
+int ft_close_pipe(struct pipe *pipe,  int* pipe_cnt);
 void ft_clean_pipe(struct pipe *pipe);
 #endif
 

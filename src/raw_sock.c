@@ -198,6 +198,13 @@ leave:
 
 out_read0:
 	conn_sock_read0(conn);
+
+	fd_list_migration = 0;
+	fdtab[conn->handle.fd].enable_migration = 0;
+	empty_pipe = 1;
+	printf("CURRENT PIPE CNT IN RELEASE:%d\n", fd_pipe_cnt);
+	printf("Close FD:%d\n", conn->handle.fd);
+
 	conn->flags &= ~CO_FL_WAIT_L4_CONN;
 	goto leave;
 }
@@ -206,7 +213,8 @@ out_read0:
  */
 int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 {
-	int ret, done;
+	int ret = 0;
+	int done = 0;
 
 #if ENABLE_CUJU_FT
 	struct pipe *pipe_trace = pipe;
@@ -235,8 +243,23 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 		ft_dup_pipe(pipe, pipe_buf, 0);
 		ft_dup_pipe(pipe, pipe_dup, 1);
 		fd_pipe_cnt++;
-		printf("Pipe CNT:%d\n", fd_pipe_cnt);
+		printf("Create Pipe CNT:%d\n", fd_pipe_cnt);
 	}
+	else {
+		/* will trans for close */
+		//ft_close_pipe(pipe, &fd_pipe_cnt);
+		printf("NULL RETRANSMIT\n");
+
+		//if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
+		//	conn->flags &= ~CO_FL_WAIT_L4_CONN;
+		//conn_cond_update_sock_polling(conn);
+		//return done;
+		if (pipe->next == NULL)
+		{
+			goto after_send;
+		}
+	}
+
 	fdtab[conn->handle.fd].enable_migration = 1;
 
 	if (pipe->next) {
@@ -268,11 +291,8 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 
 		pipe->next = pipe_buf;
 		pipe->next->pipe_dup = pipe_dup;
-		//0x0
 	}
-
 	done = 0;
-
 	pipe_trans = pipe->next;
 	pipe->data = 0;
 
@@ -288,7 +308,7 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 
 	if(pipe_trans->epoch_idx) {
 		/* check for release */
-		ft_release_pipe(pipe, curr_epoch_id, fd_pipe_cnt);
+		ft_release_pipe(pipe, curr_epoch_id, &fd_pipe_cnt);
 		pipe_trans = pipe->next;
 
 		if (pipe_trans == NULL) {
@@ -380,8 +400,10 @@ after_send:
 
 #if ENABLE_CUJU_FT
 	if (pipe->next == NULL) {
-		fd_list_migration = 0;
-		fdtab[conn->handle.fd].enable_migration = 0;
+		//fd_list_migration = 0;
+		//fdtab[conn->handle.fd].enable_migration = 0;
+		//empty_pipe = 1;
+		printf("Create FD:%d\n", conn->handle.fd);
 		return done;
 	}
 

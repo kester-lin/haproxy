@@ -75,7 +75,7 @@ static void _update_fd(int fd)
 			/* fd removed from poll list */
 			opcode = EPOLL_CTL_DEL;
 			HA_ATOMIC_AND(&polled_mask[fd], ~tid_bit);
-		}
+		} 
 		else {
 			/* fd status changed */
 			opcode = EPOLL_CTL_MOD;
@@ -175,7 +175,6 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		tv_update_date(timeout, status);
 
 		if (status) {
-			printf("GET EVENT CHANGE!!!!!!!!!!!!!!!!\n");
 			pb_event = 0;
 			break;
 		}
@@ -204,6 +203,8 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		unsigned int e = epoll_events[count].events;
 		fd = epoll_events[count].data.fd;
 
+		printf("GET EVENT CHANGE!!!!!!!!!!!!!!!!\n");
+
 		if (!fdtab[fd].owner) {
 			activity[tid].poll_dead++;
 			continue;
@@ -221,8 +222,8 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		 * have same values... In fact it depends on gcc :-(
 		 */
 		if (EPOLLIN == FD_POLL_IN && EPOLLOUT == FD_POLL_OUT &&
-		    EPOLLPRI == FD_POLL_PRI && EPOLLERR == FD_POLL_ERR &&
-		    EPOLLHUP == FD_POLL_HUP) {
+			EPOLLPRI == FD_POLL_PRI && EPOLLERR == FD_POLL_ERR &&
+			EPOLLHUP == FD_POLL_HUP) {
 			n = e & (EPOLLIN|EPOLLOUT|EPOLLPRI|EPOLLERR|EPOLLHUP);
 		}
 		else {
@@ -248,7 +249,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		fd_update_events(fd_list_migration, FD_POLL_OUT);
 		return;
 	}
-#endif	
+#endif
 }
 
 static int init_epoll_per_thread()
@@ -274,9 +275,9 @@ static int init_epoll_per_thread()
 		updt_fd_polling(fd);
 
 	return 1;
- fail_fd:
+fail_fd:
 	free(epoll_events);
- fail_alloc:
+fail_alloc:
 	return 0;
 }
 
@@ -307,7 +308,7 @@ REGPRM1 static int _do_init(struct poller *p)
 
 	return 1;
 
- fail_fd:
+fail_fd:
 	p->pref = 0;
 	return 0;
 }
@@ -363,7 +364,7 @@ REGPRM1 static int _do_fork(struct poller *p)
  * main(). This is GCC-specific but it works at least since 2.95.
  * Special care must be taken so that it does not need any uninitialized data.
  */
-__attribute__((constructor))
+__attribute__((constructor)) 
 static void _do_register(void)
 {
 	struct poller *p;
@@ -389,7 +390,6 @@ static void _do_register(void)
 	p->poll = _do_poll;
 	p->fork = _do_fork;
 }
-
 
 /*
  * Local variables:
