@@ -31,9 +31,21 @@ unsigned long ft_get_flushcnt()
 	//static unsigned long flush_count = 0;
 
 	/* REAL */
-	unsigned long flush_count = gctl_ipc.ephch_id;
+	//unsigned long flush_count = gctl_ipc.flush_id;
 
-	return flush_count;
+	return flush_count++;
+}
+
+unsigned long epoch_count = 0;
+unsigned long ft_get_epochcnt()
+{
+	/* FAKE */
+	//static unsigned long flush_count = 0;
+
+	/* REAL */
+	//unsigned long epoch_count = gctl_ipc.ephch_id;
+
+	return epoch_count++;
 }
 
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
@@ -203,7 +215,7 @@ void cuju_fd_handler(int fd)
 	/* ensure to call the wake handler upon error */
 	flags = conn->flags & ~CO_FL_ERROR;
 
-	printf("cuju_fd_handler fd is %d\n", fd);
+	//printf("cuju_fd_handler fd is %d\n", fd);
 
 	//fd_stop_recv(fd);
 process_handshake:
@@ -362,8 +374,6 @@ int cuju_process(struct conn_stream *cs)
 		return -1;
 	}
 
-	printf("Data Size %lu\n", ic->buf.data);
-
 #if 0
 	printf("============================================================\n"); 
 	for( idx = 0; idx < ic->buf.data; idx++ )
@@ -377,9 +387,9 @@ int cuju_process(struct conn_stream *cs)
 #endif
 
 	ipc_ptr = (struct proto_ipc *)ic->buf.area;
-
-	printf("ipc_ptr->ephch_id: %d\n", ipc_ptr->ephch_id);
 #if 0
+	printf("Data Size %lu\n", ic->buf.data);
+	printf("ipc_ptr->ephch_id: %d\n", ipc_ptr->ephch_id);
 	printf("ipc_ptr->transmit_cnt: %d\n", ipc_ptr->transmit_cnt);
 	printf("ipc_ptr->ipc_mode: %d\n", ipc_ptr->ipc_mode);
 	printf("ipc_ptr->cuju_ft_mode: %d\n", ipc_ptr->cuju_ft_mode);
@@ -391,8 +401,13 @@ int cuju_process(struct conn_stream *cs)
 	printf("ipc_ptr->conn_count: %d\n", ipc_ptr->conn_count);
 #endif
 	/* Set GCTL */
+	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_RUN) {
+		gctl_ipc.ephch_id = ipc_ptr->ephch_id;
+	}
 
-	gctl_ipc.ephch_id = ipc_ptr->ephch_id;
+	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
+		gctl_ipc.flush_id =	ipc_ptr->ephch_id;
+	}
 
 	/* clear */
 	ic->buf.data = 0;

@@ -203,7 +203,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		unsigned int e = epoll_events[count].events;
 		fd = epoll_events[count].data.fd;
 
-		printf("GET EVENT CHANGE!!!!!!!!!!!!!!!!\n");
+		//printf("GET EVENT CHANGE!!!!!!!!!!!!!!!!\n");
 
 		if (!fdtab[fd].owner) {
 			activity[tid].poll_dead++;

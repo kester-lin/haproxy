@@ -248,7 +248,7 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 	else {
 		/* will trans for close */
 		//ft_close_pipe(pipe, &fd_pipe_cnt);
-		printf("NULL RETRANSMIT\n");
+		//printf("NULL RETRANSMIT\n");
 
 		//if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		//	conn->flags &= ~CO_FL_WAIT_L4_CONN;
@@ -256,6 +256,7 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 		//return done;
 		if (pipe->next == NULL)
 		{
+			printf("########################NULL RETRANSMIT########################\n");
 			goto after_send;
 		}
 	}

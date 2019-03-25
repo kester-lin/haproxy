@@ -55,6 +55,7 @@ struct proto_ipc
 #endif /* End of ENABLE_CUJU_IPC*/
 
 unsigned long ft_get_flushcnt();
+unsigned long ft_get_epochcnt();
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
 void cuju_fd_handler(int fd);
 int cuju_process(struct conn_stream *cs);

@@ -26,6 +26,7 @@ struct gctl_ipc
     u_int32_t packet_size : 16;
     
     uint32_t ephch_id;
+    uint32_t flush_id;
     
     struct timeval last_trans_time;
     struct timeval target_time;
