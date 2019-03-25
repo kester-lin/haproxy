@@ -16,7 +16,6 @@
 #include <common/htx.h>
 #include <common/uri_auth.h>
 
-#include <types/cache.h>
 #include <types/capture.h>
 
 #include <proto/acl.h>
@@ -60,6 +59,7 @@ static void htx_manage_server_side_cookies(struct stream *s, struct channel *res
 static int htx_stats_check_uri(struct stream *s, struct http_txn *txn, struct proxy *backend);
 static int htx_handle_stats(struct stream *s, struct channel *req);
 
+static int htx_handle_expect_hdr(struct stream *s, struct htx *htx, struct http_msg *msg);
 static int htx_reply_100_continue(struct stream *s);
 static int htx_reply_40x_unauthorized(struct stream *s, const char *auth_realm);
 
@@ -611,12 +611,13 @@ int htx_process_req_common(struct stream *s, struct channel *req, int an_bit, st
 			goto return_bad_req;
 	}
 
-	/* Proceed with the stats now. */
-	if (unlikely(objt_applet(s->target) == &http_stats_applet) ||
-	    unlikely(objt_applet(s->target) == &http_cache_applet)) {
-		/* process the stats request now */
+	/* Proceed with the applets now. */
+	if (unlikely(objt_applet(s->target))) {
 		if (sess->fe == s->be) /* report it if the request was intercepted by the frontend */
 			_HA_ATOMIC_ADD(&sess->fe->fe_counters.intercepted_req, 1);
+
+		if (htx_handle_expect_hdr(s, htx, msg) == -1)
+			goto return_bad_req;
 
 		if (!(s->flags & SF_ERR_MASK))      // this is not really an error but it is
 			s->flags |= SF_ERR_LOCAL;   // to mark that it comes from the proxy
@@ -627,6 +628,9 @@ int htx_process_req_common(struct stream *s, struct channel *req, int an_bit, st
 		req->analysers &= (AN_REQ_HTTP_BODY | AN_REQ_FLT_HTTP_HDRS | AN_REQ_FLT_END);
 		req->analysers &= ~AN_REQ_FLT_XFER_DATA;
 		req->analysers |= AN_REQ_HTTP_XFER_BODY;
+
+		req->flags |= CF_SEND_DONTWAIT;
+		s->flags |= SF_ASSIGNED;
 		goto done;
 	}
 
@@ -1075,22 +1079,8 @@ int htx_wait_for_request_body(struct stream *s, struct channel *req, int an_bit)
 	 */
 
 	if (msg->msg_state < HTTP_MSG_DATA) {
-		/* If we have HTTP/1.1 and Expect: 100-continue, then we must
-		 * send an HTTP/1.1 100 Continue intermediate response.
-		 */
-		if (msg->flags & HTTP_MSGF_VER_11) {
-			struct ist hdr = { .ptr = "Expect", .len = 6 };
-			struct http_hdr_ctx ctx;
-
-			ctx.blk = NULL;
-			/* Expect is allowed in 1.1, look for it */
-			if (http_find_header(htx, hdr, &ctx, 0) &&
-			    unlikely(isteqi(ctx.value, ist2("100-continue", 12)))) {
-				if (htx_reply_100_continue(s) == -1)
-					goto return_bad_req;
-				http_remove_header(htx, &ctx);
-			}
-		}
+		if (htx_handle_expect_hdr(s, htx, msg) == -1)
+			goto return_bad_req;
 	}
 
 	msg->msg_state = HTTP_MSG_DATA;
@@ -1170,6 +1160,7 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	struct http_txn *txn = s->txn;
 	struct http_msg *msg = &txn->req;
 	struct htx *htx;
+	short status = 0;
 	int ret;
 
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%lu analysers=%02x\n",
@@ -1282,7 +1273,7 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 			if (req->flags & CF_SHUTW) {
 				/* request errors are most likely due to the
 				 * server aborting the transfer. */
-				goto aborted_xfer;
+				goto return_srv_abort;
 			}
 			goto return_bad_req;
 		}
@@ -1311,28 +1302,13 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 
  missing_data_or_waiting:
 	/* stop waiting for data if the input is closed before the end */
-	if (msg->msg_state < HTTP_MSG_DONE && req->flags & CF_SHUTR) {
-		if (!(s->flags & SF_ERR_MASK))
-			s->flags |= SF_ERR_CLICL;
-		if (!(s->flags & SF_FINST_MASK)) {
-			if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-				s->flags |= SF_FINST_H;
-			else
-				s->flags |= SF_FINST_D;
-		}
-
-		_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
-		_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
-		if (objt_server(s->target))
-			_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
-
-		goto return_bad_req_stats_ok;
-	}
+	if (msg->msg_state < HTTP_MSG_DONE && req->flags & CF_SHUTR)
+		goto return_cli_abort;
 
  waiting:
 	/* waiting for the last bits to leave the buffer */
 	if (req->flags & CF_SHUTW)
-		goto aborted_xfer;
+		goto return_srv_abort;
 
 	if (htx->flags & HTX_FL_PARSING_ERROR)
 		goto return_bad_req;
@@ -1361,60 +1337,48 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 
 	return 0;
 
- return_bad_req: /* let's centralize all bad requests */
-	_HA_ATOMIC_ADD(&sess->fe->fe_counters.failed_req, 1);
-	if (sess->listener->counters)
-		_HA_ATOMIC_ADD(&sess->listener->counters->failed_req, 1);
-
- return_bad_req_stats_ok:
-	txn->req.err_state = txn->req.msg_state;
-	txn->req.msg_state = HTTP_MSG_ERROR;
-	if (txn->status > 0) {
-		/* Note: we don't send any error if some data were already sent */
-		htx_reply_and_close(s, txn->status, NULL);
-	} else {
-		txn->status = 400;
-		htx_reply_and_close(s, txn->status, htx_error_message(s));
-	}
-	req->analysers   &= AN_REQ_FLT_END;
-	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_cli_abort:
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
+	_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
+	if (objt_server(s->target))
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
 	if (!(s->flags & SF_ERR_MASK))
-		s->flags |= SF_ERR_PRXCOND;
-	if (!(s->flags & SF_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SF_FINST_H;
-		else
-			s->flags |= SF_FINST_D;
-	}
-	return 0;
+		s->flags |= SF_ERR_CLICL;
+	status = 400;
+	goto return_error;
 
- aborted_xfer:
-	txn->req.err_state = txn->req.msg_state;
-	txn->req.msg_state = HTTP_MSG_ERROR;
-	if (txn->status > 0) {
-		/* Note: we don't send any error if some data were already sent */
-		htx_reply_and_close(s, txn->status, NULL);
-	} else {
-		txn->status = 502;
-		htx_reply_and_close(s, txn->status, htx_error_message(s));
-	}
-	req->analysers   &= AN_REQ_FLT_END;
-	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_srv_abort:
 	_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
 	_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
 	if (objt_server(s->target))
 		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
-
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_SRVCL;
-	if (!(s->flags & SF_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SF_FINST_H;
-		else
-			s->flags |= SF_FINST_D;
+	status = 502;
+	goto return_error;
+
+  return_bad_req:
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.failed_req, 1);
+	if (sess->listener->counters)
+		_HA_ATOMIC_ADD(&sess->listener->counters->failed_req, 1);
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_CLICL;
+	status = 400;
+
+  return_error:
+	txn->req.err_state = txn->req.msg_state;
+	txn->req.msg_state = HTTP_MSG_ERROR;
+	if (txn->status > 0) {
+		/* Note: we don't send any error if some data were already sent */
+		htx_reply_and_close(s, txn->status, NULL);
+	} else {
+		txn->status = status;
+		htx_reply_and_close(s, txn->status, htx_error_message(s));
 	}
+	req->analysers   &= AN_REQ_FLT_END;
+	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
+	if (!(s->flags & SF_FINST_MASK))
+		s->flags |= ((txn->rsp.msg_state < HTTP_MSG_ERROR) ? SF_FINST_H : SF_FINST_D);
 	return 0;
 }
 
@@ -2234,7 +2198,7 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 			if (res->flags & CF_SHUTW) {
 				/* response errors are most likely due to the
 				 * client aborting the transfer. */
-				goto aborted_xfer;
+				goto return_cli_abort;
 			}
 			goto return_bad_res;
 		}
@@ -2244,7 +2208,7 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 
   missing_data_or_waiting:
 	if (res->flags & CF_SHUTW)
-		goto aborted_xfer;
+		goto return_cli_abort;
 
 	if (htx->flags & HTX_FL_PARSING_ERROR)
 		goto return_bad_res;
@@ -2256,16 +2220,10 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	 */
 	if (msg->msg_state < HTTP_MSG_DONE && res->flags & CF_SHUTR) {
 		if ((s->req.flags & (CF_SHUTR|CF_SHUTW)) == (CF_SHUTR|CF_SHUTW))
-			goto aborted_xfer;
+			goto return_cli_abort;
 		/* If we have some pending data, we continue the processing */
-		if (htx_is_empty(htx)) {
-			if (!(s->flags & SF_ERR_MASK))
-				s->flags |= SF_ERR_SRVCL;
-			_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
-			if (objt_server(s->target))
-				_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
-			goto return_bad_res_stats_ok;
-		}
+		if (htx_is_empty(htx))
+			goto return_srv_abort;
 	}
 
 	/* When TE: chunked is used, we need to get there again to parse
@@ -2291,42 +2249,40 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	/* the stream handler will take care of timeouts and errors */
 	return 0;
 
- return_bad_res: /* let's centralize all bad responses */
-	_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
+  return_srv_abort:
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
+	_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
 	if (objt_server(s->target))
-		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.failed_resp, 1);
-
- return_bad_res_stats_ok:
-	txn->rsp.err_state = txn->rsp.msg_state;
-	txn->rsp.msg_state = HTTP_MSG_ERROR;
-	/* don't send any error message as we're in the body */
-	htx_reply_and_close(s, txn->status, NULL);
-	res->analysers   &= AN_RES_FLT_END;
-	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
-	if (objt_server(s->target))
-		health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_HDRRSP);
-
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
 	if (!(s->flags & SF_ERR_MASK))
-		s->flags |= SF_ERR_PRXCOND;
-	if (!(s->flags & SF_FINST_MASK))
-		s->flags |= SF_FINST_D;
-	return 0;
+		s->flags |= SF_ERR_SRVCL;
+	goto return_error;
 
- aborted_xfer:
-	txn->rsp.err_state = txn->rsp.msg_state;
-	txn->rsp.msg_state = HTTP_MSG_ERROR;
-	/* don't send any error message as we're in the body */
-	htx_reply_and_close(s, txn->status, NULL);
-	res->analysers   &= AN_RES_FLT_END;
-	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_cli_abort:
 	_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
 	_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
 	if (objt_server(s->target))
 		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
-
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_CLICL;
+	goto return_error;
+
+  return_bad_res:
+	_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
+	if (objt_server(s->target)) {
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.failed_resp, 1);
+		health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_RSP);
+	}
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_SRVCL;
+
+   return_error:
+	txn->rsp.err_state = txn->rsp.msg_state;
+	txn->rsp.msg_state = HTTP_MSG_ERROR;
+	/* don't send any error message as we're in the body */
+	htx_reply_and_close(s, txn->status, NULL);
+	res->analysers   &= AN_RES_FLT_END;
+	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
 	if (!(s->flags & SF_FINST_MASK))
 		s->flags |= SF_FINST_D;
 	return 0;
@@ -4952,23 +4908,23 @@ static int htx_handle_stats(struct stream *s, struct channel *req)
 		}
 	}
 
-	/* Was the status page requested with a POST ? */
-	if (unlikely(txn->meth == HTTP_METH_POST)) {
-		if (appctx->ctx.stats.flags & STAT_ADMIN) {
-			/* we'll need the request body, possibly after sending 100-continue */
-			if (msg->msg_state < HTTP_MSG_DATA)
-				req->analysers |= AN_REQ_HTTP_BODY;
+	if (txn->meth == HTTP_METH_GET || txn->meth == HTTP_METH_HEAD)
+		appctx->st0 = STAT_HTTP_HEAD;
+	else if (txn->meth == HTTP_METH_POST) {
+		if (appctx->ctx.stats.flags & STAT_ADMIN)
 			appctx->st0 = STAT_HTTP_POST;
-		}
 		else {
+			/* POST without admin level */
 			appctx->ctx.stats.flags &= ~STAT_CHUNKED;
 			appctx->ctx.stats.st_code = STAT_STATUS_DENY;
 			appctx->st0 = STAT_HTTP_LAST;
 		}
 	}
 	else {
-		/* So it was another method (GET/HEAD) */
-		appctx->st0 = STAT_HTTP_HEAD;
+		/* Unsupported method */
+		appctx->ctx.stats.flags &= ~STAT_CHUNKED;
+		appctx->ctx.stats.st_code = STAT_STATUS_IVAL;
+		appctx->st0 = STAT_HTTP_LAST;
 	}
 
 	s->task->nice = -32; /* small boost for HTTP statistics */
@@ -5382,6 +5338,31 @@ struct buffer *htx_error_message(struct stream *s)
 		return &htx_err_chunks[msgnum];
 }
 
+
+/* Handle Expect: 100-continue for HTTP/1.1 messages if necessary. It returns 0
+ * on success and -1 on error.
+ */
+static int htx_handle_expect_hdr(struct stream *s, struct htx *htx, struct http_msg *msg)
+{
+	/* If we have HTTP/1.1 message with a body and Expect: 100-continue,
+	 * then we must send an HTTP/1.1 100 Continue intermediate response.
+	 */
+	if (msg->msg_state == HTTP_MSG_BODY && (msg->flags & HTTP_MSGF_VER_11) &&
+	    (msg->flags & (HTTP_MSGF_CNT_LEN|HTTP_MSGF_TE_CHNK))) {
+		struct ist hdr = { .ptr = "Expect", .len = 6 };
+		struct http_hdr_ctx ctx;
+
+		ctx.blk = NULL;
+		/* Expect is allowed in 1.1, look for it */
+		if (http_find_header(htx, hdr, &ctx, 0) &&
+		    unlikely(isteqi(ctx.value, ist2("100-continue", 12)))) {
+			if (htx_reply_100_continue(s) == -1)
+				return -1;
+			http_remove_header(htx, &ctx);
+		}
+	}
+	return 0;
+}
 
 /* Send a 100-Continue response to the client. It returns 0 on success and -1
  * on error. The response channel is updated accordingly.

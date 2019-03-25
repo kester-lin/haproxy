@@ -1393,7 +1393,7 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 
 	if ((h1s->cs->flags & CS_FL_REOS) && (!b_data(&h1c->ibuf) || htx_is_empty(htx))) {
 		h1s->cs->flags |= CS_FL_EOS;
-		if (h1m->state < H1_MSG_DONE)
+		if (h1m->state > H1_MSG_LAST_LF && h1m->state < H1_MSG_DONE)
 			h1s->cs->flags |= CS_FL_ERROR;
 	}
 
@@ -1777,7 +1777,7 @@ static int h1_recv(struct h1c *h1c)
 		h1_wake_stream_for_recv(h1s);
 
 	if (conn_xprt_read0_pending(conn) && h1s && h1s->cs)
-		h1s->cs->flags |= CS_FL_REOS;
+		h1s->cs->flags |= (CS_FL_REOS|CS_FL_READ_NULL);
 	if (!b_data(&h1c->ibuf))
 		h1_release_buf(h1c, &h1c->ibuf);
 	else if (!buf_room_for_htx_data(&h1c->ibuf))
@@ -1885,7 +1885,7 @@ static int h1_process(struct h1c * h1c)
 		if (h1c->flags & H1C_F_CS_ERROR || conn->flags & CO_FL_ERROR)
 			flags |= CS_FL_ERROR;
 		if (conn_xprt_read0_pending(conn))
-			flags |= CS_FL_EOS;
+			flags |= (CS_FL_REOS|CS_FL_READ_NULL);
 		h1s->cs->flags |= flags;
 		h1s->cs->data_cb->wake(h1s->cs);
 	}

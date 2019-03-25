@@ -1232,15 +1232,6 @@ enum act_return process_use_service(struct act_rule *rule, struct proxy *px,
 		appctx = si_appctx(&s->si[1]);
 		memset(&appctx->ctx, 0, sizeof(appctx->ctx));
 		appctx->rule = rule;
-
-		/* enable the minimally required analyzers in case of HTTP
-		 * keep-alive to properly handle keep-alive and compression
-		 * on the HTTP response.
-		 */
-		if (rule->from == ACT_F_HTTP_REQ) {
-			s->req.analysers &= AN_REQ_FLT_HTTP_HDRS | AN_REQ_FLT_END;
-			s->req.analysers |= AN_REQ_HTTP_XFER_BODY;
-		}
 	}
 	else
 		appctx = si_appctx(&s->si[1]);
@@ -1258,16 +1249,17 @@ enum act_return process_use_service(struct act_rule *rule, struct proxy *px,
 		default: return ACT_RET_YIELD;
 	}
 
+	if (rule->from != ACT_F_HTTP_REQ) {
+		if (sess->fe == s->be) /* report it if the request was intercepted by the frontend */
+			_HA_ATOMIC_ADD(&sess->fe->fe_counters.intercepted_req, 1);
+
+		/* The flag SF_ASSIGNED prevent from server assignment. */
+		s->flags |= SF_ASSIGNED;
+	}
+
 	/* Now we can schedule the applet. */
 	si_cant_get(&s->si[1]);
 	appctx_wakeup(appctx);
-
-	if (sess->fe == s->be) /* report it if the request was intercepted by the frontend */
-		_HA_ATOMIC_ADD(&sess->fe->fe_counters.intercepted_req, 1);
-
-	/* The flag SF_ASSIGNED prevent from server assignment. */
-	s->flags |= SF_ASSIGNED;
-
 	return ACT_RET_STOP;
 }
 
@@ -2846,6 +2838,25 @@ void service_keywords_register(struct action_kw_list *kw_list)
 	LIST_ADDQ(&service_keywords, &kw_list->list);
 }
 
+/* Lists the known services on <out> */
+void list_services(FILE *out)
+{
+	struct action_kw_list *kw_list;
+	int found = 0;
+	int i;
+
+	fprintf(out, "Available services :");
+	list_for_each_entry(kw_list, &service_keywords, list) {
+		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
+			if (!found)
+				fputc('\n', out);
+			found = 1;
+			fprintf(out, "\t%s\n", kw_list->kw[i].kw);
+		}
+	}
+	if (!found)
+		fprintf(out, " none\n");
+}
 
 /* This function dumps a complete stream state onto the stream interface's
  * read buffer. The stream has to be set in strm. It returns 0 if the output

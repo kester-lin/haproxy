@@ -196,9 +196,10 @@ struct h2s {
 	unsigned long long body_len; /* remaining body length according to content-length if H2_SF_DATA_CLEN */
 	struct buffer rxbuf; /* receive buffer, always valid (buf_empty or real buffer) */
 	struct wait_event wait_event; /* Wait list, when we're attempting to send a RST but we can't send */
-	struct wait_event *recv_wait; /* Address of the wait_event the conn_stream associated is waiting on */
-	struct wait_event *send_wait; /* The streeam is waiting for flow control */
+	struct wait_event *recv_wait; /* recv wait_event the conn_stream associated is waiting on (via h2_subscribe) */
+	struct wait_event *send_wait; /* send wait_event the conn_stream associated is waiting on (via h2_subscribe) */
 	struct list list; /* To be used when adding in h2c->send_list or h2c->fctl_lsit */
+	struct list sending_list; /* To be used when adding in h2c->sending_list */
 };
 
 /* descriptor for an h2 frame header */
@@ -278,6 +279,22 @@ static int h2_frt_transfer_data(struct h2s *h2s);
 static struct task *h2_deferred_shut(struct task *t, void *ctx, unsigned short state);
 static struct h2s *h2c_bck_stream_new(struct h2c *h2c, struct conn_stream *cs, struct session *sess);
 static void h2s_alert(struct h2s *h2s);
+
+static __inline int
+h2c_is_dead(struct h2c *h2c)
+{
+	if (eb_is_empty(&h2c->streams_by_id) &&     /* don't close if streams exist */
+	    ((h2c->conn->flags & CO_FL_ERROR) ||    /* errors close immediately */
+	     (h2c->st0 >= H2_CS_ERROR && !h2c->task) || /* a timeout stroke earlier */
+	     (!(h2c->conn->owner)) || /* Nobody's left to take care of the connection, drop it now */
+	     (!b_data(&h2c->mbuf) &&  /* mux buffer empty, also process clean events below */
+	      (conn_xprt_read0_pending(h2c->conn) ||
+	       (h2c->last_sid >= 0 && h2c->max_id >= h2c->last_sid)))))
+		return 1;
+
+	return 0;
+
+}
 
 /*****************************************************/
 /* functions below are for dynamic buffer management */
@@ -845,8 +862,8 @@ static void h2s_destroy(struct h2s *h2s)
 	 * reference left would be in the h2c send_list/fctl_list, and if
 	 * we're in it, we're getting out anyway
 	 */
-	LIST_DEL(&h2s->list);
-	LIST_INIT(&h2s->list);
+	LIST_DEL_INIT(&h2s->list);
+	LIST_DEL_INIT(&h2s->sending_list);
 	tasklet_free(h2s->wait_event.task);
 	pool_free(pool_head_h2s, h2s);
 }
@@ -877,6 +894,7 @@ static struct h2s *h2s_new(struct h2c *h2c, int id)
 	h2s->wait_event.handle = NULL;
 	h2s->wait_event.events = 0;
 	LIST_INIT(&h2s->list);
+	LIST_INIT(&h2s->sending_list);
 	h2s->h2c       = h2c;
 	h2s->cs        = NULL;
 	h2s->mws       = h2c->miw;
@@ -1384,10 +1402,35 @@ static int h2_send_empty_data_es(struct h2s *h2s)
 	return ret;
 }
 
-/* wake the streams attached to the connection, whose id is greater than <last>,
- * and assign their conn_stream the CS_FL_* flags <flags> in addition to
- * CS_FL_ERROR in case of error and CS_FL_REOS in case of closed connection.
- * The stream's state is automatically updated accordingly.
+/* wake a specific stream and assign its conn_stream the CS_FL_* flags <flags>
+ * in addition to CS_FL_ERROR in case of error and CS_FL_REOS in case of close
+ * connection. The stream's state is automatically updated accordingly. If the
+ * stream is orphaned, it is destroyed.
+ */
+static void h2s_wake_one_stream(struct h2s *h2s, uint32_t flags)
+{
+	if (!h2s->cs) {
+		/* this stream was already orphaned */
+		h2s_destroy(h2s);
+		return;
+	}
+
+	h2s->cs->flags |= flags;
+	if ((flags & CS_FL_ERR_PENDING) && (h2s->cs->flags & CS_FL_EOS))
+		h2s->cs->flags |= CS_FL_ERROR;
+
+	h2s_alert(h2s);
+
+	if (flags & CS_FL_ERR_PENDING && h2s->st < H2_SS_ERROR)
+		h2s->st = H2_SS_ERROR;
+	else if (flags & CS_FL_REOS && h2s->st == H2_SS_OPEN)
+		h2s->st = H2_SS_HREM;
+	else if (flags & CS_FL_REOS && h2s->st == H2_SS_HLOC)
+		h2s_close(h2s);
+}
+
+/* wake the streams attached to the connection, whose id is greater than <last>
+ * or unassigned.
  */
 static void h2_wake_some_streams(struct h2c *h2c, int last, uint32_t flags)
 {
@@ -1398,33 +1441,26 @@ static void h2_wake_some_streams(struct h2c *h2c, int last, uint32_t flags)
 		flags |= CS_FL_ERR_PENDING;
 
 	if (conn_xprt_read0_pending(h2c->conn))
-		flags |= CS_FL_REOS;
+		flags |= (CS_FL_REOS|CS_FL_READ_NULL);
 
+	/* Wake all streams with ID > last */
 	node = eb32_lookup_ge(&h2c->streams_by_id, last + 1);
 	while (node) {
 		h2s = container_of(node, struct h2s, by_id);
 		if (h2s->id <= last)
 			break;
 		node = eb32_next(node);
+		h2s_wake_one_stream(h2s, flags);
+	}
 
-		if (!h2s->cs) {
-			/* this stream was already orphaned */
-			h2s_destroy(h2s);
-			continue;
-		}
-
-		h2s->cs->flags |= flags;
-		if ((flags & CS_FL_ERR_PENDING) && (h2s->cs->flags & CS_FL_EOS))
-			h2s->cs->flags |= CS_FL_ERROR;
-
-		h2s_alert(h2s);
-
-		if (flags & CS_FL_ERR_PENDING && h2s->st < H2_SS_ERROR)
-			h2s->st = H2_SS_ERROR;
-		else if (flags & CS_FL_REOS && h2s->st == H2_SS_OPEN)
-			h2s->st = H2_SS_HREM;
-		else if (flags & CS_FL_REOS && h2s->st == H2_SS_HLOC)
-			h2s_close(h2s);
+	/* Wake all streams with unassigned ID (ID == 0) */
+	node = eb32_lookup(&h2c->streams_by_id, 0);
+	while (node) {
+		h2s = container_of(node, struct h2s, by_id);
+		if (h2s->id > 0)
+			break;
+		node = eb32_next(node);
+		h2s_wake_one_stream(h2s, flags);
 	}
 }
 
@@ -2497,7 +2533,7 @@ static void h2_process_demux(struct h2c *h2c)
  */
 static int h2_process_mux(struct h2c *h2c)
 {
-	struct h2s *h2s, *h2s_back;
+	struct h2s *h2s;
 
 	if (unlikely(h2c->st0 < H2_CS_FRAME_H)) {
 		if (unlikely(h2c->st0 == H2_CS_PREFACE && (h2c->flags & H2_CF_IS_BACK))) {
@@ -2527,31 +2563,31 @@ static int h2_process_mux(struct h2c *h2c)
 	 * blocked just on this.
 	 */
 
-	list_for_each_entry_safe(h2s, h2s_back, &h2c->fctl_list, list) {
+	list_for_each_entry(h2s, &h2c->fctl_list, list) {
 		if (h2c->mws <= 0 || h2c->flags & H2_CF_MUX_BLOCK_ANY ||
 		    h2c->st0 >= H2_CS_ERROR)
 			break;
+		if (h2s->send_wait->events & SUB_CALL_UNSUBSCRIBE)
+			continue;
 
 		h2s->flags &= ~H2_SF_BLK_ANY;
 		h2s->send_wait->events &= ~SUB_RETRY_SEND;
 		h2s->send_wait->events |= SUB_CALL_UNSUBSCRIBE;
+		LIST_ADDQ(&h2c->sending_list, &h2s->sending_list);
 		tasklet_wakeup(h2s->send_wait->task);
-		LIST_DEL(&h2s->list);
-		LIST_INIT(&h2s->list);
-		LIST_ADDQ(&h2c->sending_list, &h2s->list);
 	}
 
-	list_for_each_entry_safe(h2s, h2s_back, &h2c->send_list, list) {
+	list_for_each_entry(h2s, &h2c->send_list, list) {
 		if (h2c->st0 >= H2_CS_ERROR || h2c->flags & H2_CF_MUX_BLOCK_ANY)
 			break;
+		if (h2s->send_wait->events & SUB_CALL_UNSUBSCRIBE)
+			continue;
 
 		h2s->flags &= ~H2_SF_BLK_ANY;
 		h2s->send_wait->events &= ~SUB_RETRY_SEND;
 		h2s->send_wait->events |= SUB_CALL_UNSUBSCRIBE;
+		LIST_ADDQ(&h2c->sending_list, &h2s->sending_list);
 		tasklet_wakeup(h2s->send_wait->task);
-		LIST_DEL(&h2s->list);
-		LIST_INIT(&h2s->list);
-		LIST_ADDQ(&h2c->sending_list, &h2s->list);
 	}
 
  fail:
@@ -2567,7 +2603,7 @@ static int h2_process_mux(struct h2c *h2c)
 		}
 		return 1;
 	}
-	return (h2c->mws <= 0 || LIST_ISEMPTY(&h2c->fctl_list)) && LIST_ISEMPTY(&h2c->send_list);
+	return (1);
 }
 
 
@@ -2704,15 +2740,19 @@ static int h2_send(struct h2c *h2c)
 	 * for us.
 	 */
 	if (!(h2c->flags & (H2_CF_MUX_MFULL | H2_CF_DEM_MROOM))) {
-		while (!LIST_ISEMPTY(&h2c->send_list)) {
-			struct h2s *h2s = LIST_ELEM(h2c->send_list.n,
-			    struct h2s *, list);
-			LIST_DEL(&h2s->list);
-			LIST_INIT(&h2s->list);
-			LIST_ADDQ(&h2c->sending_list, &h2s->list);
+		struct h2s *h2s;
+
+		list_for_each_entry(h2s, &h2c->send_list, list) {
+			if (h2c->st0 >= H2_CS_ERROR || h2c->flags & H2_CF_MUX_BLOCK_ANY)
+				break;
+			if (h2s->send_wait->events & SUB_CALL_UNSUBSCRIBE)
+				continue;
+
+			h2s->flags &= ~H2_SF_BLK_ANY;
 			h2s->send_wait->events &= ~SUB_RETRY_SEND;
 			h2s->send_wait->events |= SUB_CALL_UNSUBSCRIBE;
 			tasklet_wakeup(h2s->send_wait->task);
+			LIST_ADDQ(&h2c->sending_list, &h2s->sending_list);
 		}
 	}
 	/* We're done, no more to send */
@@ -2724,6 +2764,7 @@ schedule:
 	return sent;
 }
 
+/* this is the tasklet referenced in h2c->wait_event.task */
 static struct task *h2_io_cb(struct task *t, void *ctx, unsigned short status)
 {
 	struct h2c *h2c = ctx;
@@ -2826,6 +2867,7 @@ static int h2_process(struct h2c *h2c)
 	return 0;
 }
 
+/* wake-up function called by the connection layer (mux_ops.wake) */
 static int h2_wake(struct connection *conn)
 {
 	struct h2c *h2c = conn->ctx;
@@ -2973,7 +3015,7 @@ static void h2_detach(struct conn_stream *cs)
 	 */
 	if (!(cs->conn->flags & CO_FL_ERROR) &&
 	    (h2c->st0 < H2_CS_ERROR) &&
-	    (h2s->flags & (H2_SF_BLK_MBUSY | H2_SF_BLK_MROOM | H2_SF_BLK_MFCTL)))
+	    (h2s->flags & (H2_SF_BLK_MBUSY | H2_SF_BLK_MROOM | H2_SF_BLK_MFCTL)) && (h2s->send_wait || h2s->recv_wait))
 		return;
 
 	if ((h2c->flags & H2_CF_DEM_BLOCK_ANY && h2s->id == h2c->dsi) ||
@@ -3031,13 +3073,7 @@ static void h2_detach(struct conn_stream *cs)
 	 * reached the ID already specified in a GOAWAY frame received
 	 * or sent (as seen by last_sid >= 0).
 	 */
-	if (eb_is_empty(&h2c->streams_by_id) &&     /* don't close if streams exist */
-	    ((h2c->conn->flags & CO_FL_ERROR) ||    /* errors close immediately */
-	     (h2c->st0 >= H2_CS_ERROR && !h2c->task) || /* a timeout stroke earlier */
-	     (!(h2c->conn->owner)) || /* Nobody's left to take care of the connection, drop it now */
-	     (!b_data(&h2c->mbuf) &&  /* mux buffer empty, also process clean events below */
-	      (conn_xprt_read0_pending(h2c->conn) ||
-	       (h2c->last_sid >= 0 && h2c->max_id >= h2c->last_sid))))) {
+	if (h2c_is_dead(h2c)) {
 		/* no more stream will come, kill it now */
 		h2_release(h2c->conn);
 	}
@@ -3051,13 +3087,16 @@ static void h2_detach(struct conn_stream *cs)
 	}
 }
 
-static void h2_do_shutr(struct h2s *h2s)
+/* Performs a synchronous or asynchronous shutr().
+ * FIXME: guess what the return code tries to indicate!
+ */
+static int h2_do_shutr(struct h2s *h2s)
 {
 	struct h2c *h2c = h2s->h2c;
 	struct wait_event *sw = &h2s->wait_event;
 
 	if (h2s->st == H2_SS_HLOC || h2s->st == H2_SS_ERROR || h2s->st == H2_SS_CLOSED)
-		return;
+		return 0;
 
 	/* a connstream may require us to immediately kill the whole connection
 	 * for example because of a "tcp-request content reject" rule that is
@@ -3069,6 +3108,13 @@ static void h2_do_shutr(struct h2s *h2s)
 		h2c_error(h2c, H2_ERR_ENHANCE_YOUR_CALM);
 		h2s_error(h2s, H2_ERR_ENHANCE_YOUR_CALM);
 	}
+	else if (!(h2s->flags & H2_SF_HEADERS_SENT)) {
+		/* Nothing was never sent for this stream, so reset with
+		 * REFUSED_STREAM error to let the client retry the
+		 * request.
+		 */
+		h2s_error(h2s, H2_ERR_REFUSED_STREAM);
+	}
 
 	if (!(h2s->flags & H2_SF_RST_SENT) &&
 	    h2s_send_rst_stream(h2c, h2s) <= 0)
@@ -3078,7 +3124,7 @@ static void h2_do_shutr(struct h2s *h2s)
 		tasklet_wakeup(h2c->wait_event.task);
 	h2s_close(h2s);
 
-	return;
+	return 0;
 add_to_list:
 	if (LIST_ISEMPTY(&h2s->list)) {
 		sw->events |= SUB_RETRY_SEND;
@@ -3092,15 +3138,19 @@ add_to_list:
 	}
 	/* Let the handler know we want shutr */
 	sw->handle = (void *)((long)sw->handle | 1);
+	return 1;
 }
 
-static void h2_do_shutw(struct h2s *h2s)
+/* Performs a synchronous or asynchronous shutw().
+ * FIXME: guess what the return code tries to indicate!
+ */
+static int h2_do_shutw(struct h2s *h2s)
 {
 	struct h2c *h2c = h2s->h2c;
 	struct wait_event *sw = &h2s->wait_event;
 
 	if (h2s->st == H2_SS_HLOC || h2s->st == H2_SS_ERROR || h2s->st == H2_SS_CLOSED)
-		return;
+		return 0;
 
 	if (h2s->flags & H2_SF_HEADERS_SENT) {
 		/* we can cleanly close using an empty data frame only after headers */
@@ -3124,6 +3174,13 @@ static void h2_do_shutw(struct h2s *h2s)
 			h2c_error(h2c, H2_ERR_ENHANCE_YOUR_CALM);
 			h2s_error(h2s, H2_ERR_ENHANCE_YOUR_CALM);
 		}
+		else {
+			/* Nothing was never sent for this stream, so reset with
+			 * REFUSED_STREAM error to let the client retry the
+			 * request.
+			 */
+			h2s_error(h2s, H2_ERR_REFUSED_STREAM);
+		}
 
 		if (!(h2s->flags & H2_SF_RST_SENT) &&
 		    h2s_send_rst_stream(h2c, h2s) <= 0)
@@ -3134,7 +3191,7 @@ static void h2_do_shutw(struct h2s *h2s)
 
 	if (!(h2c->wait_event.events & SUB_RETRY_SEND))
 		tasklet_wakeup(h2c->wait_event.task);
-	return;
+	return 0;
 
  add_to_list:
 	if (LIST_ISEMPTY(&h2s->list)) {
@@ -3149,12 +3206,18 @@ static void h2_do_shutw(struct h2s *h2s)
 	}
        /* let the handler know we want to shutw */
        sw->handle = (void *)((long)(sw->handle) | 2);
+       return 1;
 }
 
+/* This is the tasklet referenced in h2s->wait_event.task, it is used for
+ * deferred shutdowns when the h2_detach() was done but the mux buffer was full
+ * and prevented the last frame from being emitted.
+ */
 static struct task *h2_deferred_shut(struct task *t, void *ctx, unsigned short state)
 {
 	struct h2s *h2s = ctx;
 	long reason = (long)h2s->wait_event.handle;
+	int ret = 0;
 
 	if (h2s->send_wait) {
 		h2s->send_wait->events &= ~SUB_CALL_UNSUBSCRIBE;
@@ -3163,16 +3226,23 @@ static struct task *h2_deferred_shut(struct task *t, void *ctx, unsigned short s
 		LIST_INIT(&h2s->list);
 	}
 	if (reason & 2)
-		h2_do_shutw(h2s);
+		ret |= h2_do_shutw(h2s);
 	if (reason & 1)
-		h2_do_shutr(h2s);
+		ret |= h2_do_shutr(h2s);
 
-	if (h2s->st == H2_SS_CLOSED &&
-	    !((h2s->flags & (H2_SF_BLK_MBUSY | H2_SF_BLK_MROOM | H2_SF_BLK_MFCTL))) && !h2s->cs)
+	/* We're no longer trying to send anything, let's destroy the h2s */
+	if (!ret) {
+		struct h2c *h2c = h2s->h2c;
 		h2s_destroy(h2s);
+
+		if (h2c_is_dead(h2c))
+			h2_release(h2c->conn);
+	}
+
 	return NULL;
 }
 
+/* shutr() called by the conn_stream (mux_ops.shutr) */
 static void h2_shutr(struct conn_stream *cs, enum cs_shr_mode mode)
 {
 	struct h2s *h2s = cs->ctx;
@@ -3183,6 +3253,7 @@ static void h2_shutr(struct conn_stream *cs, enum cs_shr_mode mode)
 	h2_do_shutr(h2s);
 }
 
+/* shutw() called by the conn_stream (mux_ops.shutw) */
 static void h2_shutw(struct conn_stream *cs, enum cs_shw_mode mode)
 {
 	struct h2s *h2s = cs->ctx;
@@ -3694,12 +3765,6 @@ try_again:
 	h2c->rcvd_s += h2c->dpl;
 	h2c->dpl = 0;
 	h2c->st0 = H2_CS_FRAME_A; // send the corresponding window update
-
-	if (h2c->dff & H2_F_DATA_END_STREAM) {
-		h2s->flags |= H2_SF_ES_RCVD;
-		if (h2s->cs)
-			h2s->cs->flags |= CS_FL_REOS;
-	}
 	if (htx)
 		htx_to_buf(htx, csbuf);
 	return 1;
@@ -4682,13 +4747,17 @@ static size_t h2s_htx_frt_make_resp_data(struct h2s *h2s, struct buffer *buf, si
 		void *old_area = h2c->mbuf.area;
 
 		if (b_data(&h2c->mbuf)) {
-			/* too bad there are data left there. If we have less
-			 * than 1/4 of the mbuf's size and everything fits,
-			 * we'll perform a copy anyway. Otherwise we'll pretend
-			 * the mbuf is full and wait.
+			/* Too bad there are data left there. We're willing to memcpy/memmove
+			 * up to 1/4 of the buffer, which means that it's OK to copy a large
+			 * frame into a buffer containing few data if it needs to be realigned,
+			 * and that it's also OK to copy few data without realigning. Otherwise
+			 * we'll pretend the mbuf is full and wait for it to become empty.
 			 */
-			if (fsize <= b_size(&h2c->mbuf) / 4 && fsize + 9 <= b_room(&h2c->mbuf))
+			if (fsize + 9 <= b_room(&h2c->mbuf) &&
+			    (b_data(&h2c->mbuf) <= b_size(&h2c->mbuf) / 4 ||
+			     (fsize <= b_size(&h2c->mbuf) / 4 && fsize + 9 <= b_contig_space(&h2c->mbuf))))
 				goto copy;
+
 			h2c->flags |= H2_CF_MUX_MFULL;
 			h2s->flags |= H2_SF_BLK_MROOM;
 			goto end;
@@ -5035,7 +5104,13 @@ static size_t h2s_htx_make_trailers(struct h2s *h2s, struct htx *htx)
 	goto end;
 }
 
-/* Called from the upper layer, to subscribe to events, such as being able to send */
+/* Called from the upper layer, to subscribe to events, such as being able to send.
+ * The <param> argument here is supposed to be a pointer to a wait_event struct
+ * which will be passed to h2s->recv_wait or h2s->send_wait depending on the
+ * event_type. The event_type must only be a combination of SUB_RETRY_RECV and
+ * SUB_RETRY_SEND, other values will lead to -1 being returned. It always
+ * returns 0 except for the error above.
+ */
 static int h2_subscribe(struct conn_stream *cs, int event_type, void *param)
 {
 	struct wait_event *sw;
@@ -5069,10 +5144,13 @@ static int h2_subscribe(struct conn_stream *cs, int event_type, void *param)
 	if (event_type != 0)
 		return -1;
 	return 0;
-
-
 }
 
+/* Called from the upper layer, to unsubscribe some events (undo h2_subscribe).
+ * The <param> argument here is supposed to be a pointer to the same wait_event
+ * struct that was passed to h2_subscribe() otherwise nothing will be changed.
+ * It always returns zero.
+ */
 static int h2_unsubscribe(struct conn_stream *cs, int event_type, void *param)
 {
 	struct wait_event *sw;
@@ -5175,24 +5253,25 @@ static size_t h2_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	return ret;
 }
 
+/* stops all senders of this connection for example when the mux buffer is full.
+ * They are moved from the sending_list to either fctl_list or send_list.
+ */
 static void h2_stop_senders(struct h2c *h2c)
 {
 	struct h2s *h2s, *h2s_back;
 
-	list_for_each_entry_safe(h2s, h2s_back, &h2c->sending_list, list) {
-		/* Don't unschedule the stream if the mux is just busy waiting for more data fro mthat stream */
-		if (h2c->msi == h2s_id(h2s))
-			continue;
-		LIST_DEL(&h2s->list);
-		LIST_INIT(&h2s->list);
+	list_for_each_entry_safe(h2s, h2s_back, &h2c->sending_list, sending_list) {
+		LIST_DEL_INIT(&h2s->sending_list);
 		task_remove_from_task_list((struct task *)h2s->send_wait->task);
 		h2s->send_wait->events |= SUB_RETRY_SEND;
 		h2s->send_wait->events &= ~SUB_CALL_UNSUBSCRIBE;
-		LIST_ADD(&h2c->send_list, &h2s->list);
 	}
 }
 
-/* Called from the upper layer, to send data */
+/* Called from the upper layer, to send data from buffer <buf> for no more than
+ * <count> bytes. Returns the number of bytes effectively sent. Some status
+ * flags may be updated on the conn_stream.
+ */
 static size_t h2_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t count, int flags)
 {
 	struct h2s *h2s = cs->ctx;
@@ -5205,11 +5284,22 @@ static size_t h2_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	uint32_t bsize;
 	int32_t idx;
 
+	/* If we were not just woken because we wanted to send but couldn't,
+	 * and there's somebody else that is waiting to send, do nothing,
+	 * we will subscribe later and be put at the end of the list
+	 */
+	LIST_DEL_INIT(&h2s->sending_list);
+	if ((!(h2s->send_wait) || !(h2s->send_wait->events & SUB_CALL_UNSUBSCRIBE)) &&
+	    (!LIST_ISEMPTY(&h2s->h2c->send_list) || !LIST_ISEMPTY(&h2s->h2c->fctl_list)))
+		return 0;
+
 	if (h2s->send_wait) {
+		/* We want to stay in the send_list, so prepare ourself to be
+		 * eventually recalled if needed, and only remove ourself from
+		 * the list if we managed to send anything.
+		 */
 		h2s->send_wait->events &= ~SUB_CALL_UNSUBSCRIBE;
-		h2s->send_wait = NULL;
-		LIST_DEL(&h2s->list);
-		LIST_INIT(&h2s->list);
+		h2s->send_wait->events |= SUB_RETRY_SEND;
 	}
 	if (h2s->h2c->st0 < H2_CS_FRAME_H)
 		return 0;
@@ -5398,6 +5488,12 @@ static size_t h2_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 			cs->flags |= CS_FL_ERROR;
 		else
 			cs->flags |= CS_FL_ERR_PENDING;
+	}
+	if (total > 0 && h2s->send_wait) {
+		/* Ok we managed to send something, leave the send_list */
+		h2s->send_wait->events &= ~SUB_RETRY_SEND;
+		h2s->send_wait = NULL;
+		LIST_DEL_INIT(&h2s->list);
 	}
 	return total;
 }

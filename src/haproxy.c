@@ -412,6 +412,8 @@ static void display_build_opts()
 	putchar('\n');
 	list_mux_proto(stdout);
 	putchar('\n');
+	list_services(stdout);
+	putchar('\n');
 	list_filters(stdout);
 	putchar('\n');
 }
@@ -1478,6 +1480,12 @@ static int compute_ideal_maxconn()
 	/* subtract listeners and checks */
 	remain -= global.maxsock;
 
+	/* one epoll_fd/kqueue_fd per thread */
+	remain -= global.nbthread;
+
+	/* one wake-up pipe (2 fd) per thread */
+	remain -= 2 * global.nbthread;
+
 	/* Fixed pipes values : we only subtract them if they're not larger
 	 * than the remaining FDs because pipes are optional.
 	 */
@@ -2169,6 +2177,9 @@ static void init(int argc, char **argv)
 	global.hardmaxconn = global.maxconn;  /* keep this max value */
 	global.maxsock += global.maxconn * 2; /* each connection needs two sockets */
 	global.maxsock += global.maxpipes * 2; /* each pipe needs two FDs */
+	global.maxsock += global.nbthread;     /* one epoll_fd/kqueue_fd per thread */
+	global.maxsock += 2 * global.nbthread; /* one wake-up pipe (2 fd) per thread */
+
 	/* compute fd used by async engines */
 	if (global.ssl_used_async_engines) {
 		int sides = !!global.ssl_used_frontend + !!global.ssl_used_backend;

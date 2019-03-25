@@ -42,7 +42,6 @@
 #include <types/cli.h>
 #include <types/filters.h>
 #include <types/global.h>
-#include <types/cache.h>
 #include <types/stats.h>
 
 #include <proto/acl.h>
@@ -74,17 +73,6 @@
 #include <proto/task.h>
 #include <proto/pattern.h>
 #include <proto/vars.h>
-
-/* status codes available for the stats admin page (strictly 4 chars length) */
-const char *stat_status_codes[STAT_STATUS_SIZE] = {
-	[STAT_STATUS_DENY] = "DENY",
-	[STAT_STATUS_DONE] = "DONE",
-	[STAT_STATUS_ERRP] = "ERRP",
-	[STAT_STATUS_EXCD] = "EXCD",
-	[STAT_STATUS_NONE] = "NONE",
-	[STAT_STATUS_PART] = "PART",
-	[STAT_STATUS_UNKN] = "UNKN",
-};
 
 /* This function handles a server error at the stream interface level. The
  * stream interface is assumed to be already in a closed state. An optional
@@ -1322,22 +1310,23 @@ int http_handle_stats(struct stream *s, struct channel *req)
 		}
 	}
 
-	/* Was the status page requested with a POST ? */
-	if (unlikely(txn->meth == HTTP_METH_POST && txn->req.body_len > 0)) {
-		if (appctx->ctx.stats.flags & STAT_ADMIN) {
-			/* we'll need the request body, possibly after sending 100-continue */
-			if (msg->msg_state < HTTP_MSG_CHUNK_SIZE)
-				req->analysers |= AN_REQ_HTTP_BODY;
+	if (txn->meth == HTTP_METH_GET || txn->meth == HTTP_METH_HEAD)
+		appctx->st0 = STAT_HTTP_HEAD;
+	else if (txn->meth == HTTP_METH_POST && (msg->flags & HTTP_MSGF_CNT_LEN)) {
+		if (appctx->ctx.stats.flags & STAT_ADMIN)
 			appctx->st0 = STAT_HTTP_POST;
-		}
 		else {
+			/* POST without admin level */
+			appctx->ctx.stats.flags &= ~STAT_CHUNKED;
 			appctx->ctx.stats.st_code = STAT_STATUS_DENY;
 			appctx->st0 = STAT_HTTP_LAST;
 		}
 	}
 	else {
-		/* So it was another method (GET/HEAD) */
-		appctx->st0 = STAT_HTTP_HEAD;
+		/* Unsupported method or chunked POST */
+		appctx->ctx.stats.flags &= ~STAT_CHUNKED;
+		appctx->ctx.stats.st_code = STAT_STATUS_IVAL;
+		appctx->st0 = STAT_HTTP_LAST;
 	}
 
 	s->task->nice = -32; /* small boost for HTTP statistics */
@@ -1385,6 +1374,25 @@ static int http_transform_header(struct stream* s, struct http_msg *msg,
   leave:
 	free_trash_chunk(replace);
 	return ret;
+}
+
+/* Handle Expect: 100-continue for HTTP/1.1 messages if necessary. */
+static void http_handle_expect_hdr(struct stream *s, struct channel *req, struct http_msg *msg)
+{
+	/* If we have HTTP/1.1 message with a body and Expect: 100-continue,
+	 * then we must send an HTTP/1.1 100 Continue intermediate response.
+	 */
+	if (msg->msg_state == HTTP_MSG_BODY && (msg->flags & HTTP_MSGF_VER_11) &&
+	    (msg->flags & (HTTP_MSGF_CNT_LEN|HTTP_MSGF_TE_CHNK))) {
+		struct hdr_ctx ctx;
+		ctx.idx = 0;
+		/* Expect is allowed in 1.1, look for it */
+		if (http_find_header2("Expect", 6, ci_head(req), &s->txn->hdr_idx, &ctx) &&
+		    unlikely(ctx.vlen == 12 && strncasecmp(ctx.line+ctx.val, "100-continue", 12) == 0)) {
+			co_inject(&s->res, HTTP_100.ptr, HTTP_100.len);
+			http_remove_header2(&s->txn->req, &s->txn->hdr_idx, &ctx);
+		}
+	}
 }
 
 /*
@@ -2630,11 +2638,12 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 
 
 	/* Proceed with the stats now. */
-	if (unlikely(objt_applet(s->target) == &http_stats_applet) ||
-	    unlikely(objt_applet(s->target) == &http_cache_applet)) {
+	if (unlikely(objt_applet(s->target))) {
 		/* process the stats request now */
 		if (sess->fe == s->be) /* report it if the request was intercepted by the frontend */
 			_HA_ATOMIC_ADD(&sess->fe->fe_counters.intercepted_req, 1);
+
+		http_handle_expect_hdr(s, req, msg);
 
 		if (!(s->flags & SF_ERR_MASK))      // this is not really an error but it is
 			s->flags |= SF_ERR_LOCAL;   // to mark that it comes from the proxy
@@ -2645,6 +2654,9 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 		req->analysers &= (AN_REQ_HTTP_BODY | AN_REQ_FLT_HTTP_HDRS | AN_REQ_FLT_END);
 		req->analysers &= ~AN_REQ_FLT_XFER_DATA;
 		req->analysers |= AN_REQ_HTTP_XFER_BODY;
+
+		req->flags |= CF_SEND_DONTWAIT;
+		s->flags |= SF_ASSIGNED;
 		goto done;
 	}
 
@@ -3166,33 +3178,16 @@ int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit
 	if (IS_HTX_STRM(s))
 		return htx_wait_for_request_body(s, req, an_bit);
 
+	if (msg->msg_state < HTTP_MSG_BODY)
+		goto missing_data;
+
 	/* We have to parse the HTTP request body to find any required data.
 	 * "balance url_param check_post" should have been the only way to get
 	 * into this. We were brought here after HTTP header analysis, so all
 	 * related structures are ready.
 	 */
-
 	if (msg->msg_state < HTTP_MSG_CHUNK_SIZE) {
-		/* This is the first call */
-		if (msg->msg_state < HTTP_MSG_BODY)
-			goto missing_data;
-
-		if (msg->msg_state < HTTP_MSG_100_SENT) {
-			/* If we have HTTP/1.1 and Expect: 100-continue, then we must
-			 * send an HTTP/1.1 100 Continue intermediate response.
-			 */
-			if (msg->flags & HTTP_MSGF_VER_11) {
-				struct hdr_ctx ctx;
-				ctx.idx = 0;
-				/* Expect is allowed in 1.1, look for it */
-				if (http_find_header2("Expect", 6, ci_head(req), &txn->hdr_idx, &ctx) &&
-				    unlikely(ctx.vlen == 12 && strncasecmp(ctx.line+ctx.val, "100-continue", 12) == 0)) {
-					co_inject(&s->res, HTTP_100.ptr, HTTP_100.len);
-					http_remove_header2(&txn->req, &txn->hdr_idx, &ctx);
-				}
-			}
-			msg->msg_state = HTTP_MSG_100_SENT;
-		}
+		http_handle_expect_hdr(s, req, msg);
 
 		/* we have msg->sov which points to the first byte of message body.
 		 * ci_head(req) still points to the beginning of the message. We
@@ -3971,6 +3966,7 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	struct session *sess = s->sess;
 	struct http_txn *txn = s->txn;
 	struct http_msg *msg = &s->txn->req;
+	short status = 0;
 	int ret;
 
 	if (IS_HTX_STRM(s))
@@ -4060,7 +4056,7 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 			if (req->flags & CF_SHUTW) {
 				/* request errors are most likely due to the
 				 * server aborting the transfer. */
-				goto aborted_xfer;
+				goto return_srv_abort;
 			}
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(sess->fe, s, msg, msg->err_state, s->be);
@@ -4091,28 +4087,13 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 
  missing_data_or_waiting:
 	/* stop waiting for data if the input is closed before the end */
-	if (msg->msg_state < HTTP_MSG_ENDING && req->flags & CF_SHUTR) {
-		if (!(s->flags & SF_ERR_MASK))
-			s->flags |= SF_ERR_CLICL;
-		if (!(s->flags & SF_FINST_MASK)) {
-			if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-				s->flags |= SF_FINST_H;
-			else
-				s->flags |= SF_FINST_D;
-		}
-
-		_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
-		_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
-		if (objt_server(s->target))
-			_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
-
-		goto return_bad_req_stats_ok;
-	}
+	if (msg->msg_state < HTTP_MSG_ENDING && req->flags & CF_SHUTR)
+		goto return_cli_abort;
 
  waiting:
 	/* waiting for the last bits to leave the buffer */
 	if (req->flags & CF_SHUTW)
-		goto aborted_xfer;
+		goto return_srv_abort;
 
 	/* When TE: chunked is used, we need to get there again to parse remaining
 	 * chunks even if the client has closed, so we don't want to set CF_DONTCLOSE.
@@ -4138,60 +4119,48 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 
 	return 0;
 
- return_bad_req: /* let's centralize all bad requests */
-	_HA_ATOMIC_ADD(&sess->fe->fe_counters.failed_req, 1);
-	if (sess->listener->counters)
-		_HA_ATOMIC_ADD(&sess->listener->counters->failed_req, 1);
-
- return_bad_req_stats_ok:
-	txn->req.err_state = txn->req.msg_state;
-	txn->req.msg_state = HTTP_MSG_ERROR;
-	if (txn->status) {
-		/* Note: we don't send any error if some data were already sent */
-		http_reply_and_close(s, txn->status, NULL);
-	} else {
-		txn->status = 400;
-		http_reply_and_close(s, txn->status, http_error_message(s));
-	}
-	req->analysers   &= AN_REQ_FLT_END;
-	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_cli_abort:
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
+	_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
+	if (objt_server(s->target))
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
 	if (!(s->flags & SF_ERR_MASK))
-		s->flags |= SF_ERR_PRXCOND;
-	if (!(s->flags & SF_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SF_FINST_H;
-		else
-			s->flags |= SF_FINST_D;
-	}
-	return 0;
+		s->flags |= SF_ERR_CLICL;
+	status = 400;
+	goto return_error;
 
- aborted_xfer:
-	txn->req.err_state = txn->req.msg_state;
-	txn->req.msg_state = HTTP_MSG_ERROR;
-	if (txn->status) {
-		/* Note: we don't send any error if some data were already sent */
-		http_reply_and_close(s, txn->status, NULL);
-	} else {
-		txn->status = 502;
-		http_reply_and_close(s, txn->status, http_error_message(s));
-	}
-	req->analysers   &= AN_REQ_FLT_END;
-	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_srv_abort:
 	_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
 	_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
 	if (objt_server(s->target))
 		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
-
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_SRVCL;
-	if (!(s->flags & SF_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SF_FINST_H;
-		else
-			s->flags |= SF_FINST_D;
+	status = 502;
+	goto return_error;
+
+  return_bad_req: /* let's centralize all bad requests */
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.failed_req, 1);
+	if (sess->listener->counters)
+		_HA_ATOMIC_ADD(&sess->listener->counters->failed_req, 1);
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_CLICL;
+	status = 400;
+
+  return_error:
+	txn->req.err_state = txn->req.msg_state;
+	txn->req.msg_state = HTTP_MSG_ERROR;
+	if (txn->status > 0) {
+		/* Note: we don't send any error if some data were already sent */
+		http_reply_and_close(s, txn->status, NULL);
+	} else {
+		txn->status = status;
+		http_reply_and_close(s, txn->status, http_error_message(s));
 	}
+	req->analysers   &= AN_REQ_FLT_END;
+	s->res.analysers &= AN_RES_FLT_END; /* we're in data phase, we want to abort both directions */
+	if (!(s->flags & SF_FINST_MASK))
+		s->flags |= ((txn->rsp.msg_state < HTTP_MSG_ERROR) ? SF_FINST_H : SF_FINST_D);
 	return 0;
 }
 
@@ -5228,7 +5197,7 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 
 	if ((res->flags & (CF_READ_ERROR|CF_READ_TIMEOUT|CF_WRITE_ERROR|CF_WRITE_TIMEOUT)) ||
 	    ((res->flags & CF_SHUTW) && (res->to_forward || co_data(res))) ||
-	     !s->req.analysers) {
+	    !s->req.analysers) {
 		/* Output closed while we were sending data. We must abort and
 		 * wake the other side up.
 		 */
@@ -5275,7 +5244,7 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 			if (res->flags & CF_SHUTW) {
 				/* response errors are most likely due to the
 				 * client aborting the transfer. */
-				goto aborted_xfer;
+				goto return_cli_abort;
 			}
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(s->be, s, msg, msg->err_state, strm_fe(s));
@@ -5287,7 +5256,7 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 
   missing_data_or_waiting:
 	if (res->flags & CF_SHUTW)
-		goto aborted_xfer;
+		goto return_cli_abort;
 
 	/* stop waiting for data if the input is closed before the end. If the
 	 * client side was already closed, it means that the client has aborted,
@@ -5296,16 +5265,10 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 	 */
 	if (msg->msg_state < HTTP_MSG_ENDING && res->flags & CF_SHUTR) {
 		if ((s->req.flags & (CF_SHUTR|CF_SHUTW)) == (CF_SHUTR|CF_SHUTW))
-			goto aborted_xfer;
+			goto return_cli_abort;
 		/* If we have some pending data, we continue the processing */
-		if (!ci_data(res)) {
-			if (!(s->flags & SF_ERR_MASK))
-				s->flags |= SF_ERR_SRVCL;
-			_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
-			if (objt_server(s->target))
-				_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
-			goto return_bad_res_stats_ok;
-		}
+		if (!ci_data(res))
+			goto return_srv_abort;
 	}
 
 	/* we need to obey the req analyser, so if it leaves, we must too */
@@ -5338,42 +5301,40 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 	/* the stream handler will take care of timeouts and errors */
 	return 0;
 
- return_bad_res: /* let's centralize all bad responses */
-	_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
+  return_srv_abort:
+	_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
+	_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
 	if (objt_server(s->target))
-		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.failed_resp, 1);
-
- return_bad_res_stats_ok:
-	txn->rsp.err_state = txn->rsp.msg_state;
-	txn->rsp.msg_state = HTTP_MSG_ERROR;
-	/* don't send any error message as we're in the body */
-	http_reply_and_close(s, txn->status, NULL);
-	res->analysers   &= AN_RES_FLT_END;
-	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
-	if (objt_server(s->target))
-		health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_HDRRSP);
-
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.srv_aborts, 1);
 	if (!(s->flags & SF_ERR_MASK))
-		s->flags |= SF_ERR_PRXCOND;
-	if (!(s->flags & SF_FINST_MASK))
-		s->flags |= SF_FINST_D;
-	return 0;
+		s->flags |= SF_ERR_SRVCL;
+	goto return_error;
 
- aborted_xfer:
-	txn->rsp.err_state = txn->rsp.msg_state;
-	txn->rsp.msg_state = HTTP_MSG_ERROR;
-	/* don't send any error message as we're in the body */
-	http_reply_and_close(s, txn->status, NULL);
-	res->analysers   &= AN_RES_FLT_END;
-	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
-
+  return_cli_abort:
 	_HA_ATOMIC_ADD(&sess->fe->fe_counters.cli_aborts, 1);
 	_HA_ATOMIC_ADD(&s->be->be_counters.cli_aborts, 1);
 	if (objt_server(s->target))
 		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.cli_aborts, 1);
-
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_CLICL;
+	goto return_error;
+
+  return_bad_res:
+	_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
+	if (objt_server(s->target)) {
+		_HA_ATOMIC_ADD(&objt_server(s->target)->counters.failed_resp, 1);
+		health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_RSP);
+	}
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_SRVCL;
+
+   return_error:
+	txn->rsp.err_state = txn->rsp.msg_state;
+	txn->rsp.msg_state = HTTP_MSG_ERROR;
+	/* don't send any error message as we're in the body */
+	http_reply_and_close(s, txn->status, NULL);
+	res->analysers   &= AN_RES_FLT_END;
+	s->req.analysers &= AN_REQ_FLT_END; /* we're in data phase, we want to abort both directions */
 	if (!(s->flags & SF_FINST_MASK))
 		s->flags |= SF_FINST_D;
 	return 0;
