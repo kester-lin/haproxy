@@ -17,36 +17,65 @@
 #endif
 
 #if ENABLE_CUJU_FT
-int fd_list_migration = 0;
-int fd_pipe_cnt = 0;
-int empty_pipe = 0;
+#define FAKE_CUJU_ID 0
+
+
+#define MAC_LENGTH 4
+#define DEFAULT_NIC_CNT 3
+#define CONNECTION_LENGTH 12
+#define DEFAULT_CONN_CNT 3
+#define DEFAULT_IPC_ARRAY  (24+(MAC_LENGTH*DEFAULT_NIC_CNT)+(CONNECTION_LENGTH*DEFAULT_CONN_CNT))
+
+u_int16_t fd_list_migration = 0;
+u_int16_t fd_pipe_cnt = 0;
+u_int16_t empty_pipe = 0;
+u_int32_t guest_ip_db = 0;  
 
 struct gctl_ipc gctl_ipc;
 
+#if FAKE_CUJU_ID
 /* FAKE */
 unsigned long flush_count = 0;
 unsigned long ft_get_flushcnt()
 {
-	/* FAKE */
-	//static unsigned long flush_count = 0;
-
-	/* REAL */
-	//unsigned long flush_count = gctl_ipc.flush_id;
-
 	return flush_count++;
 }
 
 unsigned long epoch_count = 0;
 unsigned long ft_get_epochcnt()
 {
+	return epoch_count++;
+}
+
+#else
+/* FAKE */
+//unsigned long flush_count = 0;
+unsigned long ft_get_flushcnt()
+{
 	/* FAKE */
 	//static unsigned long flush_count = 0;
 
 	/* REAL */
-	//unsigned long epoch_count = gctl_ipc.ephch_id;
+	unsigned long flush_count = gctl_ipc.flush_id;
 
-	return epoch_count++;
+	return flush_count;
 }
+
+//unsigned long epoch_count = 0;
+unsigned long ft_get_epochcnt()
+{
+	/* FAKE */
+	//static unsigned long flush_count = 0;
+
+	/* REAL */
+	unsigned long epoch_count = gctl_ipc.ephch_id;
+
+	return epoch_count;
+}
+
+#endif
+
+
 
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 {
@@ -97,6 +126,24 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 	dest->in_fd = source->in_fd;
 	dest->out_fd = source->out_fd;
 
+	if (source->epoch_idx) {
+		dest->epoch_id = source->epoch_id;
+
+		if (clean) {
+			source->epoch_id = 0;
+			source->epoch_idx = 0;
+		}
+	}
+
+	if (source->flush_idx) {
+		dest->flush_id = source->flush_id;
+
+		if (clean) {
+			source->flush_id = 0;
+			source->flush_idx = 0;
+		}
+	}	
+
 	return ret;
 }
 
@@ -107,9 +154,9 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_prev = NULL;
 
-	if (pipe->next)
+	if (pipe->pipe_nxt)
 	{
-		/* search next is empty insert new incoming to the pipe buffer tail */
+		/* search pipe_next is empty insert new incoming to the pipe buffer tail */
 		while (1)
 		{
 			if (pipe_trace == NULL)
@@ -117,14 +164,14 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 				break;
 			}
 
-			if (pipe_trace->next == NULL) {
+			if (pipe_trace->pipe_nxt == NULL) {
 				break;
 			}
 			
 			pipe_prev = pipe_trace;
-			pipe_trace = pipe_trace->next;
+			pipe_trace = pipe_trace->pipe_nxt;
 
-			pipe_prev->next = pipe_trace->next;
+			pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
 
 			//if () {
 
@@ -137,19 +184,19 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 
 			//}
 			
-			pipe_trace = pipe_prev->next;
+			pipe_trace = pipe_prev->pipe_nxt;
 		}
 	}
 	return ret;
 }
 
-int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt)
+int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* total_pipe_cnt ,uint16_t* pipe_cnt)
 {
 	int ret = 0;
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_prev = NULL;
 
-	if (pipe->next)
+	if (pipe->pipe_nxt)
 	{
 		/* search next is empty insert new incoming to the pipe buffer tail */
 		while (1)
@@ -159,17 +206,63 @@ int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt)
 				break;
 			}
 
-			if (pipe_trace->next == NULL) {
+			if (pipe_trace->pipe_nxt == NULL) {
 				break;
 			}
 			
 			pipe_prev = pipe_trace;
-			pipe_trace = pipe_trace->next;
+			pipe_trace = pipe_trace->pipe_nxt;
 
 			/* TODO: consider overflow */
-			if (pipe_trace->epoch_id < epoch_id)
+			if (pipe_trace->flush_id < flush_id)
 			{
-				pipe_prev->next = pipe_trace->next;
+				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
+				
+				if(pipe_trace->pipe_dup) {
+					ft_clean_pipe(pipe_trace->pipe_dup);
+					put_pipe(pipe_trace->pipe_dup);
+				}
+				
+				ft_clean_pipe(pipe_trace);				
+				put_pipe(pipe_trace);
+				
+				(*pipe_cnt)--;
+				(*total_pipe_cnt)--;
+				pipe_trace = pipe_prev->pipe_nxt;
+			}
+		}
+	}
+
+	return ret;
+}
+
+int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , uint16_t* pipe_cnt)
+{
+	int ret = 0;
+	struct pipe *pipe_trace = pipe;
+	struct pipe *pipe_prev = NULL;
+
+	if (pipe->pipe_nxt)
+	{
+		/* search pipe_nxt is empty insert new incoming to the pipe buffer tail */
+		while (1)
+		{
+			if (pipe_trace == NULL)
+			{
+				break;
+			}
+
+			if (pipe_trace->pipe_nxt == NULL) {
+				break;
+			}
+			
+			pipe_prev = pipe_trace;
+			pipe_trace = pipe_trace->pipe_nxt;
+
+			/* TODO: consider overflow */
+			if (pipe_trace->transfered)
+			{
+				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
 				
 				ft_clean_pipe(pipe_trace->pipe_dup);
 				put_pipe(pipe_trace->pipe_dup);
@@ -178,7 +271,8 @@ int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt)
 				put_pipe(pipe_trace);
 				
 				(*pipe_cnt)--;
-				pipe_trace = pipe_prev->next;
+				(*total_pipe_cnt)--;
+				pipe_trace = pipe_prev->pipe_nxt;
 			}
 		}
 	}
@@ -189,14 +283,14 @@ int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt)
 void ft_clean_pipe(struct pipe *pipe)
 {
 	pipe->pipe_dup = NULL;
-	pipe->epoch_id = 0;
-	pipe->epoch_idx = 0;
+	pipe->flush_id = 0;
+	pipe->flush_idx = 0;
 	pipe->in_fd = 0;
 	pipe->out_fd = 0;
 	pipe->trans_suspend = 0;
 	pipe->transfer_cnt = 0;
 	pipe->transfered = 0;
-	pipe->next = NULL;
+	pipe->pipe_nxt = NULL;
 }	
 
 /* Cuju IPC handler callback */
@@ -366,12 +460,36 @@ int cuju_process(struct conn_stream *cs)
 	//struct channel *oc = si_oc(si);
 	//unsigned int idx = 0;
 	struct proto_ipc *ipc_ptr = NULL;
+	u_int32_t dynamic_ipc = 0;
+	u_int8_t* dynamic_array = NULL;
+	char macaddr[16];
 
 	/* area may be zero */
 	*(((char *)ic->buf.area) + ic->buf.data) = '\0';
 
+	//printf("IPC Data Size %lu\n", ic->buf.data);
+
 	if (!ic->buf.data) {
 		return -1;
+	}
+
+	//printf("IPC Structure Size %lu\n", sizeof(struct proto_ipc));
+
+	ipc_ptr = (struct proto_ipc *)ic->buf.area;
+	
+	if((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) && 
+	   (ipc_ptr->conn_count <= DEFAULT_CONN_CNT)) {
+		if (ic->buf.data != DEFAULT_IPC_ARRAY) {
+			return -1;
+		}
+
+		dynamic_ipc = (MAC_LENGTH * ipc_ptr->nic_count) + (CONNECTION_LENGTH * ipc_ptr->conn_count);
+		dynamic_array = (u_int8_t*)ic->buf.area + sizeof(struct proto_ipc);
+	}
+	else {
+		if (ic->buf.data != sizeof(struct proto_ipc) + dynamic_ipc) {
+			return -1;
+		}
 	}
 
 #if 0
@@ -384,11 +502,7 @@ int cuju_process(struct conn_stream *cs)
 			printf("\n"); 
 	}
 	printf("============================================================\n");
-#endif
-
-	ipc_ptr = (struct proto_ipc *)ic->buf.area;
-#if 0
-	printf("Data Size %lu\n", ic->buf.data);
+	
 	printf("ipc_ptr->ephch_id: %d\n", ipc_ptr->ephch_id);
 	printf("ipc_ptr->transmit_cnt: %d\n", ipc_ptr->transmit_cnt);
 	printf("ipc_ptr->ipc_mode: %d\n", ipc_ptr->ipc_mode);
@@ -400,6 +514,41 @@ int cuju_process(struct conn_stream *cs)
 	printf("ipc_ptr->nic_count: %d\n", ipc_ptr->nic_count);
 	printf("ipc_ptr->conn_count: %d\n", ipc_ptr->conn_count);
 #endif
+
+	if ((ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) || (ipc_ptr->cuju_ft_arp)) {
+		
+		printf ("VM NIC CNT: %d\n", ipc_ptr->nic_count);
+
+		if (ipc_ptr->nic_count) {
+			for(int idx = 0; idx < ipc_ptr->nic_count; idx++) {
+
+				printf("IP: %02x:%02x:%02x:%02x\n", 
+					   *((u_int8_t*)dynamic_array), *((u_int8_t*)dynamic_array + 1), 
+					   *((u_int8_t*)dynamic_array + 2), *((u_int8_t*)dynamic_array + 3));
+
+
+				sprintf(macaddr, "%02x.%02x.%02x.%02x",
+					    *((u_int8_t*)dynamic_array), *((u_int8_t*)dynamic_array + 1), 
+					    *((u_int8_t*)dynamic_array + 2), *((u_int8_t*)dynamic_array + 3));
+
+				printf("Find IP %s\n", macaddr);
+
+				guest_ip_db = ntohl(*(u_int32_t*)dynamic_array);
+
+				printf("Find IP String %08x\n", guest_ip_db);	
+#if 0 /* check arp in haproxy */		
+				mac_ip = arp_get_ip(macaddr);
+						
+				if (mac_ip == NULL)
+					printf("Find IP NULL\n");
+				else 
+					printf("Find IP %s\n", mac_ip);
+#endif
+			}
+		}
+	}
+	
+	
 	/* Set GCTL */
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_RUN) {
 		gctl_ipc.ephch_id = ipc_ptr->ephch_id;
@@ -422,5 +571,42 @@ int cuju_process(struct conn_stream *cs)
 
 	return 0;
 }
+
+char *arp_get_ip(const char *req_mac)
+{
+    FILE           *proc;
+	 char ip[16];
+	 char mac[18];
+	 char * reply = NULL;
+ 
+    if (!(proc = fopen("/proc/net/arp", "r"))) {
+        return NULL;
+    }
+ 
+    /* Skip first line */
+	 while (!feof(proc) && fgetc(proc) != '\n');
+ 
+	 /* Find ip, copy mac in reply */
+	 reply = NULL;
+    while (!feof(proc) && (fscanf(proc, " %15[0-9.] %*s %*s %17[A-Fa-f0-9:] %*s %*s", ip, mac) == 2)) {
+		  if (strcmp(mac, req_mac) == 0) {
+				//reply = safe_strdup(ip);
+				reply = strdup(ip);
+				break;
+		  }
+    }
+ 
+    fclose(proc);
+ 
+    return reply;
+}
+
+
+
+
+
+
+
+
 
 #endif

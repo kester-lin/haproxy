@@ -19,6 +19,7 @@
 
 #include <types/global.h>
 #include <types/pipe.h>
+#include <assert.h>
 
 DECLARE_STATIC_POOL(pool_head_pipe, "pipe", sizeof(struct pipe));
 
@@ -66,8 +67,28 @@ struct pipe *get_pipe()
 	ret->cons = pipefd[0];
 	ret->next = NULL;
 	pipes_used++;
+
+#if ENABLE_CUJU_FT
+	ret->pipe_nxt = NULL;
+    ret->pipe_dup = NULL;
+	ret->flush_id = 0;
+	ret->flush_idx = 0;
+	ret->epoch_id = 0;
+	ret->epoch_idx = 0;
+	ret->in_fd = 0;
+	ret->out_fd = 0;
+	ret->trans_suspend = 0;
+	ret->transfer_cnt = 0;
+	ret->transfered = 0;  
+#endif
+
  out:
 	HA_SPIN_UNLOCK(PIPES_LOCK, &pipes_lock);
+
+	if (ret == NULL) {
+		assert(0);
+	}
+
 	return ret;
 }
 
@@ -75,6 +96,11 @@ static void inline __kill_pipe(struct pipe *p)
 {
 	close(p->prod);
 	close(p->cons);
+
+	p->data = 0;
+	p->prod = 0;
+	p->cons = 0;
+
 	pool_free(pool_head_pipe, p);
 	pipes_used--;
 	return;

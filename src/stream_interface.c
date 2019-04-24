@@ -438,6 +438,10 @@ static void stream_int_notify(struct stream_interface *si)
 	struct stream_interface *sio = si_opposite(si);
 	struct task *task = si_task(si);
 
+	int value_1 = 0;
+	int value_2 = 0;
+	int value_3 = 0;
+
 	/* process consumer side */
 	if (channel_is_empty(oc)) {
 		struct connection *conn = objt_cs(si->end) ? objt_cs(si->end)->conn : NULL;
@@ -452,7 +456,7 @@ static void stream_int_notify(struct stream_interface *si)
 	 * we're about to close and can't expect more data if SHUTW_NOW is there.
 	 */
 	if (!(oc->flags & (CF_SHUTW|CF_SHUTW_NOW)))
-		si->flags |= SI_FL_WAIT_DATA;
+		si->flags |= SI_FL_WAIT_DATA; /* Default Run */
 	else if ((oc->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW)
 		si->flags &= ~SI_FL_WAIT_DATA;
 
@@ -470,12 +474,12 @@ static void stream_int_notify(struct stream_interface *si)
 
 	if ((sio->flags & SI_FL_RXBLK_ROOM) &&
 	    ((oc->flags & CF_WRITE_PARTIAL) || channel_is_empty(oc)))
-		si_rx_room_rdy(sio);
+		si_rx_room_rdy(sio); /* Default not run */
 
 	if (oc->flags & CF_DONT_READ)
-		si_rx_chan_blk(sio);
+		si_rx_chan_blk(sio); /* Default not run */
 	else
-		si_rx_chan_rdy(sio);
+		si_rx_chan_rdy(sio); /* default run */
 
 	/* Notify the other side when we've injected data into the IC that
 	 * needs to be forwarded. We can do fast-forwarding as soon as there
@@ -487,15 +491,24 @@ static void stream_int_notify(struct stream_interface *si)
 	 * is available room, because applets are often forced to stop before
 	 * the buffer is full. We must not stop based on input data alone because
 	 * an HTTP parser might need more data to complete the parsing.
-	 */
+	 */  
+#if 1
+		value_1 = !channel_is_empty(ic);
+		value_2 = (sio->flags & SI_FL_WAIT_DATA);
+		value_3 = (!(ic->flags & CF_EXPECT_MORE) || c_full(ic) || ci_data(ic) == 0 || ic->pipe);
+
+		if (value_1 && value_2 && value_3 ) {
+
+#else
 	if (!channel_is_empty(ic) &&
 	    (sio->flags & SI_FL_WAIT_DATA) &&
 	    (!(ic->flags & CF_EXPECT_MORE) || c_full(ic) || ci_data(ic) == 0 || ic->pipe)) {
+#endif	
 		int new_len, last_len;
 
-		last_len = co_data(ic);
+		last_len = co_data(ic); /* default not run at 1 run at 2*/
 		if (ic->pipe)
-			last_len += ic->pipe->data;
+			last_len += ic->pipe->data;  /* default run */
 
 		si_chk_snd(sio);
 
@@ -507,7 +520,7 @@ static void stream_int_notify(struct stream_interface *si)
 		 * buffer or in the pipe.
 		 */
 		if (new_len < last_len)
-			si_rx_room_rdy(si);
+			si_rx_room_rdy(si); /* default run */
 	}
 
 	if (!(ic->flags & CF_DONT_READ))
@@ -517,9 +530,9 @@ static void stream_int_notify(struct stream_interface *si)
 	si_chk_rcv(sio);
 
 	if (si_rx_blocked(si)) {
-		ic->rex = TICK_ETERNITY;
+		ic->rex = TICK_ETERNITY;  /* default not run  Error at here  */
 	}
-	else if ((ic->flags & (CF_SHUTR|CF_READ_PARTIAL)) == CF_READ_PARTIAL) {
+	else if ((ic->flags & (CF_SHUTR|CF_READ_PARTIAL)) == CF_READ_PARTIAL) { /* default run */
 		/* we must re-enable reading if si_chk_snd() has freed some space */
 		if (!(ic->flags & CF_READ_NOEXP) && tick_isset(ic->rex))
 			ic->rex = tick_add_ifset(now_ms, ic->rto);
@@ -551,7 +564,7 @@ static void stream_int_notify(struct stream_interface *si)
 		task_queue(task);
 	}
 	if (ic->flags & CF_READ_ACTIVITY)
-		ic->flags &= ~CF_READ_DONTWAIT;
+		ic->flags &= ~CF_READ_DONTWAIT; /* default run */
 }
 
 
@@ -651,7 +664,7 @@ int si_cs_send(struct conn_stream *cs)
 		}
 
 #if ENABLE_CUJU_FT
-		if (!oc->pipe->data && !oc->pipe->next) {
+		if (!oc->pipe->data && !oc->pipe->pipe_nxt) {
 			ft_clean_pipe(oc->pipe);				
 			put_pipe(oc->pipe);
 			oc->pipe = NULL;
@@ -1081,7 +1094,7 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 		return;
 
 	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si)))
-		si_cs_send(cs);
+		si_cs_send(cs);  /* default run */
 
 	if (cs->flags & (CS_FL_ERROR|CS_FL_ERR_PENDING) || cs->conn->flags & CO_FL_ERROR) {
 		/* Write error on the file descriptor */
@@ -1269,7 +1282,7 @@ int si_cs_recv(struct conn_stream *cs)
 
  abort_splice:
  #if ENABLE_CUJU_FT
- 	if (ic->pipe && (!ic->pipe->data) && (!ic->pipe->next)) {
+ 	if (ic->pipe &&  unlikely(!ic->pipe->data) && (!ic->pipe->pipe_nxt)) {
 		put_pipe(ic->pipe);
 		ic->pipe = NULL;
 	}
@@ -1424,7 +1437,7 @@ int si_cs_recv(struct conn_stream *cs)
 		conn->mux->subscribe(cs, SUB_RETRY_RECV, &si->wait_event);
 		si_rx_endp_done(si);
 	} else {
-		si_rx_endp_more(si);
+		si_rx_endp_more(si); /* first data */
 	}
 
 	return (cur_read != 0) || si_rx_blocked(si);

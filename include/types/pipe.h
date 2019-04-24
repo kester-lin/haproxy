@@ -37,7 +37,10 @@ struct pipe {
 	struct pipe *next;
 
 #if ENABLE_CUJU_FT
+  struct pipe *pipe_nxt;
   struct pipe *pipe_dup;
+  unsigned long flush_id;
+  u_int32_t flush_idx;
   unsigned long epoch_id;
   u_int32_t epoch_idx;
   int in_fd;

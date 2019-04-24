@@ -5,9 +5,10 @@
 #include <proto/pipe.h>
 
 #if ENABLE_CUJU_FT
-extern int fd_list_migration;
-extern int fd_pipe_cnt;
-extern int empty_pipe;
+extern u_int16_t fd_list_migration;
+extern u_int16_t fd_pipe_cnt;
+extern u_int16_t empty_pipe;
+extern u_int32_t guest_ip_db;
 
 #if ENABLE_CUJU_IPC
 
@@ -40,7 +41,8 @@ struct proto_ipc
 {
     u_int32_t transmit_cnt;
     u_int32_t ipc_mode : 8;
-    u_int32_t cuju_ft_mode : 8;
+    u_int32_t cuju_ft_arp:2;
+    u_int32_t cuju_ft_mode : 6;
     u_int32_t gft_id : 16;
     u_int32_t ephch_id;
     u_int32_t packet_cnt : 16;
@@ -48,9 +50,14 @@ struct proto_ipc
     u_int32_t time_interval;
     u_int32_t nic_count : 16;
     u_int32_t conn_count : 16;
-    unsigned char *conn_info;
 };
 
+
+struct guest_ip
+{
+    u_int32_t guest_ip;
+    struct list next;
+};
 
 #endif /* End of ENABLE_CUJU_IPC*/
 
@@ -59,9 +66,11 @@ unsigned long ft_get_epochcnt();
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
 void cuju_fd_handler(int fd);
 int cuju_process(struct conn_stream *cs);
-int ft_release_pipe(struct pipe *pipe, u_int32_t epoch_id, int* pipe_cnt);
+int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* total_pipe_cnt ,uint16_t* pipe_cnt);
+int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , uint16_t* pipe_cnt);
 int ft_close_pipe(struct pipe *pipe,  int* pipe_cnt);
 void ft_clean_pipe(struct pipe *pipe);
+char *arp_get_ip(const char *req_mac);
 #endif
 
 #endif

@@ -458,8 +458,15 @@ struct connection {
 #if ENABLE_CUJU_FT
 	unsigned int cujuipc_idx;
 	struct gctl_ipc gctl_ipc;
+	uint8_t direction;  /* 1 means that dest. is client application, 2 means that dest. is Guest. */
+	uint16_t backend_pipecnt;
+	uint16_t frontend_pipecnt;
 #endif	
-
+};
+enum dir_mode {
+	DIR_NO_CHECK,
+	DIR_DEST_CLIENT,
+	DIR_DEST_GUEST,
 };
 
 /* PROTO token registration */

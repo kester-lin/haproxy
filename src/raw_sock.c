@@ -44,7 +44,9 @@
 #if defined(CONFIG_HAP_LINUX_SPLICE)
 #include <common/splice.h>
 
-#ifdef DEBUG_FULL
+#define PIPE_ASSERT 1
+
+#if PIPE_ASSERT
 #include <assert.h>
 #endif
 
@@ -76,6 +78,8 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 #endif
 	int ret;
 	int retval = 0;
+	struct in_addr ipv4_to;
+	struct in_addr ipv4_from;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -106,6 +110,22 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 			goto leave;
 		}
 	}
+	
+	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
+	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+
+	if (ipv4_to.s_addr == guest_ip_db) {
+		conn->direction = DIR_DEST_GUEST;
+		//printf("Dest. is Guest, Conn is %p\n", conn);
+	}
+	else if (ipv4_from.s_addr == guest_ip_db) {
+		conn->direction = DIR_DEST_CLIENT;
+		//printf("Dest. is Client Application, Conn is %p\n", conn);
+	} 
+	else {
+		//printf("Check Dest. Error\n");
+	}
+
 
 	while (count) {
 		if (count > MAX_SPLICE_AT_ONCE)
@@ -175,6 +195,12 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 			break;
 		} /* ret <= 0 */
 
+		/* Recv the Data tag epoch id*/
+		if ((pipe->epoch_idx == 0) && (conn->direction == DIR_DEST_CLIENT)) {
+			pipe->epoch_id = ft_get_epochcnt();
+			pipe->epoch_idx = 1; 
+		}
+
 		retval += ret;
 		pipe->data += ret;
 		count -= ret;
@@ -222,7 +248,9 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 	struct pipe *pipe_dup = NULL;
 	struct pipe *pipe_trans = NULL;
 	int t_flag = 0;
-	u_int32_t curr_epoch_id;
+	u_int32_t curr_flush_id;
+	struct in_addr ipv4_to;
+	struct in_addr ipv4_from;	
 #endif
 
 	if (!conn_ctrl_ready(conn))
@@ -233,47 +261,65 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 
 	conn_refresh_polling_flags(conn);
 
-#if ENABLE_CUJU_FT
+#if ENABLE_CUJU_FT	
+	
 	pipe->out_fd = conn->handle.fd;
 
 	if (pipe->data) {
 		pipe_buf = get_pipe();
 		pipe_dup = get_pipe();
 
+		if (pipe_buf == NULL) {
+#if PIPE_ASSERT
+			assert(0);
+#else
+			return 0;
+#endif			
+		}
+		if (pipe_dup == NULL) {
+#if PIPE_ASSERT
+			assert(0);
+#else
+			return 0;
+#endif			
+		}
+
 		ft_dup_pipe(pipe, pipe_buf, 0);
 		ft_dup_pipe(pipe, pipe_dup, 1);
 		fd_pipe_cnt++;
+
+		if(conn->direction == DIR_DEST_GUEST) {
+			conn->backend_pipecnt++;
+		}
+		else if (conn->direction == DIR_DEST_CLIENT) {
+			conn->frontend_pipecnt++;
+		}
+
 		printf("Create Pipe CNT:%d\n", fd_pipe_cnt);
+		printf("Pipe: %p\n", pipe_buf);
+		printf("Pipe: %p\n\n", pipe_dup);
 	}
 	else {
-		/* will trans for close */
-		//ft_close_pipe(pipe, &fd_pipe_cnt);
-		//printf("NULL RETRANSMIT\n");
-
-		//if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
-		//	conn->flags &= ~CO_FL_WAIT_L4_CONN;
-		//conn_cond_update_sock_polling(conn);
-		//return done;
-		if (pipe->next == NULL)
-		{
+		if (pipe->pipe_nxt == NULL)	{
 			printf("########################NULL RETRANSMIT########################\n");
 			goto after_send;
-		}
+			}
 	}
 
 	fdtab[conn->handle.fd].enable_migration = 1;
 
-	if (pipe->next) {
-		/* search next is empty insert new incoming to the pipe buffer tail */
+	if (pipe->pipe_nxt) {
+		/* search pipe_nxt is empty insert new incoming to the pipe buffer tail */
 		while (1) {
-			if (pipe_trace->next == NULL) {
+			if (pipe_trace->pipe_nxt == NULL) {
 				if(pipe->data) {
-					pipe_trace->next = pipe_buf;
-					pipe_trace->next->pipe_dup = pipe_dup;
+					pipe_trace->pipe_nxt = pipe_buf;
+					pipe_trace->pipe_nxt->pipe_dup = pipe_dup;
 				}
 				break;
 			}
-			pipe_trace = pipe_trace->next;
+	
+			pipe_trace = pipe_trace->pipe_nxt;
 
 			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data &&
 				!(pipe_trace->trans_suspend) && !(pipe_trace->data)) {
@@ -290,11 +336,12 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 #endif
 		}
 
-		pipe->next = pipe_buf;
-		pipe->next->pipe_dup = pipe_dup;
+		pipe->pipe_nxt = pipe_buf;
+		pipe->pipe_nxt->pipe_dup = pipe_dup;
 	}
+	
 	done = 0;
-	pipe_trans = pipe->next;
+	pipe_trans = pipe->pipe_nxt;
 	pipe->data = 0;
 
 	if (pipe_trans == NULL) { 
@@ -302,72 +349,164 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 		assert(1);
 	}
 
-#if 0
-	pipe_trans->epoch_id = ft_get_flushcnt();
-#else
-	curr_epoch_id = ft_get_flushcnt();
+	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
+	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
 
-	if(pipe_trans->epoch_idx) {
-		/* check for release */
-		ft_release_pipe(pipe, curr_epoch_id, &fd_pipe_cnt);
-		pipe_trans = pipe->next;
+	if (ipv4_to.s_addr == guest_ip_db) {
+		conn->direction = DIR_DEST_GUEST;
+		//printf("[WRITE] Dest. is Guest, Conn is %p\n", conn);
+	}
+	else if (ipv4_from.s_addr == guest_ip_db) {
+		conn->direction = DIR_DEST_CLIENT;
+		//printf("[WRITE] Dest. is Client Application, Conn is %p\n", conn);
+	} 
+	else {
+		//printf("Check Dest. Error\n");
+	}
 
-		if (pipe_trans == NULL) {
-			printf("pipe_trans is NULL\n");
-			empty_pipe = 1;
-			goto after_send;
+
+	if (conn->direction == DIR_DEST_GUEST) {
+
+		curr_flush_id = ft_get_flushcnt();
+
+		if(pipe_trans->flush_idx) {
+			/* check for release */
+			ft_release_pipe_by_flush(pipe, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
+			pipe_trans = pipe->pipe_nxt;
+
+			if (pipe_trans == NULL) {
+				printf("pipe_trans is NULL\n");
+				empty_pipe = 1;
+				goto after_send;
+			}
+		}
+		else {
+			pipe_trans->flush_idx = 1;
+			pipe_trans->flush_id = curr_flush_id;
+		}
+
+		/* WRITE */
+		while (pipe_trans->data) {
+			if (!pipe_trans->transfered) {
+				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
+							pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+				if (ret <= 0) {
+					//pipe_trans->trans_suspend = 1;
+					t_flag = (errno == EAGAIN);
+
+					//printf("RET is %d  t_flag is %d\n", ret, t_flag);
+					if (ret == 0 || t_flag) {
+						//printf("ret == 0 || t_flag\n");
+						pipe_trans->trans_suspend = 1;
+						fd_cant_send(conn->handle.fd);
+						break;
+					}
+					else if (errno == EINTR) {
+						//printf("errno == EINTR\n");
+						continue;
+					}
+
+					//printf("CO_FL_ERROR\n");
+					/* here we have another error */
+					conn->flags |= CO_FL_ERROR;
+					break;
+				}
+
+				done += ret;
+				pipe_trans->data -= ret;
+				pipe_trans->transfer_cnt++;
+				pipe_trans->trans_suspend = 0;
+				pipe_trans->transfered = 1;
+				//printf("Transfered\n");
+			}
+
+			if (pipe_trans->pipe_nxt != NULL) {
+				pipe_trans = pipe_trans->pipe_nxt;
+				//printf("Transfered then goto pipe_nxt\n");
+			}
+			else {
+				break;
+			}		
 		}
 	}
-	else {
-		pipe_trans->epoch_idx = 1;
-		pipe_trans->epoch_id = curr_epoch_id;
+	else if (conn->direction == DIR_DEST_CLIENT) {
+		curr_flush_id = ft_get_epochcnt();
+//
+		while (pipe_trans->data) {
+			if (curr_flush_id > pipe_trans->flush_id) {
+				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
+							pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+				if (ret <= 0) {
+					//pipe_trans->trans_suspend = 1;
+					t_flag = (errno == EAGAIN);
+
+					//printf("RET is %d  t_flag is %d\n", ret, t_flag);
+					if (ret == 0 || t_flag) {
+						//printf("ret == 0 || t_flag\n");
+						pipe_trans->trans_suspend = 1;
+						fd_cant_send(conn->handle.fd);
+						break;
+					}
+					else if (errno == EINTR) {
+						//printf("errno == EINTR\n");
+						continue;
+					}
+
+					//printf("CO_FL_ERROR\n");
+					/* here we have another error */
+					conn->flags |= CO_FL_ERROR;
+					break;
+				}
+
+				done += ret;
+				pipe_trans->data -= ret;
+				pipe_trans->transfer_cnt++;
+				pipe_trans->trans_suspend = 0;
+				pipe_trans->transfered = 1;
+				//printf("Transfered\n");
+
+				/* Pipe Release for DEST */
+				
+			}
+
+			if (pipe_trans->pipe_nxt != NULL) {
+				pipe_trans = pipe_trans->pipe_nxt;
+				//printf("Transfered then goto pipe_nxt\n");
+			}
+			else {
+				break;
+			}		
+		}
+		if (done) {
+			ft_release_pipe_by_transfer(pipe, &fd_pipe_cnt , &conn->frontend_pipecnt);
+		}
+//
 	}
-#endif
-	/* WRITE */
-	while (pipe_trans->data) {
-		if (!pipe_trans->transfered) {
-			ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
-						 pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+	else {
+		done = 0;
+		while (pipe->data) {
+			ret = splice(pipe->cons, NULL, conn->handle.fd, NULL, pipe->data,
+						SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
 
 			if (ret <= 0) {
-				//pipe_trans->trans_suspend = 1;
-				t_flag = (errno == EAGAIN);
-
-				//printf("RET is %d  t_flag is %d\n", ret, t_flag);
-				if (ret == 0 || t_flag) {
-					//printf("ret == 0 || t_flag\n");
-					pipe_trans->trans_suspend = 1;
+				if (ret == 0 || errno == EAGAIN) {
 					fd_cant_send(conn->handle.fd);
 					break;
 				}
-				else if (errno == EINTR) {
-					//printf("errno == EINTR\n");
+				else if (errno == EINTR)
 					continue;
-				}
 
-				//printf("CO_FL_ERROR\n");
 				/* here we have another error */
 				conn->flags |= CO_FL_ERROR;
 				break;
 			}
 
 			done += ret;
-			pipe_trans->data -= ret;
-			pipe_trans->transfer_cnt++;
-			pipe_trans->trans_suspend = 0;
-			pipe_trans->transfered = 1;
-			//printf("Transfered\n");
-		}
-
-		if (pipe_trans->next != NULL) {
-			pipe_trans = pipe_trans->next;
-			//printf("Transfered then goto next\n");
-		}
-		else {
-			break;
-		}		
+			pipe->data -= ret;
+		}	
 	}
-
 #else
 	done = 0;
 	while (pipe->data) {
@@ -400,11 +539,11 @@ after_send:
 	conn_cond_update_sock_polling(conn);
 
 #if ENABLE_CUJU_FT
-	if (pipe->next == NULL) {
+	if (pipe->pipe_nxt == NULL) {
 		//fd_list_migration = 0;
 		//fdtab[conn->handle.fd].enable_migration = 0;
 		//empty_pipe = 1;
-		printf("Create FD:%d\n", conn->handle.fd);
+		printf("FD done:%d\n", conn->handle.fd);
 		return done;
 	}
 
