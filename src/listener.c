@@ -201,6 +201,7 @@ static int accept_queue_init()
 			ha_alert("Out of memory while initializing accept queue for thread %d\n", i);
 			return ERR_FATAL|ERR_ABORT;
 		}
+		t->nice = -1024;
 		t->process = accept_queue_process;
 		t->context = &accept_queue_rings[i];
 		accept_queue_rings[i].task = t;
@@ -694,7 +695,7 @@ void listener_accept(int fd)
 				goto end;
 			}
 			next_conn = count + 1;
-		} while (!_HA_ATOMIC_CAS(&l->nbconn, &count, next_conn));
+		} while (!_HA_ATOMIC_CAS(&l->nbconn, (int *)(&count), next_conn));
 
 		if (l->maxconn && next_conn == l->maxconn) {
 			/* we filled it, mark it full */
@@ -731,7 +732,7 @@ void listener_accept(int fd)
 					goto end;
 				}
 				next_actconn = count + 1;
-			} while (!_HA_ATOMIC_CAS(&actconn, &count, next_actconn));
+			} while (!_HA_ATOMIC_CAS(&actconn, (int *)(&count), next_actconn));
 
 			if (unlikely(next_actconn == global.maxconn)) {
 				limit_listener(l, &global_listener_queue);
@@ -828,6 +829,8 @@ void listener_accept(int fd)
 			HA_ATOMIC_UPDATE_MAX(&global.cps_max, count);
 		}
 
+		_HA_ATOMIC_ADD(&activity[tid].accepted, 1);
+
 		if (unlikely(cfd >= global.maxsock)) {
 			send_log(p, LOG_EMERG,
 					 "Proxy %s reached the configured maximum connection limit. Please check the global 'maxconn' value.\n",
@@ -880,21 +883,21 @@ void listener_accept(int fd)
 				m1 = mask >> t1;
 				m2 = mask & (t2 ? nbits(t2 + 1) : ~0UL);
 
-				if (unlikely((signed long)m2 >= 0)) {
-					/* highest bit not set */
-					if (!m2)
-						m2 = mask;
-
-					t2 = my_flsl(m2) - 1;
-				}
-
-				if (unlikely(!(m1 & 1) || t1 == t2)) {
+				if (unlikely(!(m1 & 1))) {
 					m1 &= ~1UL;
 					if (!m1) {
 						m1 = mask;
 						t1 = 0;
 					}
 					t1 += my_ffsl(m1) - 1;
+				}
+
+				if (unlikely(!(m2 & (1UL << t2)) || t1 == t2)) {
+					/* highest bit not set */
+					if (!m2)
+						m2 = mask;
+
+					t2 = my_flsl(m2) - 1;
 				}
 
 				/* now we have two distinct thread IDs belonging to the mask */

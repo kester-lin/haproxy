@@ -145,6 +145,9 @@ int htx_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 			goto return_bad_req;
 		}
 
+		if (htx->flags & HTX_FL_UPGRADE)
+			goto failed_keep_alive;
+
 		/* 1: have we encountered a read error ? */
 		if (req->flags & CF_READ_ERROR) {
 			if (!(s->flags & SF_ERR_MASK))
@@ -409,18 +412,8 @@ int htx_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 	if (unlikely((s->logs.logwait & LW_REQHDR) && s->req_cap))
 		htx_capture_headers(htx, s->req_cap, sess->fe->req_cap);
 
-	/* Until set to anything else, the connection mode is set as Keep-Alive. It will
-	 * only change if both the request and the config reference something else.
-	 * Option httpclose by itself sets tunnel mode where headers are mangled.
-	 * However, if another mode is set, it will affect it (eg: server-close/
-	 * keep-alive + httpclose = close). Note that we avoid to redo the same work
-	 * if FE and BE have the same settings (common). The method consists in
-	 * checking if options changed between the two calls (implying that either
-	 * one is non-null, or one of them is non-null and we are there for the first
-	 * time.
-	 */
-	if ((sess->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))
-		htx_adjust_conn_mode(s, txn);
+	/* by default, close the stream at the end of the transaction. */
+	txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
 
 	/* we may have to wait for the request's body */
 	if (s->be->options & PR_O_WREQ_BODY)
@@ -1212,9 +1205,18 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	channel_auto_close(req);
 
 	if (req->to_forward) {
-		/* We can't process the buffer's contents yet */
-		req->flags |= CF_WAKE_WRITE;
-		goto missing_data_or_waiting;
+		if (req->to_forward == CHN_INFINITE_FORWARD) {
+			if (req->flags & (CF_SHUTR|CF_EOI)) {
+				msg->msg_state = HTTP_MSG_DONE;
+				req->to_forward = 0;
+				goto done;
+			}
+		}
+		else {
+			/* We can't process the buffer's contents yet */
+			req->flags |= CF_WAKE_WRITE;
+			goto missing_data_or_waiting;
+		}
 	}
 
 	if (msg->msg_state >= HTTP_MSG_DONE)
@@ -1233,14 +1235,13 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	}
 	else {
 		c_adv(req, htx->data - co_data(req));
+		if (msg->flags & HTTP_MSGF_XFER_LEN)
+			channel_htx_forward_forever(req, htx);
+	}
 
-		/* To let the function channel_forward work as expected we must update
-		 * the channel's buffer to pretend there is no more input data. The
-		 * right length is then restored. We must do that, because when an HTX
-		 * message is stored into a buffer, it appears as full.
-		 */
-		if ((msg->flags & HTTP_MSGF_XFER_LEN) && htx->extra)
-			htx->extra -= channel_htx_forward(req, htx, htx->extra);
+	if (txn->meth == HTTP_METH_CONNECT) {
+		msg->msg_state = HTTP_MSG_TUNNEL;
+		goto done;
 	}
 
 	/* Check if the end-of-message is reached and if so, switch the message
@@ -1250,6 +1251,7 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 		goto missing_data_or_waiting;
 
 	msg->msg_state = HTTP_MSG_DONE;
+	req->to_forward = 0;
 
   done:
 	/* other states, DONE...TUNNEL */
@@ -1285,7 +1287,7 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	 * server, which will decide whether to close or to go on processing the
 	 * request. We only do that in tunnel mode, and not in other modes since
 	 * it can be abused to exhaust source ports. */
-	if ((s->be->options & PR_O_ABRT_CLOSE) && !(s->si[0].flags & SI_FL_CLEAN_ABRT)) {
+	if (s->be->options & PR_O_ABRT_CLOSE) {
 		channel_auto_read(req);
 		if ((req->flags & (CF_SHUTR|CF_READ_NULL)) &&
 		    ((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN))
@@ -2130,9 +2132,18 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	channel_auto_close(res);
 
 	if (res->to_forward) {
-                /* We can't process the buffer's contents yet */
-		res->flags |= CF_WAKE_WRITE;
-		goto missing_data_or_waiting;
+		if (res->to_forward == CHN_INFINITE_FORWARD) {
+			if (res->flags & (CF_SHUTR|CF_EOI)) {
+				msg->msg_state = HTTP_MSG_DONE;
+				res->to_forward = 0;
+				goto done;
+			}
+		}
+		else {
+			/* We can't process the buffer's contents yet */
+			res->flags |= CF_WAKE_WRITE;
+			goto missing_data_or_waiting;
+		}
 	}
 
 	if (msg->msg_state >= HTTP_MSG_DONE)
@@ -2152,22 +2163,14 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	}
 	else {
 		c_adv(res, htx->data - co_data(res));
-
-		/* To let the function channel_forward work as expected we must update
-		 * the channel's buffer to pretend there is no more input data. The
-		 * right length is then restored. We must do that, because when an HTX
-		 * message is stored into a buffer, it appears as full.
-		 */
-		if ((msg->flags & HTTP_MSGF_XFER_LEN) && htx->extra)
-			htx->extra -= channel_htx_forward(res, htx, htx->extra);
+		if (msg->flags & HTTP_MSGF_XFER_LEN)
+			channel_htx_forward_forever(res, htx);
 	}
 
-	if (!(msg->flags & HTTP_MSGF_XFER_LEN)) {
-		/* The server still sending data that should be filtered */
-		if (res->flags & CF_SHUTR || !HAS_RSP_DATA_FILTERS(s)) {
-			msg->msg_state = HTTP_MSG_TUNNEL;
-			goto done;
-		}
+	if ((txn->meth == HTTP_METH_CONNECT && txn->status == 200) || txn->status == 101 ||
+	    (!(msg->flags & HTTP_MSGF_XFER_LEN) && (res->flags & CF_SHUTR || !HAS_RSP_DATA_FILTERS(s)))) {
+		msg->msg_state = HTTP_MSG_TUNNEL;
+		goto done;
 	}
 
 	/* Check if the end-of-message is reached and if so, switch the message
@@ -2177,6 +2180,7 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 		goto missing_data_or_waiting;
 
 	msg->msg_state = HTTP_MSG_DONE;
+	res->to_forward = 0;
 
   done:
 	/* other states, DONE...TUNNEL */
@@ -2286,18 +2290,6 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	if (!(s->flags & SF_FINST_MASK))
 		s->flags |= SF_FINST_D;
 	return 0;
-}
-
-void htx_adjust_conn_mode(struct stream *s, struct http_txn *txn)
-{
-	struct proxy *fe = strm_fe(s);
-	int tmp = TX_CON_WANT_CLO;
-
-	if ((fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
-		tmp = TX_CON_WANT_TUN;
-
-	if ((txn->flags & TX_CON_WANT_MSK) < tmp)
-		txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
 }
 
 /* Perform an HTTP redirect based on the information in <rule>. The function
@@ -2985,13 +2977,14 @@ static enum rule_result htx_req_get_intercept_rule(struct proxy *px, struct list
 				value->area[value->data] = '\0';
 
 				/* perform update */
+				HA_SPIN_LOCK(PATREF_LOCK, &ref->lock);
 				if (pat_ref_find_elt(ref, key->area) != NULL)
 					/* update entry if it exists */
 					pat_ref_set(ref, key->area, value->area, NULL);
 				else
 					/* insert a new entry */
 					pat_ref_add(ref, key->area, value->area, NULL);
-
+				HA_SPIN_UNLOCK(PATREF_LOCK, &ref->lock);
 				free_trash_chunk(key);
 				free_trash_chunk(value);
 				break;
@@ -3012,7 +3005,6 @@ static enum rule_result htx_req_get_intercept_rule(struct proxy *px, struct list
 			case ACT_CUSTOM:
 				if ((s->req.flags & CF_READ_ERROR) ||
 				    ((s->req.flags & (CF_SHUTR|CF_READ_NULL)) &&
-				     !(s->si[0].flags & SI_FL_CLEAN_ABRT) &&
 				     (px->options & PR_O_ABRT_CLOSE)))
 					act_flags |= ACT_FLAG_FINAL;
 
@@ -3281,9 +3273,10 @@ resume_execution:
 
 				/* perform update */
 				/* check if the entry already exists */
+				HA_SPIN_LOCK(PATREF_LOCK, &ref->lock);
 				if (pat_ref_find_elt(ref, key->area) == NULL)
 					pat_ref_add(ref, key->area, NULL, NULL);
-
+				HA_SPIN_UNLOCK(PATREF_LOCK, &ref->lock);
 				free_trash_chunk(key);
 				break;
 			}
@@ -3402,7 +3395,6 @@ resume_execution:
 			case ACT_CUSTOM:
 				if ((s->req.flags & CF_READ_ERROR) ||
 				    ((s->req.flags & (CF_SHUTR|CF_READ_NULL)) &&
-				     !(s->si[0].flags & SI_FL_CLEAN_ABRT) &&
 				     (px->options & PR_O_ABRT_CLOSE)))
 					act_flags |= ACT_FLAG_FINAL;
 
@@ -4273,7 +4265,7 @@ static void htx_manage_server_side_cookies(struct stream *s, struct channel *res
 	struct server *srv;
 	char *hdr_beg, *hdr_end;
 	char *prev, *att_beg, *att_end, *equal, *val_beg, *val_end, *next;
-	int is_cookie2;
+	int is_cookie2 = 0;
 
 	htx = htxbuf(&res->buf);
 
@@ -5055,8 +5047,7 @@ static void htx_end_request(struct stream *s)
 		 * buffers, otherwise a close could cause an RST on some systems
 		 * (eg: Linux).
 		 */
-		if ((!(s->be->options & PR_O_ABRT_CLOSE) || (s->si[0].flags & SI_FL_CLEAN_ABRT)) &&
-		    txn->meth != HTTP_METH_POST)
+		if (!(s->be->options & PR_O_ABRT_CLOSE) && txn->meth != HTTP_METH_POST)
 			channel_dont_read(chn);
 
 		/* if the server closes the connection, we want to immediately react
@@ -5136,7 +5127,7 @@ static void htx_end_request(struct stream *s)
 		if (txn->rsp.flags & HTTP_MSGF_XFER_LEN)
 			s->si[1].flags |= SI_FL_NOLINGER;  /* we want to close ASAP */
 		/* see above in MSG_DONE why we only do this in these states */
-		if ((!(s->be->options & PR_O_ABRT_CLOSE) || (s->si[0].flags & SI_FL_CLEAN_ABRT)))
+		if (!(s->be->options & PR_O_ABRT_CLOSE))
 			channel_dont_read(chn);
 		goto end;
 	}

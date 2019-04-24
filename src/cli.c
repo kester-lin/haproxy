@@ -69,6 +69,9 @@
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 #include <proto/proto_udp.h>
+#ifdef USE_OPENSSL
+#include <proto/ssl_sock.h>
+#endif
 
 #define PAYLOAD_PATTERN "<<"
 
@@ -371,6 +374,71 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 	}
 	return 0;
 }
+
+/*
+ * This function exports the bound addresses of a <frontend> in the environment
+ * variable <varname>. Those addresses are separated by semicolons and prefixed
+ * with their type (abns@, unix@, sockpair@ etc)
+ * Return -1 upon error, 0 otherwise
+ */
+int listeners_setenv(struct proxy *frontend, const char *varname)
+{
+	struct buffer *trash = get_trash_chunk();
+	struct bind_conf *bind_conf;
+
+	if (frontend) {
+		list_for_each_entry(bind_conf, &frontend->conf.bind, by_fe) {
+			struct listener *l;
+
+			list_for_each_entry(l, &bind_conf->listeners, by_bind) {
+				char addr[46];
+				char port[6];
+
+				/* separate listener by semicolons */
+				if (trash->data)
+					chunk_appendf(trash, ";");
+
+				if (l->addr.ss_family == AF_UNIX) {
+					const struct sockaddr_un *un;
+
+					un = (struct sockaddr_un *)&l->addr;
+					if (un->sun_path[0] == '\0') {
+						chunk_appendf(trash, "abns@%s", un->sun_path+1);
+					} else {
+						chunk_appendf(trash, "unix@%s", un->sun_path);
+					}
+				} else if (l->addr.ss_family == AF_INET) {
+					addr_to_str(&l->addr, addr, sizeof(addr));
+					port_to_str(&l->addr, port, sizeof(port));
+					chunk_appendf(trash, "ipv4@%s:%s", addr, port);
+				} else if (l->addr.ss_family == AF_INET6) {
+					addr_to_str(&l->addr, addr, sizeof(addr));
+					port_to_str(&l->addr, port, sizeof(port));
+					chunk_appendf(trash, "ipv6@[%s]:%s", addr, port);
+				} else if (l->addr.ss_family == AF_CUST_SOCKPAIR) {
+					chunk_appendf(trash, "sockpair@%d", ((struct sockaddr_in *)&l->addr)->sin_addr.s_addr);
+				}
+			}
+		}
+		trash->area[trash->data++] = '\0';
+		if (setenv(varname, trash->area, 1) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+int cli_socket_setenv()
+{
+	if (listeners_setenv(global.stats_fe, "HAPROXY_CLI") < 0)
+		return -1;
+	if (listeners_setenv(mworker_proxy, "HAPROXY_MASTER_CLI") < 0)
+		return -1;
+
+	return 0;
+}
+
+REGISTER_CONFIG_POSTPARSER("cli", cli_socket_setenv);
 
 /* Verifies that the CLI at least has a level at least as high as <level>
  * (typically ACCESS_LVL_ADMIN). Returns 1 if OK, otherwise 0. In case of
@@ -933,6 +1001,12 @@ static int cli_io_handler_show_fd(struct appctx *appctx)
 			     (fdt.iocb == listener_accept)  ? "listener_accept" :
 			     (fdt.iocb == poller_pipe_io_handler) ? "poller_pipe_io_handler" :
 			     (fdt.iocb == mworker_accept_wrapper) ? "mworker_accept_wrapper" :
+#ifdef USE_OPENSSL
+#if (OPENSSL_VERSION_NUMBER >= 0x1010000fL) && !defined(OPENSSL_NO_ASYNC)
+			     (fdt.iocb == ssl_async_fd_free) ? "ssl_async_fd_free" :
+			     (fdt.iocb == ssl_async_fd_handler) ? "ssl_async_fd_handler" :
+#endif
+#endif
 			     "unknown");
 
 		if (fdt.iocb == conn_fd_handler) {
@@ -1017,8 +1091,12 @@ static int cli_io_handler_show_activity(struct appctx *appctx)
 	chunk_appendf(&trash, "\ncpust_ms_1s:");  for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", read_freq_ctr(&activity[thr].cpust_1s)/2);
 	chunk_appendf(&trash, "\ncpust_ms_15s:"); for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", read_freq_ctr_period(&activity[thr].cpust_15s, 15000)/2);
 	chunk_appendf(&trash, "\navg_loop_us:");  for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", swrate_avg(activity[thr].avg_loop_us, TIME_STATS_SAMPLES));
+	chunk_appendf(&trash, "\naccepted:");     for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", activity[thr].accepted);
 	chunk_appendf(&trash, "\naccq_pushed:");  for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", activity[thr].accq_pushed);
 	chunk_appendf(&trash, "\naccq_full:");    for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", activity[thr].accq_full);
+#ifdef USE_THREAD
+	chunk_appendf(&trash, "\naccq_ring:");    for (thr = 0; thr < global.nbthread; thr++) chunk_appendf(&trash, " %u", (accept_queue_rings[thr].tail - accept_queue_rings[thr].head + ACCEPT_QUEUE_SIZE)%ACCEPT_QUEUE_SIZE);
+#endif
 
 	chunk_appendf(&trash, "\n");
 
@@ -1078,15 +1156,19 @@ static int cli_io_handler_show_cli_sock(struct appctx *appctx)
 							const struct sockaddr_un *un;
 
 							un = (struct sockaddr_un *)&l->addr;
-							chunk_appendf(&trash, "%s ", un->sun_path);
+							if (un->sun_path[0] == '\0') {
+								chunk_appendf(&trash, "abns@%s ", un->sun_path+1);
+							} else {
+								chunk_appendf(&trash, "unix@%s ", un->sun_path);
+							}
 						} else if (l->addr.ss_family == AF_INET) {
 							addr_to_str(&l->addr, addr, sizeof(addr));
 							port_to_str(&l->addr, port, sizeof(port));
-							chunk_appendf(&trash, "%s:%s ", addr, port);
+							chunk_appendf(&trash, "ipv4@%s:%s ", addr, port);
 						} else if (l->addr.ss_family == AF_INET6) {
 							addr_to_str(&l->addr, addr, sizeof(addr));
 							port_to_str(&l->addr, port, sizeof(port));
-							chunk_appendf(&trash, "[%s]:%s ", addr, port);
+							chunk_appendf(&trash, "ipv6@[%s]:%s ", addr, port);
 						} else if (l->addr.ss_family == AF_CUST_SOCKPAIR) {
 							chunk_appendf(&trash, "sockpair@%d ", ((struct sockaddr_in *)&l->addr)->sin_addr.s_addr);
 						} else
@@ -1324,16 +1406,6 @@ static int cli_parse_set_lvl(char **args, char *payload, struct appctx *appctx, 
 	return 1;
 }
 
-/* reload the master process */
-static int cli_parse_reload(char **args, char *payload, struct appctx *appctx, void *private)
-{
-	if (!cli_has_level(appctx, ACCESS_LVL_OPER))
-		return 1;
-
-	mworker_reload();
-
-	return 1;
-}
 
 int cli_parse_default(char **args, char *payload, struct appctx *appctx, void *private)
 {
@@ -1461,66 +1533,6 @@ static int bind_parse_severity_output(char **args, int cur_arg, struct proxy *px
 }
 
 
- /*  Displays workers and processes  */
-static int cli_io_handler_show_proc(struct appctx *appctx)
-{
-	struct stream_interface *si = appctx->owner;
-	struct mworker_proc *child;
-	int old = 0;
-	int up = now.tv_sec - proc_self->timestamp;
-
-	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW)))
-		return 1;
-
-	chunk_reset(&trash);
-
-	chunk_printf(&trash, "#%-14s %-15s %-15s %-15s %s\n", "<PID>", "<type>", "<relative PID>", "<reloads>", "<uptime>");
-	chunk_appendf(&trash, "%-15u %-15s %-15u %-15d %dd %02dh%02dm%02ds\n", getpid(), "master", 0, proc_self->reloads, up / 86400, (up % 86400) / 3600, (up % 3600) / 60, (up % 60));
-
-	/* displays current processes */
-
-	chunk_appendf(&trash, "# workers\n");
-	list_for_each_entry(child, &proc_list, list) {
-		up = now.tv_sec - child->timestamp;
-
-		if (child->type != 'w')
-			continue;
-
-		if (child->reloads > 0) {
-			old++;
-			continue;
-		}
-		chunk_appendf(&trash, "%-15u %-15s %-15u %-15d %dd %02dh%02dm%02ds\n", child->pid, "worker", child->relative_pid, child->reloads, up / 86400, (up % 86400) / 3600, (up % 3600) / 60, (up % 60));
-	}
-
-	/* displays old processes */
-
-	if (old) {
-		char *msg = NULL;
-
-		chunk_appendf(&trash, "# old workers\n");
-		list_for_each_entry(child, &proc_list, list) {
-			up = now.tv_sec - child->timestamp;
-
-			if (child->type != 'w')
-				continue;
-
-			if (child->reloads > 0) {
-				memprintf(&msg, "[was: %u]", child->relative_pid);
-				chunk_appendf(&trash, "%-15u %-15s %-15s %-15d %dd %02dh%02dm%02ds\n", child->pid, "worker", msg, child->reloads, up / 86400, (up % 86400) / 3600, (up % 3600) / 60, (up % 60));
-			}
-		}
-		free(msg);
-	}
-
-	if (ci_putchk(si_ic(si), &trash) == -1) {
-		si_rx_room_blk(si);
-		return 0;
-	}
-
-	/* dump complete */
-	return 1;
-}
 
 /* Send all the bound sockets, always returns 1 */
 static int _getsocks(char **args, char *payload, struct appctx *appctx, void *private)
@@ -1800,7 +1812,7 @@ static int pcli_prefix_to_pid(const char *prefix)
 		if (*errtol != '\0')
 			return -1;
 		list_for_each_entry(child, &proc_list, list) {
-			if (child->type != 'w')
+			if (!(child->options & PROC_O_TYPE_WORKER))
 				continue;
 			if (child->pid == proc_pid){
 				return child->pid;
@@ -1820,7 +1832,7 @@ static int pcli_prefix_to_pid(const char *prefix)
 		/* chose the right process, the current one is the one with the
 		 least number of reloads */
 		list_for_each_entry(child, &proc_list, list) {
-			if (child->type != 'w')
+			if (!(child->options & PROC_O_TYPE_WORKER))
 				continue;
 			if (child->relative_pid == proc_pid){
 				if (child->reloads == 0)
@@ -2615,9 +2627,6 @@ static struct applet cli_applet = {
 
 /* register cli keywords */
 static struct cli_kw_list cli_kws = {{ },{
-	{ { "@<relative pid>", NULL }, "@<relative pid> : send a command to the <relative pid> process", NULL, cli_io_handler_show_proc, NULL, NULL, ACCESS_MASTER_ONLY},
-	{ { "@!<pid>", NULL }, "@!<pid>        : send a command to the <pid> process", cli_parse_default, NULL, NULL, NULL, ACCESS_MASTER_ONLY},
-	{ { "@master", NULL }, "@master        : send a command to the master process", cli_parse_default, NULL, NULL, NULL, ACCESS_MASTER_ONLY},
 	{ { "help", NULL }, NULL, cli_parse_simple, NULL },
 	{ { "prompt", NULL }, NULL, cli_parse_simple, NULL },
 	{ { "quit", NULL }, NULL, cli_parse_simple, NULL },
@@ -2630,10 +2639,8 @@ static struct cli_kw_list cli_kws = {{ },{
 	{ { "show", "cli", "level", NULL },    "show cli level   : display the level of the current CLI session", cli_parse_show_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "show", "fd", NULL }, "show fd [num] : dump list of file descriptors in use", cli_parse_show_fd, cli_io_handler_show_fd, NULL },
 	{ { "show", "activity", NULL }, "show activity : show per-thread activity stats (for support/developers)", cli_parse_default, cli_io_handler_show_activity, NULL },
-	{ { "show", "proc", NULL }, "show proc      : show processes status", cli_parse_default, cli_io_handler_show_proc, NULL, NULL, ACCESS_MASTER_ONLY},
 	{ { "operator", NULL },  "operator       : lower the level of the current CLI session to operator", cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "user", NULL },      "user           : lower the level of the current CLI session to user", cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
-	{ { "reload", NULL },    "reload         : reload haproxy", cli_parse_reload, NULL, NULL, NULL, ACCESS_MASTER_ONLY},
 	{ { "_getsocks", NULL }, NULL,  _getsocks, NULL },
 	{{},}
 }};

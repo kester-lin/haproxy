@@ -753,7 +753,8 @@ static void __event_srv_chk_w(struct conn_stream *cs)
 		goto out_wakeup;
 
 	if (conn->flags & CO_FL_HANDSHAKE) {
-		cs->conn->mux->subscribe(cs, SUB_RETRY_SEND, &check->wait_list);
+		if (!(conn->flags & CO_FL_ERROR))
+			cs->conn->mux->subscribe(cs, SUB_RETRY_SEND, &check->wait_list);
 		goto out;
 	}
 
@@ -838,7 +839,8 @@ static void __event_srv_chk_r(struct conn_stream *cs)
 		goto out_wakeup;
 
 	if (conn->flags & CO_FL_HANDSHAKE) {
-		cs->conn->mux->subscribe(cs, SUB_RETRY_RECV, &check->wait_list);
+		if (!(conn->flags & CO_FL_ERROR))
+			cs->conn->mux->subscribe(cs, SUB_RETRY_RECV, &check->wait_list);
 		goto out;
 	}
 
@@ -2837,7 +2839,7 @@ static int tcpcheck_main(struct check *check)
 			cs_attach(cs, check, &check_conn_cb);
 
 			ret = SF_ERR_INTERNAL;
-			if (proto->connect)
+			if (proto && proto->connect)
 				ret = proto->connect(conn,
 						     1 /* I/O polling is always needed */,
 						     (next && next->action == TCPCHK_ACT_EXPECT) ? 0 : 2);
@@ -3299,8 +3301,7 @@ int init_email_alert(struct mailers *mls, struct proxy *p, char **err)
 		struct check        *check = &q->check;
 
 		if (check->task) {
-			task_delete(check->task);
-			task_free(check->task);
+			task_destroy(check->task);
 			check->task = NULL;
 		}
 		free_check(check);

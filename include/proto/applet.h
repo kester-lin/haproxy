@@ -85,8 +85,7 @@ static inline struct appctx *appctx_new(struct applet *applet, unsigned long thr
  */
 static inline void __appctx_free(struct appctx *appctx)
 {
-	task_delete(appctx->t);
-	task_free(appctx->t);
+	task_destroy(appctx->t);
 	if (!LIST_ISEMPTY(&appctx->buffer_wait.list)) {
 		HA_SPIN_LOCK(BUF_WQ_LOCK, &buffer_wq_lock);
 		LIST_DEL(&appctx->buffer_wait.list);
@@ -103,7 +102,7 @@ static inline void appctx_free(struct appctx *appctx)
 	/* The task is supposed to be run on this thread, so we can just
 	 * check if it's running already (or about to run) or not
 	 */
-	if (!(appctx->t->state & TASK_RUNNING))
+	if (!(appctx->t->state & (TASK_QUEUED | TASK_RUNNING)))
 		__appctx_free(appctx);
 	else {
 		/* if it's running, or about to run, defer the freeing

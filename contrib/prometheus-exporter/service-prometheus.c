@@ -46,7 +46,7 @@ enum {
         PROMEX_ST_HEAD,      /* send headers before dump */
         PROMEX_ST_DUMP,      /* dumping stats */
         PROMEX_ST_DONE,      /* finished */
-        PROMEX_ST_ERROR,     /* unrecoverable error occurred */
+        PROMEX_ST_END,       /* treatment terminated */
 };
 
 /* Prometheus exporter dumper states (appctx->st1) */
@@ -151,7 +151,7 @@ const int promex_front_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_SCUR]           = ST_F_SMAX,
 	[ST_F_SMAX]           = ST_F_SLIM,
 	[ST_F_SLIM]           = ST_F_STOT,
-	[ST_F_STOT]           = ST_F_RATE,
+	[ST_F_STOT]           = ST_F_RATE_LIM,
 	[ST_F_BIN]            = ST_F_BOUT,
 	[ST_F_BOUT]           = ST_F_DREQ,
 	[ST_F_DREQ]           = ST_F_DRESP,
@@ -177,9 +177,9 @@ const int promex_front_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_LBTOT]          = 0,
 	[ST_F_TRACKED]        = 0,
 	[ST_F_TYPE]           = 0,
-	[ST_F_RATE]           = ST_F_RATE_LIM,
+	[ST_F_RATE]           = 0,
 	[ST_F_RATE_LIM]       = ST_F_RATE_MAX,
-	[ST_F_RATE_MAX]       = ST_F_CONN_RATE,
+	[ST_F_RATE_MAX]       = ST_F_CONN_RATE_MAX,
 	[ST_F_CHECK_STATUS]   = 0,
 	[ST_F_CHECK_CODE]     = 0,
 	[ST_F_CHECK_DURATION] = 0,
@@ -190,7 +190,7 @@ const int promex_front_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_HRSP_5XX]       = ST_F_HRSP_OTHER,
 	[ST_F_HRSP_OTHER]     = ST_F_INTERCEPTED,
 	[ST_F_HANAFAIL]       = 0,
-	[ST_F_REQ_RATE]       = ST_F_REQ_RATE_MAX,
+	[ST_F_REQ_RATE]       = 0,
 	[ST_F_REQ_RATE_MAX]   = ST_F_REQ_TOT,
 	[ST_F_REQ_TOT]        = ST_F_HRSP_1XX,
 	[ST_F_CLI_ABRT]       = 0,
@@ -221,13 +221,13 @@ const int promex_front_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_COOKIE]         = 0,
 	[ST_F_MODE]           = 0,
 	[ST_F_ALGO]           = 0,
-	[ST_F_CONN_RATE]      = ST_F_CONN_RATE_MAX,
+	[ST_F_CONN_RATE]      = 0,
 	[ST_F_CONN_RATE_MAX]  = ST_F_CONN_TOT,
 	[ST_F_CONN_TOT]       = ST_F_BIN,
 	[ST_F_INTERCEPTED]    = ST_F_CACHE_LOOKUPS,
 	[ST_F_DCON]           = ST_F_DSES,
 	[ST_F_DSES]           = ST_F_WREW,
-	[ST_F_WREW]           = ST_F_REQ_RATE,
+	[ST_F_WREW]           = ST_F_REQ_RATE_MAX,
 	[ST_F_CONNECT]        = 0,
 	[ST_F_REUSE]          = 0,
 	[ST_F_CACHE_LOOKUPS]  = ST_F_CACHE_HITS,
@@ -244,7 +244,7 @@ const int promex_back_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_SCUR]           = ST_F_SMAX,
 	[ST_F_SMAX]           = ST_F_SLIM,
 	[ST_F_SLIM]           = ST_F_STOT,
-	[ST_F_STOT]           = ST_F_RATE,
+	[ST_F_STOT]           = ST_F_RATE_MAX,
 	[ST_F_BIN]            = ST_F_BOUT,
 	[ST_F_BOUT]           = ST_F_QTIME,
 	[ST_F_DREQ]           = ST_F_DRESP,
@@ -270,7 +270,7 @@ const int promex_back_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_LBTOT]          = ST_F_REQ_TOT,
 	[ST_F_TRACKED]        = 9,
 	[ST_F_TYPE]           = 0,
-	[ST_F_RATE]           = ST_F_RATE_MAX,
+	[ST_F_RATE]           = 0,
 	[ST_F_RATE_LIM]       = 0,
 	[ST_F_RATE_MAX]       = ST_F_LASTSESS,
 	[ST_F_CHECK_STATUS]   = 0,
@@ -337,7 +337,7 @@ const int promex_srv_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_SCUR]           = ST_F_SMAX,
 	[ST_F_SMAX]           = ST_F_SLIM,
 	[ST_F_SLIM]           = ST_F_STOT,
-	[ST_F_STOT]           = ST_F_RATE,
+	[ST_F_STOT]           = ST_F_RATE_MAX,
 	[ST_F_BIN]            = ST_F_BOUT,
 	[ST_F_BOUT]           = ST_F_QTIME,
 	[ST_F_DREQ]           = 0,
@@ -363,7 +363,7 @@ const int promex_srv_metrics[ST_F_TOTAL_FIELDS] = {
 	[ST_F_LBTOT]          = ST_F_HRSP_1XX,
 	[ST_F_TRACKED]        = 0,
 	[ST_F_TYPE]           = 0,
-	[ST_F_RATE]           = ST_F_RATE_MAX,
+	[ST_F_RATE]           = 0,
 	[ST_F_RATE_LIM]       = 0,
 	[ST_F_RATE_MAX]       = ST_F_LASTSESS,
 	[ST_F_CHECK_STATUS]   = 0,
@@ -430,10 +430,10 @@ const struct ist promex_inf_metric_names[INF_TOTAL_FIELDS] = {
 	[INF_PROCESS_NUM]                    = IST("relative_process_id"),
 	[INF_PID]                            = IST("pid"),
 	[INF_UPTIME]                         = IST("uptime"),
-	[INF_UPTIME_SEC]                     = IST("uptime_seconds"),
-	[INF_MEMMAX_MB]                      = IST("max_memory"),
-	[INF_POOL_ALLOC_MB]                  = IST("pool_allocated_total"),
-	[INF_POOL_USED_MB]                   = IST("pool_used_total"),
+	[INF_UPTIME_SEC]                     = IST("start_time_seconds"),
+	[INF_MEMMAX_MB]                      = IST("max_memory_bytes"),
+	[INF_POOL_ALLOC_MB]                  = IST("pool_allocated_bytes"),
+	[INF_POOL_USED_MB]                   = IST("pool_used_bytes"),
 	[INF_POOL_FAILED]                    = IST("pool_failures_total"),
 	[INF_ULIMIT_N]                       = IST("max_fds"),
 	[INF_MAXSOCK]                        = IST("max_sockets"),
@@ -462,8 +462,8 @@ const struct ist promex_inf_metric_names[INF_TOTAL_FIELDS] = {
 	[INF_SSL_FRONTEND_SESSION_REUSE_PCT] = IST("frontent_ssl_reuse"),
 	[INF_SSL_BACKEND_KEY_RATE]           = IST("current_backend_ssl_key_rate"),
 	[INF_SSL_BACKEND_MAX_KEY_RATE]       = IST("max_backend_ssl_key_rate"),
-	[INF_SSL_CACHE_LOOKUPS]              = IST("ssl_cache_lookups"),
-	[INF_SSL_CACHE_MISSES]               = IST("ssl_cache_misses"),
+	[INF_SSL_CACHE_LOOKUPS]              = IST("ssl_cache_lookups_total"),
+	[INF_SSL_CACHE_MISSES]               = IST("ssl_cache_misses_total"),
 	[INF_COMPRESS_BPS_IN]                = IST("http_comp_bytes_in_total"),
 	[INF_COMPRESS_BPS_OUT]               = IST("http_comp_bytes_out_total"),
 	[INF_COMPRESS_BPS_RATE_LIM]          = IST("limit_http_comp"),
@@ -586,17 +586,17 @@ const struct ist promex_inf_metric_desc[INF_TOTAL_FIELDS] = {
 	[INF_PROCESS_NUM]                    = IST("Relative process id, starting at 1."),
 	[INF_PID]                            = IST("HAProxy PID."),
 	[INF_UPTIME]                         = IST("Uptime in a human readable format."),
-	[INF_UPTIME_SEC]                     = IST("Uptime in seconds."),
-	[INF_MEMMAX_MB]                      = IST("Per-process memory limit (in MB); 0=unset."),
-	[INF_POOL_ALLOC_MB]                  = IST("Total amount of memory allocated in pools (in MB)."),
-	[INF_POOL_USED_MB]                   = IST("Total amount of memory used in pools (in MB)."),
+	[INF_UPTIME_SEC]                     = IST("Start time in seconds."),
+	[INF_MEMMAX_MB]                      = IST("Per-process memory limit (in bytes); 0=unset."),
+	[INF_POOL_ALLOC_MB]                  = IST("Total amount of memory allocated in pools (in bytes)."),
+	[INF_POOL_USED_MB]                   = IST("Total amount of memory used in pools (in bytes)."),
 	[INF_POOL_FAILED]                    = IST("Total number of failed pool allocations."),
 	[INF_ULIMIT_N]                       = IST("Maximum number of open file descriptors; 0=unset."),
 	[INF_MAXSOCK]                        = IST("Maximum numer of open sockets."),
 	[INF_MAXCONN]                        = IST("Maximum number of concurrent connections."),
 	[INF_HARD_MAXCONN]                   = IST("Initial Maximum number of concurrent connections."),
 	[INF_CURR_CONN]                      = IST("Number of active sessions."),
-	[INF_CUM_CONN]                       = IST("Total number of terminated sessions."),
+	[INF_CUM_CONN]                       = IST("Total number of created sessions."),
 	[INF_CUM_REQ]                        = IST("Total number of requests (TCP or HTTP)."),
 	[INF_MAX_SSL_CONNS]                  = IST("Configured maximum number of concurrent SSL connections."),
 	[INF_CURR_SSL_CONNS]                 = IST("Number of opened SSL connections."),
@@ -893,52 +893,52 @@ const struct ist promex_inf_metric_types[INF_TOTAL_FIELDS] = {
 	[INF_NAME]                           = IST("untyped"),
 	[INF_VERSION]                        = IST("untyped"),
 	[INF_RELEASE_DATE]                   = IST("untyped"),
-	[INF_NBTHREAD]                       = IST("counter"),
-	[INF_NBPROC]                         = IST("counter"),
-	[INF_PROCESS_NUM]                    = IST("counter"),
+	[INF_NBTHREAD]                       = IST("gauge"),
+	[INF_NBPROC]                         = IST("gauge"),
+	[INF_PROCESS_NUM]                    = IST("gauge"),
 	[INF_PID]                            = IST("untyped"),
 	[INF_UPTIME]                         = IST("untyped"),
-	[INF_UPTIME_SEC]                     = IST("counter"),
-	[INF_MEMMAX_MB]                      = IST("counter"),
+	[INF_UPTIME_SEC]                     = IST("gauge"),
+	[INF_MEMMAX_MB]                      = IST("gauge"),
 	[INF_POOL_ALLOC_MB]                  = IST("gauge"),
 	[INF_POOL_USED_MB]                   = IST("gauge"),
 	[INF_POOL_FAILED]                    = IST("counter"),
-	[INF_ULIMIT_N]                       = IST("counter"),
+	[INF_ULIMIT_N]                       = IST("gauge"),
 	[INF_MAXSOCK]                        = IST("gauge"),
 	[INF_MAXCONN]                        = IST("gauge"),
 	[INF_HARD_MAXCONN]                   = IST("gauge"),
 	[INF_CURR_CONN]                      = IST("gauge"),
 	[INF_CUM_CONN]                       = IST("counter"),
 	[INF_CUM_REQ]                        = IST("counter"),
-	[INF_MAX_SSL_CONNS]                  = IST("counter"),
+	[INF_MAX_SSL_CONNS]                  = IST("gauge"),
 	[INF_CURR_SSL_CONNS]                 = IST("gauge"),
 	[INF_CUM_SSL_CONNS]                  = IST("counter"),
-	[INF_MAXPIPES]                       = IST("counter"),
-	[INF_PIPES_USED]                     = IST("gauge"),
-	[INF_PIPES_FREE]                     = IST("gauge"),
+	[INF_MAXPIPES]                       = IST("gauge"),
+	[INF_PIPES_USED]                     = IST("counter"),
+	[INF_PIPES_FREE]                     = IST("counter"),
 	[INF_CONN_RATE]                      = IST("gauge"),
-	[INF_CONN_RATE_LIMIT]                = IST("counter"),
-	[INF_MAX_CONN_RATE]                  = IST("counter"),
+	[INF_CONN_RATE_LIMIT]                = IST("gauge"),
+	[INF_MAX_CONN_RATE]                  = IST("gauge"),
 	[INF_SESS_RATE]                      = IST("gauge"),
-	[INF_SESS_RATE_LIMIT]                = IST("counter"),
-	[INF_MAX_SESS_RATE]                  = IST("counter"),
+	[INF_SESS_RATE_LIMIT]                = IST("gauge"),
+	[INF_MAX_SESS_RATE]                  = IST("gauge"),
 	[INF_SSL_RATE]                       = IST("gauge"),
-	[INF_SSL_RATE_LIMIT]                 = IST("counter"),
-	[INF_MAX_SSL_RATE]                   = IST("counter"),
+	[INF_SSL_RATE_LIMIT]                 = IST("gauge"),
+	[INF_MAX_SSL_RATE]                   = IST("gauge"),
 	[INF_SSL_FRONTEND_KEY_RATE]          = IST("gauge"),
-	[INF_SSL_FRONTEND_MAX_KEY_RATE]      = IST("counter"),
+	[INF_SSL_FRONTEND_MAX_KEY_RATE]      = IST("gauge"),
 	[INF_SSL_FRONTEND_SESSION_REUSE_PCT] = IST("gauge"),
 	[INF_SSL_BACKEND_KEY_RATE]           = IST("gauge"),
-	[INF_SSL_BACKEND_MAX_KEY_RATE]       = IST("counter"),
+	[INF_SSL_BACKEND_MAX_KEY_RATE]       = IST("gauge"),
 	[INF_SSL_CACHE_LOOKUPS]              = IST("counter"),
 	[INF_SSL_CACHE_MISSES]               = IST("counter"),
-	[INF_COMPRESS_BPS_IN]                = IST("gauge"),
-	[INF_COMPRESS_BPS_OUT]               = IST("gauge"),
-	[INF_COMPRESS_BPS_RATE_LIM]          = IST("counter"),
+	[INF_COMPRESS_BPS_IN]                = IST("counter"),
+	[INF_COMPRESS_BPS_OUT]               = IST("counter"),
+	[INF_COMPRESS_BPS_RATE_LIM]          = IST("gauge"),
 	[INF_ZLIB_MEM_USAGE]                 = IST("gauge"),
-	[INF_MAX_ZLIB_MEM_USAGE]             = IST("counter"),
+	[INF_MAX_ZLIB_MEM_USAGE]             = IST("gauge"),
 	[INF_TASKS]                          = IST("gauge"),
-	[INF_RUN_QUEUE]                      = IST("gouge"),
+	[INF_RUN_QUEUE]                      = IST("gauge"),
 	[INF_IDLE_PCT]                       = IST("gauge"),
 	[INF_NODE]                           = IST("untyped"),
 	[INF_DESCRIPTION]                    = IST("untyped"),
@@ -949,7 +949,7 @@ const struct ist promex_inf_metric_types[INF_TOTAL_FIELDS] = {
 	[INF_ACTIVE_PEERS]                   = IST("gauge"),
 	[INF_CONNECTED_PEERS]                = IST("gauge"),
 	[INF_DROPPED_LOGS]                   = IST("counter"),
-	[INF_BUSY_POLLING]                   = IST("counter"),
+	[INF_BUSY_POLLING]                   = IST("gauge"),
 };
 
 /* Type for all stats fields. "untyped" is used for unsupported field. */
@@ -957,9 +957,9 @@ const struct ist promex_st_metric_types[ST_F_TOTAL_FIELDS] = {
 	[ST_F_PXNAME]         = IST("untyped"),
 	[ST_F_SVNAME]         = IST("untyped"),
 	[ST_F_QCUR]           = IST("gauge"),
-	[ST_F_QMAX]           = IST("counter"),
+	[ST_F_QMAX]           = IST("gauge"),
 	[ST_F_SCUR]           = IST("gauge"),
-	[ST_F_SMAX]           = IST("counter"),
+	[ST_F_SMAX]           = IST("gauge"),
 	[ST_F_SLIM]           = IST("gauge"),
 	[ST_F_STOT]           = IST("counter"),
 	[ST_F_BIN]            = IST("counter"),
@@ -987,9 +987,9 @@ const struct ist promex_st_metric_types[ST_F_TOTAL_FIELDS] = {
 	[ST_F_LBTOT]          = IST("counter"),
 	[ST_F_TRACKED]        = IST("untyped"),
 	[ST_F_TYPE]           = IST("untyped"),
-	[ST_F_RATE]           = IST("gauge"),
+	[ST_F_RATE]           = IST("untyped"),
 	[ST_F_RATE_LIM]       = IST("gauge"),
-	[ST_F_RATE_MAX]       = IST("counter"),
+	[ST_F_RATE_MAX]       = IST("gauge"),
 	[ST_F_CHECK_STATUS]   = IST("untyped"),
 	[ST_F_CHECK_CODE]     = IST("untyped"),
 	[ST_F_CHECK_DURATION] = IST("gauge"),
@@ -1000,8 +1000,8 @@ const struct ist promex_st_metric_types[ST_F_TOTAL_FIELDS] = {
 	[ST_F_HRSP_5XX]       = IST("counter"),
 	[ST_F_HRSP_OTHER]     = IST("counter"),
 	[ST_F_HANAFAIL]       = IST("counter"),
-	[ST_F_REQ_RATE]       = IST("gauge"),
-	[ST_F_REQ_RATE_MAX]   = IST("counter"),
+	[ST_F_REQ_RATE]       = IST("untyped"),
+	[ST_F_REQ_RATE_MAX]   = IST("gauge"),
 	[ST_F_REQ_TOT]        = IST("counter"),
 	[ST_F_CLI_ABRT]       = IST("counter"),
 	[ST_F_SRV_ABRT]       = IST("counter"),
@@ -1031,8 +1031,8 @@ const struct ist promex_st_metric_types[ST_F_TOTAL_FIELDS] = {
 	[ST_F_COOKIE]         = IST("untyped"),
 	[ST_F_MODE]           = IST("untyped"),
 	[ST_F_ALGO]           = IST("untyped"),
-	[ST_F_CONN_RATE]      = IST("gauge"),
-	[ST_F_CONN_RATE_MAX]  = IST("counter"),
+	[ST_F_CONN_RATE]      = IST("untyped"),
+	[ST_F_CONN_RATE_MAX]  = IST("gauge"),
 	[ST_F_CONN_TOT]       = IST("counter"),
 	[ST_F_INTERCEPTED]    = IST("counter"),
 	[ST_F_DCON]           = IST("counter"),
@@ -1240,16 +1240,16 @@ static int promex_dump_global_metrics(struct appctx *appctx, struct htx *htx)
 				metric = mkf_u32(FO_KEY, relative_pid);
 				break;
 			case INF_UPTIME_SEC:
-				metric = mkf_u32(FN_DURATION, (now.tv_sec - start_date.tv_sec));
+				metric = mkf_u32(FN_DURATION, start_date.tv_sec);
 				break;
 			case INF_MEMMAX_MB:
-				metric = mkf_u32(FO_CONFIG|FN_LIMIT, global.rlimit_memmax);
+				metric = mkf_u64(FO_CONFIG|FN_LIMIT, global.rlimit_memmax * 1048576L);
 				break;
 			case INF_POOL_ALLOC_MB:
-				metric = mkf_u32(0, (unsigned)(pool_total_allocated() / 1048576L));
+				metric = mkf_u64(0, pool_total_allocated());
 				break;
 			case INF_POOL_USED_MB:
-				metric = mkf_u32(0, (unsigned)(pool_total_used() / 1048576L));
+				metric = mkf_u64(0, pool_total_used());
 				break;
 			case INF_POOL_FAILED:
 				metric = mkf_u32(FN_COUNTER, pool_total_failures());
@@ -1454,17 +1454,11 @@ static int promex_dump_front_metrics(struct appctx *appctx, struct htx *htx)
 				case ST_F_STOT:
 					metric = mkf_u64(FN_COUNTER, px->fe_counters.cum_sess);
 					break;
-				case ST_F_RATE:
-					metric = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_sess_per_sec));
-					break;
 				case ST_F_RATE_LIM:
 					metric = mkf_u32(FO_CONFIG|FN_LIMIT, px->fe_sps_lim);
 					break;
 				case ST_F_RATE_MAX:
 					metric = mkf_u32(FN_MAX, px->fe_counters.sps_max);
-					break;
-				case ST_F_CONN_RATE:
-					metric = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_conn_per_sec));
 					break;
 				case ST_F_CONN_RATE_MAX:
 					metric = mkf_u32(FN_MAX, px->fe_counters.cps_max);
@@ -1495,11 +1489,6 @@ static int promex_dump_front_metrics(struct appctx *appctx, struct htx *htx)
 					break;
 				case ST_F_WREW:
 					metric = mkf_u64(FN_COUNTER, px->fe_counters.failed_rewrites);
-					break;
-				case ST_F_REQ_RATE:
-					if (px->mode != PR_MODE_HTTP)
-						goto next_px;
-					metric = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_req_per_sec));
 					break;
 				case ST_F_REQ_RATE_MAX:
 					if (px->mode != PR_MODE_HTTP)
@@ -1643,9 +1632,6 @@ static int promex_dump_back_metrics(struct appctx *appctx, struct htx *htx)
 					break;
 				case ST_F_STOT:
 					metric = mkf_u64(FN_COUNTER, px->be_counters.cum_conn);
-					break;
-				case ST_F_RATE:
-					metric = mkf_u32(0, read_freq_ctr(&px->be_sess_per_sec));
 					break;
 				case ST_F_RATE_MAX:
 					metric = mkf_u32(0, px->be_counters.sps_max);
@@ -1868,9 +1854,6 @@ static int promex_dump_srv_metrics(struct appctx *appctx, struct htx *htx)
 						break;
 					case ST_F_STOT:
 						metric = mkf_u64(FN_COUNTER, sv->counters.cum_sess);
-						break;
-					case ST_F_RATE:
-						metric = mkf_u32(FN_RATE, read_freq_ctr(&sv->sess_per_sec));
 						break;
 					case ST_F_RATE_MAX:
 						metric = mkf_u32(FN_MAX, sv->counters.sps_max);
@@ -2125,6 +2108,7 @@ static int promex_dump_metrics(struct appctx *appctx, struct stream_interface *s
  * full. */
 static int promex_send_headers(struct appctx *appctx, struct stream_interface *si, struct htx *htx)
 {
+	struct channel *chn = si_ic(appctx->owner);
 	struct htx_sl *sl;
 	unsigned int flags;
 
@@ -2140,6 +2124,7 @@ static int promex_send_headers(struct appctx *appctx, struct stream_interface *s
 	    !htx_add_endof(htx, HTX_BLK_EOH))
 		goto full;
 
+	channel_add_input(chn, htx->data);
 	return 1;
   full:
 	htx_reset(htx);
@@ -2206,33 +2191,25 @@ static void promex_appctx_handle_io(struct appctx *appctx)
 				si_rx_room_blk(si);
 				goto out;
 			}
-			res->flags |= CF_READ_NULL;
+			channel_add_input(res, 1);
+			appctx->st0 = PROMEX_ST_END;
+			/* fall through */
 
-			/* eat the whole request */
-			req_htx = htxbuf(&req->buf);
-			htx_reset(req_htx);
-			htx_to_buf(req_htx, &req->buf);
-			co_set_data(req, 0);
-
-			/* Set SI flags */
-			if (!(s->flags & SF_ERR_MASK))      // this is not really an error but it is
-				s->flags |= SF_ERR_LOCAL;   // to mark that it comes from the proxy
-			if (!(s->flags & SF_FINST_MASK))
-				s->flags |= SF_FINST_R;
-
-			si_shutr(si);
-
-		case PROMEX_ST_ERROR:
-			return;
+		case PROMEX_ST_END:
+			if (!(res->flags & CF_SHUTR)) {
+				res->flags |= CF_READ_NULL;
+				si_shutr(si);
+			}
 	}
-
-	if ((res->flags & CF_SHUTR) && (si->state == SI_ST_EST))
-		si_shutw(si);
 
   out:
 	htx_to_buf(res_htx, &res->buf);
-	if (!channel_is_empty(res))
-		si_stop_get(si);
+
+	/* eat the whole request */
+	if (co_data(req)) {
+		req_htx = htx_from_buf(&req->buf);
+		co_htx_skip(req, req_htx, co_data(req));
+	}
 	return;
 
   error:

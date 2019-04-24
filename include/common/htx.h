@@ -91,6 +91,7 @@
 /* HTX flags */
 #define HTX_FL_NONE              0x00000000
 #define HTX_FL_PARSING_ERROR     0x00000001
+#define HTX_FL_UPGRADE           0x00000002
 
 
 /* Pseudo header types (max 255). */
@@ -228,48 +229,48 @@ int htx_trailer_to_h1(const struct ist tlr, struct buffer *chk);
 #define HTX_SL_RES_CPTR(sl) HTX_SL_P2_PTR(sl)
 #define HTX_SL_RES_RPTR(sl) HTX_SL_P3_PTR(sl)
 
-static inline const struct ist htx_sl_p1(const struct htx_sl *sl)
+static inline struct ist htx_sl_p1(const struct htx_sl *sl)
 {
 	return ist2(HTX_SL_P1_PTR(sl), HTX_SL_P1_LEN(sl));
 }
 
-static inline const struct ist htx_sl_p2(const struct htx_sl *sl)
+static inline struct ist htx_sl_p2(const struct htx_sl *sl)
 {
 	return ist2(HTX_SL_P2_PTR(sl), HTX_SL_P2_LEN(sl));
 }
 
-static inline const struct ist htx_sl_p3(const struct htx_sl *sl)
+static inline struct ist htx_sl_p3(const struct htx_sl *sl)
 {
 	return ist2(HTX_SL_P3_PTR(sl), HTX_SL_P3_LEN(sl));
 }
 
-static inline const struct ist htx_sl_req_meth(const struct htx_sl *sl)
+static inline struct ist htx_sl_req_meth(const struct htx_sl *sl)
 {
 	return htx_sl_p1(sl);
 }
 
-static inline const struct ist htx_sl_req_uri(const struct htx_sl *sl)
+static inline struct ist htx_sl_req_uri(const struct htx_sl *sl)
 {
 	return htx_sl_p2(sl);
 }
 
-static inline const struct ist htx_sl_req_vsn(const struct htx_sl *sl)
+static inline struct ist htx_sl_req_vsn(const struct htx_sl *sl)
 {
 	return htx_sl_p3(sl);
 }
 
 
-static inline const struct ist htx_sl_res_vsn(const struct htx_sl *sl)
+static inline struct ist htx_sl_res_vsn(const struct htx_sl *sl)
 {
 	return htx_sl_p1(sl);
 }
 
-static inline const struct ist htx_sl_res_code(const struct htx_sl *sl)
+static inline struct ist htx_sl_res_code(const struct htx_sl *sl)
 {
 	return htx_sl_p2(sl);
 }
 
-static inline const struct ist htx_sl_res_reason(const struct htx_sl *sl)
+static inline struct ist htx_sl_res_reason(const struct htx_sl *sl)
 {
 	return htx_sl_p3(sl);
 }
@@ -279,7 +280,7 @@ static inline struct htx_sl *htx_get_stline(struct htx *htx)
 {
 	struct htx_sl *sl = NULL;
 
-	if (htx->sl_off != -1)
+	if (htx->used && htx->sl_off != -1)
 		sl = ((void *)htx->blocks + htx->sl_off);
 
 	return sl;
@@ -727,7 +728,7 @@ static inline struct htx *htx_from_buf(struct buffer *buf)
 /* Upate <buf> accordingly to the HTX message <htx> */
 static inline void htx_to_buf(struct htx *htx, struct buffer *buf)
 {
-	if (!htx->used) {
+	if (!htx->used && !(htx->flags & (HTX_FL_PARSING_ERROR|HTX_FL_UPGRADE))) {
 		htx_reset(htx);
 		b_set_data(buf, 0);
 	}

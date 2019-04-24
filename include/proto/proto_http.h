@@ -29,7 +29,7 @@
 #include <proto/channel.h>
 #include <proto/stream.h>
 
-#define IS_HTX_STRM(strm) (strm_fe(strm)->options2 & PR_O2_USE_HTX)
+#define IS_HTX_STRM(strm) ((strm)->flags & SF_HTX)
 #define IS_HTX_SMP(smp)   ((smp)->strm && IS_HTX_STRM((smp)->strm))
 
 extern struct pool_head *pool_head_uniqueid;
@@ -80,7 +80,6 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit);
 int htx_process_res_common(struct stream *s, struct channel *rep, int an_bit, struct proxy *px);
 int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit);
 int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit);
-void htx_adjust_conn_mode(struct stream *s, struct http_txn *txn);
 int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct http_txn *txn);
 int htx_transform_header_str(struct stream* s, struct channel *chn, struct htx *htx,
 			     struct ist name, const char *str, struct my_regex *re, int action);

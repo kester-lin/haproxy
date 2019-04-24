@@ -53,6 +53,7 @@
 #include <proto/checks.h>
 #include <proto/cli.h>
 #include <proto/compression.h>
+#include <proto/dns.h>
 #include <proto/stats.h>
 #include <proto/fd.h>
 #include <proto/filters.h>
@@ -495,7 +496,7 @@ void http_adjust_conn_mode(struct stream *s, struct http_txn *txn, struct http_m
 	int tmp = TX_CON_WANT_KAL;
 
 	if (IS_HTX_STRM(s))
-		return htx_adjust_conn_mode(s, txn);
+		return;
 
 	if ((fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
 	    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
@@ -1750,12 +1751,14 @@ resume_execution:
 			value->area[value->data] = '\0';
 
 			/* perform update */
+			HA_SPIN_LOCK(PATREF_LOCK, &ref->lock);
 			if (pat_ref_find_elt(ref, key->area) != NULL)
 				/* update entry if it exists */
 				pat_ref_set(ref, key->area, value->area, NULL);
 			else
 				/* insert a new entry */
 				pat_ref_add(ref, key->area, value->area, NULL);
+			HA_SPIN_UNLOCK(PATREF_LOCK, &ref->lock);
 
 			free_trash_chunk(key);
 			free_trash_chunk(value);
@@ -1777,7 +1780,6 @@ resume_execution:
 		case ACT_CUSTOM:
 			if ((s->req.flags & CF_READ_ERROR) ||
 			    ((s->req.flags & (CF_SHUTR|CF_READ_NULL)) &&
-			     !(s->si[0].flags & SI_FL_CLEAN_ABRT) &&
 			     (px->options & PR_O_ABRT_CLOSE)))
 				act_flags |= ACT_FLAG_FINAL;
 
@@ -2059,8 +2061,10 @@ resume_execution:
 
 			/* perform update */
 			/* check if the entry already exists */
+			HA_SPIN_LOCK(PATREF_LOCK, &ref->lock);
 			if (pat_ref_find_elt(ref, key->area) == NULL)
 				pat_ref_add(ref, key->area, NULL, NULL);
+			HA_SPIN_UNLOCK(PATREF_LOCK, &ref->lock);
 
 			free_trash_chunk(key);
 			break;
@@ -2184,7 +2188,6 @@ resume_execution:
 		case ACT_CUSTOM:
 			if ((s->req.flags & CF_READ_ERROR) ||
 			    ((s->req.flags & (CF_SHUTR|CF_READ_NULL)) &&
-			     !(s->si[0].flags & SI_FL_CLEAN_ABRT) &&
 			     (px->options & PR_O_ABRT_CLOSE)))
 				act_flags |= ACT_FLAG_FINAL;
 
@@ -3612,8 +3615,7 @@ int http_sync_req_state(struct stream *s)
 		 */
 		if (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_SCL) &&
 		    ((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_KAL) &&
-		    (!(s->be->options & PR_O_ABRT_CLOSE) ||
-		     (s->si[0].flags & SI_FL_CLEAN_ABRT)) &&
+		    !(s->be->options & PR_O_ABRT_CLOSE) &&
 		    txn->meth != HTTP_METH_POST)
 			channel_dont_read(chn);
 
@@ -3708,8 +3710,7 @@ int http_sync_req_state(struct stream *s)
 		/* see above in MSG_DONE why we only do this in these states */
 		if (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_SCL) &&
 		    ((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_KAL) &&
-		    (!(s->be->options & PR_O_ABRT_CLOSE) ||
-		     (s->si[0].flags & SI_FL_CLEAN_ABRT)))
+		    !(s->be->options & PR_O_ABRT_CLOSE))
 			channel_dont_read(chn);
 		goto wait_other_side;
 	}
@@ -4070,7 +4071,7 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	 * server, which will decide whether to close or to go on processing the
 	 * request. We only do that in tunnel mode, and not in other modes since
 	 * it can be abused to exhaust source ports. */
-	if ((s->be->options & PR_O_ABRT_CLOSE) && !(s->si[0].flags & SI_FL_CLEAN_ABRT)) {
+	if (s->be->options & PR_O_ABRT_CLOSE) {
 		channel_auto_read(req);
 		if ((req->flags & (CF_SHUTR|CF_READ_NULL)) &&
 		    ((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN))
@@ -5382,6 +5383,7 @@ int http_msg_forward_body(struct stream *s, struct http_msg *msg)
 	}
 
 	msg->msg_state = HTTP_MSG_ENDING;
+	chn->flags |= CF_EOI;
 
   ending:
 	/* we may have some pending data starting at res->buf.p such as a last
@@ -5517,6 +5519,8 @@ int http_msg_forward_chunked_body(struct stream *s, struct http_msg *msg)
 	}
 
 	msg->msg_state = HTTP_MSG_ENDING;
+	chn->flags |= CF_EOI;
+
   ending:
 	/* we may have some pending data starting at res->buf.p such as a last
 	 * chunk of data or trailers. */

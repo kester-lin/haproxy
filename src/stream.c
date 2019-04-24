@@ -39,6 +39,7 @@
 #include <proto/checks.h>
 #include <proto/cli.h>
 #include <proto/connection.h>
+#include <proto/dns.h>
 #include <proto/stats.h>
 #include <proto/fd.h>
 #include <proto/filters.h>
@@ -151,6 +152,7 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	s->logs.bytes_in = s->logs.bytes_out = 0;
 	s->logs.prx_queue_pos = 0;  /* we get the number of pending conns before us */
 	s->logs.srv_queue_pos = 0; /* we will get this number soon */
+	s->obj_type = OBJ_TYPE_STREAM;
 
 	csinfo = si_get_cs_info(cs);
 	if (csinfo) {
@@ -236,8 +238,15 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	si_set_state(&s->si[0], SI_ST_EST);
 	s->si[0].hcto = sess->fe->timeout.clientfin;
 
-	if (cs && cs->conn->mux && cs->conn->mux->flags & MX_FL_CLEAN_ABRT)
-		s->si[0].flags |= SI_FL_CLEAN_ABRT;
+	if (cs && cs->conn->mux) {
+		if (cs->conn->mux->flags & MX_FL_CLEAN_ABRT)
+			s->si[0].flags |= SI_FL_CLEAN_ABRT;
+		if (cs->conn->mux->flags & MX_FL_HTX)
+			s->flags |= SF_HTX;
+	}
+	/* Set SF_HTX flag for HTX frontends. */
+	if (sess->fe->mode == PR_MODE_HTTP && sess->fe->options2 & PR_O2_USE_HTX)
+		s->flags |= SF_HTX;
 
 	/* attach the incoming connection to the stream interface now. */
 	if (cs)
@@ -301,6 +310,11 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	s->txn = NULL;
 	s->hlua = NULL;
 
+	s->dns_ctx.dns_requester = NULL;
+	s->dns_ctx.hostname_dn = NULL;
+	s->dns_ctx.hostname_dn_len = 0;
+	s->dns_ctx.parent = NULL;
+
 	HA_SPIN_LOCK(STRMS_LOCK, &streams_lock);
 	LIST_ADDQ(&streams, &s->list);
 	HA_SPIN_UNLOCK(STRMS_LOCK, &streams_lock);
@@ -326,7 +340,7 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	/* Error unrolling */
  out_fail_accept:
 	flt_stream_release(s, 0);
-	task_free(t);
+	task_destroy(t);
 	tasklet_free(s->si[1].wait_event.task);
 	LIST_DEL(&s->list);
 out_fail_alloc_si1:
@@ -409,6 +423,15 @@ static void stream_free(struct stream *s)
 		pool_free(pool_head_hdr_idx, s->txn->hdr_idx.v);
 		pool_free(pool_head_http_txn, s->txn);
 		s->txn = NULL;
+	}
+
+	if (s->dns_ctx.dns_requester) {
+		free(s->dns_ctx.hostname_dn); s->dns_ctx.hostname_dn = NULL;
+		s->dns_ctx.hostname_dn_len = 0;
+		dns_unlink_resolution(s->dns_ctx.dns_requester);
+
+		pool_free(dns_requester_pool, s->dns_ctx.dns_requester);
+		s->dns_ctx.dns_requester = NULL;
 	}
 
 	flt_stream_stop(s);
@@ -670,7 +693,7 @@ static int sess_update_st_con_tcp(struct stream *s)
 	    unlikely((rep->flags & CF_SHUTW) ||
 		     ((req->flags & CF_SHUTW_NOW) && /* FIXME: this should not prevent a connection from establishing */
 		      ((!(req->flags & CF_WRITE_ACTIVITY) && channel_is_empty(req)) ||
-		       ((s->be->options & PR_O_ABRT_CLOSE) && !(s->si[0].flags & SI_FL_CLEAN_ABRT)))))) {
+		       (s->be->options & PR_O_ABRT_CLOSE))))) {
 		/* give up */
 		si_shutw(si);
 		si->err_type |= SI_ET_CONN_ABRT;
@@ -822,6 +845,7 @@ static int sess_update_st_cer(struct stream *s)
 			si->state = SI_ST_TAR;
 			si->exp = tick_add(now_ms, MS_TO_TICKS(delay));
 		}
+		si->flags &= ~SI_FL_ERR;
 		return 0;
 	}
 	return 0;
@@ -890,8 +914,7 @@ static int check_req_may_abort(struct channel *req, struct stream *s)
 {
 	return ((req->flags & (CF_READ_ERROR)) ||
 	        ((req->flags & (CF_SHUTW_NOW|CF_SHUTW)) &&  /* empty and client aborted */
-	         (channel_is_empty(req) ||
-		  ((s->be->options & PR_O_ABRT_CLOSE) && !(s->si[0].flags & SI_FL_CLEAN_ABRT)))));
+	         (channel_is_empty(req) || (s->be->options & PR_O_ABRT_CLOSE))));
 }
 
 /* Update back stream interface status for input states SI_ST_ASS, SI_ST_QUE,
@@ -1050,6 +1073,8 @@ static void sess_update_stream_int(struct stream *s)
 
 		if (!(si->flags & SI_FL_EXP))
 			return;  /* still in turn-around */
+
+		si->flags &= ~SI_FL_EXP;
 
 		si->exp = TICK_ETERNITY;
 
@@ -2156,6 +2181,19 @@ redo:
 				s->flags |= SF_ERR_SRVTO;
 			}
 			sess_set_term_flags(s);
+
+			/* Abort the request if a client error occurred while
+			 * the backend stream-interface is in the SI_ST_INI
+			 * state. It is switched into the SI_ST_CLO state and
+			 * the request channel is erased. */
+			if (si_b->state == SI_ST_INI) {
+				si_b->state = SI_ST_CLO;
+				channel_abort(req);
+				if (IS_HTX_STRM(s))
+					channel_htx_erase(req, htxbuf(&req->buf));
+				else
+					channel_erase(req);
+			}
 		}
 		else if (res->flags & (CF_READ_ERROR|CF_READ_TIMEOUT|CF_WRITE_ERROR|CF_WRITE_TIMEOUT)) {
 			/* Report it if the server got an error or a read timeout expired */
@@ -2539,15 +2577,20 @@ redo:
 
 	if (likely((si_f->state != SI_ST_CLO) ||
 		   (si_b->state > SI_ST_INI && si_b->state < SI_ST_CLO))) {
+		enum si_state si_b_prev_state, si_f_prev_state;
+
+		si_f_prev_state = si_f->prev_state;
+		si_b_prev_state = si_b->prev_state;
 
 		if ((sess->fe->options & PR_O_CONTSTATS) && (s->flags & SF_BE_ASSIGNED))
 			stream_process_counters(s);
 
 		si_update_both(si_f, si_b);
 
-		if (si_f->state == SI_ST_DIS || si_f->state != si_f->prev_state ||
-		    si_b->state == SI_ST_DIS || si_b->state != si_b->prev_state ||
-		    ((si_f->flags | si_b->flags) & SI_FL_ERR) ||
+		if (si_f->state == SI_ST_DIS || si_f->state != si_f_prev_state ||
+		    si_b->state == SI_ST_DIS || si_b->state != si_b_prev_state ||
+		    ((si_f->flags & SI_FL_ERR) && si_f->state != SI_ST_CLO) ||
+		    ((si_b->flags & SI_FL_ERR) && si_b->state != SI_ST_CLO) ||
 		    (((req->flags ^ rqf_last) | (res->flags ^ rpf_last)) & CF_MASK_ANALYSER))
 			goto redo;
 
@@ -2653,8 +2696,7 @@ redo:
 
 	/* the task MUST not be in the run queue anymore */
 	stream_free(s);
-	task_delete(t);
-	task_free(t);
+	task_destroy(t);
 	return NULL;
 }
 

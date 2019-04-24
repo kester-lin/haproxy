@@ -81,6 +81,7 @@
 
 #define GTUNE_BUSY_POLLING       (1<<11)
 #define GTUNE_LISTENER_MQ        (1<<12)
+#define GTUNE_SET_DUMPABLE       (1<<13)
 
 /* Access level for a stats socket */
 #define ACCESS_LVL_NONE     0
@@ -170,6 +171,10 @@ struct global {
 		int pattern_cache; /* max number of entries in the pattern cache. */
 		int sslcachesize;  /* SSL cache size in session, defaults to 20000 */
 		int comp_maxlevel;    /* max HTTP compression level */
+		int pool_low_ratio;   /* max ratio of FDs used before we stop using new idle connections */
+		int pool_high_ratio;  /* max ratio of FDs used before we start killing idle connections when creating new connections */
+		int pool_low_count;   /* max number of opened fd before we stop using new idle connections */
+		int pool_high_count;  /* max number of opened fd before we start killing idle connections when creating new connections */
 		unsigned short idle_timer; /* how long before an empty buffer is considered idle (ms) */
 	} tune;
 	struct {
@@ -190,13 +195,25 @@ struct global {
 #endif
 };
 
+/* options for mworker_proc */
+
+#define PROC_O_TYPE_MASTER           0x00000001
+#define PROC_O_TYPE_WORKER           0x00000002
+#define PROC_O_TYPE_PROG             0x00000004
+/* 0x00000008 unused */
+#define PROC_O_LEAVING               0x00000010  /* this process should be leaving */
+/* 0x00000020 to 0x00000080 unused */
+#define PROC_O_START_RELOAD          0x00000100  /* Start the process even if the master was re-executed */
+
 /*
  * Structure used to describe the processes in master worker mode
  */
 struct mworker_proc {
 	int pid;
-	char type;  /* m(aster), w(orker)  */
-	/* 3 bytes hole here */
+	int options;
+	char *id;
+	char **command;
+	char *path;
 	int ipc_fd[2]; /* 0 is master side, 1 is worker side */
 	int relative_pid;
 	int reloads;
@@ -234,6 +251,7 @@ extern struct mworker_proc *proc_self; /* process structure of current process *
 extern int master; /* 1 if in master, 0 otherwise */
 extern unsigned int rlim_fd_cur_at_boot;
 extern unsigned int rlim_fd_max_at_boot;
+extern int atexit_flag;
 
 /* bit values to go with "warned" above */
 #define WARN_BLOCK_DEPRECATED       0x00000001
@@ -263,6 +281,9 @@ static inline unsigned long thread_mask(unsigned long mask)
 {
 	return mask ? mask : all_threads_mask;
 }
+
+int tell_old_pids(int sig);
+int delete_oldpid(int pid);
 
 void deinit(void);
 void hap_register_build_opts(const char *str, int must_free);

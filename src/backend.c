@@ -1338,21 +1338,57 @@ int connect_server(struct stream *s)
 				reuse = 0;
 		}
 	}
+	if ((!reuse || (srv_conn && !(srv_conn->flags & CO_FL_CONNECTED)))
+	    && ha_used_fds > global.tune.pool_high_count) {
+		struct connection *tokill_conn;
+
+		/* We can't reuse a connection, and e have more FDs than deemd
+		 * acceptable, attempt to kill an idling connection
+		 */
+		/* First, try from our own idle list */
+		tokill_conn = LIST_POP_LOCKED(&srv->idle_orphan_conns[tid],
+		    struct connection *, list);
+		if (tokill_conn)
+			tokill_conn->mux->destroy(tokill_conn->ctx);
+		/* If not, iterate over other thread's idling pool, and try to grab one */
+		else {
+			int i;
+
+			for (i = 0; i < global.nbthread; i++) {
+				if (i == tid)
+					continue;
+				tokill_conn = LIST_POP_LOCKED(&srv->idle_orphan_conns[i],
+				    struct connection *, list);
+				if (tokill_conn) {
+					/* We got one, put it into the concerned thread's to kill list, and wake it's kill task */
+
+					LIST_ADDQ_LOCKED(&toremove_connections[i],
+					    &tokill_conn->list);
+					task_wakeup(idle_conn_cleanup[i], TASK_WOKEN_OTHER);
+					break;
+				}
+			}
+		}
+
+	}
 	/* If we're really reusing the connection, remove it from the orphan
 	 * list and add it back to the idle list.
 	 */
-	if (reuse && reuse_orphan) {
-		srv_conn->idle_time = 0;
-		_HA_ATOMIC_SUB(&srv->curr_idle_conns, 1);
-		__ha_barrier_atomic_store();
-		srv->curr_idle_thr[tid]--;
-		LIST_ADDQ(&srv->idle_conns[tid], &srv_conn->list);
-	} else if (reuse) {
-		if (srv_conn->flags & CO_FL_SESS_IDLE) {
-			struct session *sess = srv_conn->owner;
+	if (reuse) {
+		if (reuse_orphan) {
+			srv_conn->idle_time = 0;
+			_HA_ATOMIC_SUB(&srv->curr_idle_conns, 1);
+			__ha_barrier_atomic_store();
+			srv->curr_idle_thr[tid]--;
+			LIST_ADDQ(&srv->idle_conns[tid], &srv_conn->list);
+		}
+		else {
+			if (srv_conn->flags & CO_FL_SESS_IDLE) {
+				struct session *sess = srv_conn->owner;
 
-			srv_conn->flags &= ~CO_FL_SESS_IDLE;
-			sess->idle_conns--;
+				srv_conn->flags &= ~CO_FL_SESS_IDLE;
+				sess->idle_conns--;
+			}
 		}
 	}
 
@@ -1371,7 +1407,7 @@ int connect_server(struct stream *s)
 				old_conn->owner = sess;
 				if (!session_add_conn(sess, old_conn, old_conn->target)) {
 					old_conn->owner = NULL;
-					old_conn->mux->destroy(old_conn);
+					old_conn->mux->destroy(old_conn->ctx);
 				} else
 					session_check_idle_conn(sess, old_conn);
 			}
@@ -1427,7 +1463,7 @@ int connect_server(struct stream *s)
 			srv_conn->owner = NULL;
 			if (srv_conn->mux && !srv_add_to_idle_list(objt_server(srv_conn->target), srv_conn))
 			/* The server doesn't want it, let's kill the connection right away */
-				srv_conn->mux->destroy(srv_conn);
+				srv_conn->mux->destroy(srv_conn->ctx);
 			srv_conn = NULL;
 
 		}

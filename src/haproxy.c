@@ -61,6 +61,10 @@
 #endif
 #endif
 
+#if defined(USE_PRCTL)
+#include <sys/prctl.h>
+#endif
+
 #ifdef DEBUG_FULL
 #include <assert.h>
 #endif
@@ -108,6 +112,7 @@
 #include <proto/http_rules.h>
 #include <proto/listener.h>
 #include <proto/log.h>
+#include <proto/mworker.h>
 #include <proto/pattern.h>
 #include <proto/protocol.h>
 #include <proto/proto_http.h>
@@ -123,6 +128,9 @@
 #ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
 #endif
+
+/* array of init calls for older platforms */
+DECLARE_INIT_STAGES;
 
 /* list of config files */
 static struct list cfg_cfgfiles = LIST_HEAD_INIT(cfg_cfgfiles);
@@ -156,6 +164,8 @@ struct global global = {
 		.chksize = (BUFSIZE + 2*sizeof(void *) - 1) & -(2*sizeof(void *)),
 		.reserved_bufs = RESERVED_BUFS,
 		.pattern_cache = DEFAULT_PAT_LRU_SIZE,
+		.pool_low_ratio  = 20,
+		.pool_high_ratio = 25,
 #ifdef USE_OPENSSL
 		.sslcachesize = SSLCACHESIZE,
 #endif
@@ -198,8 +208,6 @@ static char *cur_unixsocket = NULL;
 
 int atexit_flag = 0;
 
-static int exitcode = -1;
-
 int nb_oldpids = 0;
 const int zero = 0;
 const int one = 1;
@@ -212,8 +220,6 @@ char localpeer[MAX_HOSTNAME_LEN];
  * recent versions of gcc increasingly and annoyingly complain about.
  */
 int shut_your_big_mouth_gcc_int = 0;
-
-int *children = NULL; /* store PIDs of children in master workers mode */
 
 static char **next_argv = NULL;
 
@@ -397,6 +403,9 @@ static void display_build_opts()
 #ifdef BUILD_OPTIONS
 	       "\n  OPTIONS = " BUILD_OPTIONS
 #endif
+#ifdef BUILD_FEATURES
+	       "\n\nFeature list : " BUILD_FEATURES
+#endif
 	       "\n\nDefault settings :"
 	       "\n  bufsize = %d, maxrewrite = %d, maxpollevents = %d"
 	       "\n\n",
@@ -481,7 +490,7 @@ static void usage(char *name)
 /* sends the signal <sig> to all pids found in <oldpids>. Returns the number of
  * pids the signal was correctly delivered to.
  */
-static int tell_old_pids(int sig)
+int tell_old_pids(int sig)
 {
 	int p;
 	int ret = 0;
@@ -490,168 +499,6 @@ static int tell_old_pids(int sig)
 			ret++;
 	return ret;
 }
-
-/* return 1 if a pid is a current child otherwise 0 */
-
-int current_child(int pid)
-{
-	int i;
-
-	for (i = 0; i < global.nbproc; i++) {
-		if (children[i] == pid)
-			return 1;
-	}
-	return 0;
-}
-
-static void mworker_block_signals()
-{
-	sigset_t set;
-
-	sigemptyset(&set);
-	sigaddset(&set, SIGUSR1);
-	sigaddset(&set, SIGUSR2);
-	sigaddset(&set, SIGHUP);
-	sigaddset(&set, SIGCHLD);
-	ha_sigmask(SIG_SETMASK, &set, NULL);
-}
-
-static void mworker_unblock_signals()
-{
-	haproxy_unblock_signals();
-}
-
-/*
- * Send signal to every known children.
- */
-
-static void mworker_kill(int sig)
-{
-	int i;
-
-	tell_old_pids(sig);
-	if (children) {
-		for (i = 0; i < global.nbproc; i++)
-			kill(children[i], sig);
-	}
-}
-
-/*
- * serialize the proc list and put it in the environment
- */
-static void mworker_proc_list_to_env()
-{
-	char *msg = NULL;
-	struct mworker_proc *child;
-
-	list_for_each_entry(child, &proc_list, list) {
-		if (child->pid > -1)
-			memprintf(&msg, "%s|type=%c;fd=%d;pid=%d;rpid=%d;reloads=%d;timestamp=%d", msg ? msg : "", child->type, child->ipc_fd[0], child->pid, child->relative_pid, child->reloads, child->timestamp);
-	}
-	if (msg)
-		setenv("HAPROXY_PROCESSES", msg, 1);
-}
-
-/*
- * unserialize the proc list from the environment
- */
-static void mworker_env_to_proc_list()
-{
-	char *msg, *token = NULL, *s1;
-
-	msg = getenv("HAPROXY_PROCESSES");
-	if (!msg)
-		return;
-
-	while ((token = strtok_r(msg, "|", &s1))) {
-		struct mworker_proc *child;
-		char *subtoken = NULL;
-		char *s2;
-
-		msg = NULL;
-
-		child = calloc(1, sizeof(*child));
-
-		while ((subtoken = strtok_r(token, ";", &s2))) {
-
-			token = NULL;
-
-			if (strncmp(subtoken, "type=", 5) == 0) {
-				child->type = *(subtoken+5);
-				if (child->type == 'm') /* we are in the master, assign it */
-					proc_self = child;
-			} else if (strncmp(subtoken, "fd=", 3) == 0) {
-				child->ipc_fd[0] = atoi(subtoken+3);
-			} else if (strncmp(subtoken, "pid=", 4) == 0) {
-				child->pid = atoi(subtoken+4);
-			} else if (strncmp(subtoken, "rpid=", 5) == 0) {
-				child->relative_pid = atoi(subtoken+5);
-			} else if (strncmp(subtoken, "reloads=", 8) == 0) {
-				/* we reloaded this process once more */
-				child->reloads = atoi(subtoken+8) + 1;
-			} else if (strncmp(subtoken, "timestamp=", 10) == 0) {
-				child->timestamp = atoi(subtoken+10);
-			}
-		}
-		if (child->pid)
-			LIST_ADDQ(&proc_list, &child->list);
-		else
-			free(child);
-	}
-
-	unsetenv("HAPROXY_PROCESSES");
-}
-
-/*
- * Upon a reload, the master worker needs to close all listeners FDs but the mworker_pipe
- * fd, and the FD provided by fd@
- */
-static void mworker_cleanlisteners()
-{
-	struct listener *l, *l_next;
-	struct proxy *curproxy;
-	struct peers *curpeers;
-
-	/* we might have to unbind some peers sections from some processes */
-	for (curpeers = cfg_peers; curpeers; curpeers = curpeers->next) {
-		if (!curpeers->peers_fe)
-			continue;
-
-		stop_proxy(curpeers->peers_fe);
-		/* disable this peer section so that it kills itself */
-		signal_unregister_handler(curpeers->sighandler);
-		task_delete(curpeers->sync_task);
-		task_free(curpeers->sync_task);
-		curpeers->sync_task = NULL;
-		task_free(curpeers->peers_fe->task);
-		curpeers->peers_fe->task = NULL;
-		curpeers->peers_fe = NULL;
-	}
-
-	for (curproxy = proxies_list; curproxy; curproxy = curproxy->next) {
-		int listen_in_master = 0;
-
-		list_for_each_entry_safe(l, l_next, &curproxy->conf.listeners, by_fe) {
-			/* remove the listener, but not those we need in the master... */
-			if (!(l->options & LI_O_MWORKER)) {
-				/* unbind the listener but does not close if
-				   the FD is inherited with fd@ from the parent
-				   process */
-				if (l->options & LI_O_INHERITED)
-					unbind_listener_no_close(l);
-				else
-					unbind_listener(l);
-				delete_listener(l);
-			} else {
-				listen_in_master = 1;
-			}
-		}
-		/* if the proxy shouldn't be in the master, we stop it */
-		if (!listen_in_master)
-			curproxy->state = PR_STSTOPPED;
-	}
-}
-
 
 /*
  * remove a pid forom the olpid array and decrease nb_oldpids
@@ -716,7 +563,6 @@ static void get_cur_unixsocket()
 void mworker_reload()
 {
 	int next_argc = 0;
-	int j;
 	char *msg = NULL;
 	struct rlimit limit;
 	struct per_thread_deinit_fct *ptdf;
@@ -757,29 +603,27 @@ void mworker_reload()
 		next_argc++;
 
 	/* 1 for haproxy -sf, 2 for -x /socket */
-	next_argv = realloc(next_argv, (next_argc + 1 + 2 + global.nbproc + nb_oldpids + 1) * sizeof(char *));
+	next_argv = realloc(next_argv, (next_argc + 1 + 2 + mworker_child_nb() + nb_oldpids + 1) * sizeof(char *));
 	if (next_argv == NULL)
 		goto alloc_error;
 
-
 	/* add -sf <PID>*  to argv */
-	if (children || nb_oldpids > 0)
+	if (mworker_child_nb() > 0) {
+		struct mworker_proc *child;
+
 		next_argv[next_argc++] = "-sf";
-	if (children) {
-		for (j = 0; j < global.nbproc; next_argc++,j++) {
-			next_argv[next_argc] = memprintf(&msg, "%d", children[j]);
+
+		list_for_each_entry(child, &proc_list, list) {
+			if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)))
+				continue;
+			next_argv[next_argc] = memprintf(&msg, "%d", child->pid);
 			if (next_argv[next_argc] == NULL)
 				goto alloc_error;
 			msg = NULL;
+			next_argc++;
 		}
 	}
-	/* copy old process PIDs */
-	for (j = 0; j < nb_oldpids; next_argc++,j++) {
-		next_argv[next_argc] = memprintf(&msg, "%d", oldpids[j]);
-		if (next_argv[next_argc] == NULL)
-			goto alloc_error;
-		msg = NULL;
-	}
+
 	next_argv[next_argc] = NULL;
 
 	/* add the -x option with the stat socket */
@@ -801,94 +645,6 @@ alloc_error:
 	return;
 }
 
-/*
- * When called, this function reexec haproxy with -sf followed by current
- * children PIDs and possibly old children PIDs if they didn't leave yet.
- */
-static void mworker_catch_sighup(struct sig_handler *sh)
-{
-	mworker_reload();
-}
-
-static void mworker_catch_sigterm(struct sig_handler *sh)
-{
-	int sig = sh->arg;
-
-#if defined(USE_SYSTEMD)
-	if (global.tune.options & GTUNE_USE_SYSTEMD) {
-		sd_notify(0, "STOPPING=1");
-	}
-#endif
-	ha_warning("Exiting Master process...\n");
-	mworker_kill(sig);
-}
-
-/*
- * Wait for every children to exit
- */
-
-static void mworker_catch_sigchld(struct sig_handler *sh)
-{
-	int exitpid = -1;
-	int status = 0;
-	struct mworker_proc *child, *it;
-
-restart_wait:
-
-	exitpid = waitpid(-1, &status, WNOHANG);
-	if (exitpid > 0) {
-		if (WIFEXITED(status))
-			status = WEXITSTATUS(status);
-		else if (WIFSIGNALED(status))
-			status = 128 + WTERMSIG(status);
-		else if (WIFSTOPPED(status))
-			status = 128 + WSTOPSIG(status);
-		else
-			status = 255;
-
-		list_for_each_entry_safe(child, it, &proc_list, list) {
-			if (child->pid != exitpid)
-				continue;
-
-			LIST_DEL(&child->list);
-			close(child->ipc_fd[0]);
-			break;
-		}
-
-		if (!children) {
-			ha_warning("Worker %d exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
-		} else {
-			/* check if exited child was in the current children list */
-			if (current_child(exitpid)) {
-				ha_alert("Current worker #%d (%d) exited with code %d (%s)\n", child->relative_pid, exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
-				if (status != 0 && status != 130 && status != 143
-				    && !(global.tune.options & GTUNE_NOEXIT_ONFAILURE)) {
-					ha_alert("exit-on-failure: killing every workers with SIGTERM\n");
-					if (exitcode < 0)
-						exitcode = status;
-					mworker_kill(SIGTERM);
-				}
-			} else {
-				ha_warning("Former worker #%d (%d) exited with code %d (%s)\n", child->relative_pid, exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
-				delete_oldpid(exitpid);
-			}
-		}
-		free(child);
-
-		/* do it again to check if it was the last worker */
-		goto restart_wait;
-	}
-	/* Better rely on the system than on a list of process to check if it was the last one */
-	else if (exitpid == -1 && errno == ECHILD) {
-		ha_warning("All workers exited. Exiting... (%d)\n", (exitcode > 0) ? exitcode : status);
-		atexit_flag = 0;
-		if (exitcode > 0)
-			exit(exitcode);
-		exit(status); /* parent must leave using the latest status code known */
-	}
-
-}
-
 static void mworker_loop()
 {
 
@@ -896,6 +652,8 @@ static void mworker_loop()
 	if (global.tune.options & GTUNE_USE_SYSTEMD)
 		sd_notifyf(0, "READY=1\nMAINPID=%lu", (unsigned long)getpid());
 #endif
+	/* Busy polling makes no sense in the master :-) */
+	global.tune.options &= ~GTUNE_BUSY_POLLING;
 
 	master = 1;
 
@@ -1851,14 +1609,16 @@ static void init(int argc, char **argv)
 		int proc;
 		struct mworker_proc *tmproc;
 
+		setenv("HAPROXY_MWORKER", "1", 1);
+
 		if (getenv("HAPROXY_MWORKER_REEXEC") == NULL) {
 
-			tmproc = malloc(sizeof(*tmproc));
+			tmproc = calloc(1, sizeof(*tmproc));
 			if (!tmproc) {
 				ha_alert("Cannot allocate process structures.\n");
 				exit(EXIT_FAILURE);
 			}
-			tmproc->type = 'm'; /* master */
+			tmproc->options |= PROC_O_TYPE_MASTER; /* master */
 			tmproc->reloads = 0;
 			tmproc->relative_pid = 0;
 			tmproc->pid = pid;
@@ -1873,13 +1633,13 @@ static void init(int argc, char **argv)
 
 		for (proc = 0; proc < global.nbproc; proc++) {
 
-			tmproc = malloc(sizeof(*tmproc));
+			tmproc = calloc(1, sizeof(*tmproc));
 			if (!tmproc) {
 				ha_alert("Cannot allocate process structures.\n");
 				exit(EXIT_FAILURE);
 			}
 
-			tmproc->type = 'w'; /* worker */
+			tmproc->options |= PROC_O_TYPE_WORKER; /* worker */
 			tmproc->pid = -1;
 			tmproc->reloads = 0;
 			tmproc->timestamp = -1;
@@ -1920,13 +1680,13 @@ static void init(int argc, char **argv)
 		}
 	}
 
-	pattern_finalize_config();
-
 	err_code |= check_config_validity();
 	if (err_code & (ERR_ABORT|ERR_FATAL)) {
 		ha_alert("Fatal errors found in configuration.\n");
 		exit(1);
 	}
+
+	pattern_finalize_config();
 
 	/* recompute the amount of per-process memory depending on nbproc and
 	 * the shared SSL cache size (allowed to exist in all processes).
@@ -2185,6 +1945,10 @@ static void init(int argc, char **argv)
 		int sides = !!global.ssl_used_frontend + !!global.ssl_used_backend;
 		global.maxsock += global.maxconn * sides * global.ssl_used_async_engines;
 	}
+
+	/* update connection pool thresholds */
+	global.tune.pool_low_count  = ((long long)global.maxsock * global.tune.pool_low_ratio  + 99) / 100;
+	global.tune.pool_high_count = ((long long)global.maxsock * global.tune.pool_high_ratio + 99) / 100;
 
 	proxy_adjust_all_maxconn();
 
@@ -2529,19 +2293,13 @@ void deinit(void)
 		while (s) {
 			s_next = s->next;
 
-			if (s->check.task) {
-				task_delete(s->check.task);
-				task_free(s->check.task);
-			}
-			if (s->agent.task) {
-				task_delete(s->agent.task);
-				task_free(s->agent.task);
-			}
+			if (s->check.task)
+				task_destroy(s->check.task);
+			if (s->agent.task)
+				task_destroy(s->agent.task);
 
-			if (s->warmup) {
-				task_delete(s->warmup);
-				task_free(s->warmup);
-			}
+			if (s->warmup)
+				task_destroy(s->warmup);
 
 			free(s->id);
 			free(s->cookie);
@@ -2603,7 +2361,7 @@ void deinit(void)
 
 		free_http_req_rules(&p->http_req_rules);
 		free_http_res_rules(&p->http_res_rules);
-		task_free(p->task);
+		task_destroy(p->task);
 
 		pool_destroy(p->req_cap_pool);
 		pool_destroy(p->rsp_cap_pool);
@@ -2649,8 +2407,8 @@ void deinit(void)
 	free(global.node);    global.node = NULL;
 	free(global.desc);    global.desc = NULL;
 	free(oldpids);        oldpids = NULL;
-	task_free(global_listener_queue_task); global_listener_queue_task = NULL;
-	task_free(idle_conn_task);
+	task_destroy(global_listener_queue_task); global_listener_queue_task = NULL;
+	task_destroy(idle_conn_task);
 	idle_conn_task = NULL;
 
 	list_for_each_entry_safe(log, logb, &global.logsrvs, list) {
@@ -2675,58 +2433,6 @@ void deinit(void)
 	deinit_pollers();
 } /* end deinit() */
 
-
-
-/* This is a wrapper for the sockpair FD, It tests if the socket received an
- * EOF, if not, it calls listener_accept */
-void mworker_accept_wrapper(int fd)
-{
-	char c;
-	int ret;
-
-	while (1) {
-		ret = recv(fd, &c, 1, MSG_PEEK);
-		if (ret == -1) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN) {
-				fd_cant_recv(fd);
-				return;
-			}
-			break;
-		} else if (ret > 0) {
-			listener_accept(fd);
-			return;
-		} else if (ret == 0) {
-			/* At this step the master is down before
-			 * this worker perform a 'normal' exit.
-			 * So we want to exit with an error but
-			 * other threads could currently process
-			 * some stuff so we can't perform a clean
-			 * deinit().
-			 */
-			exit(EXIT_FAILURE);
-		}
-	}
-	return;
-}
-
-/*
- * This function register the accept wrapper for the sockpair of the master worker
- */
-void mworker_pipe_register()
-{
-	/* The iocb should be already initialized with listener_accept */
-	if (fdtab[proc_self->ipc_fd[1]].iocb == mworker_accept_wrapper)
-		return;
-
-	fcntl(proc_self->ipc_fd[1], F_SETFL, O_NONBLOCK);
-	/* In multi-tread, we need only one thread to process
-	 * events on the pipe with master
-	 */
-	fd_insert(proc_self->ipc_fd[1], fdtab[proc_self->ipc_fd[1]].owner, mworker_accept_wrapper, 1);
-	fd_want_recv(proc_self->ipc_fd[1]);
-}
 
 /* Runs the polling loop */
 static void run_poll_loop()
@@ -3105,6 +2811,32 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
+
+	/* try our best to re-enable core dumps depending on system capabilities.
+	 * What is addressed here :
+	 *   - remove file size limits
+	 *   - remove core size limits
+	 *   - mark the process dumpable again if it lost it due to user/group
+	 */
+	if (global.tune.options & GTUNE_SET_DUMPABLE) {
+		limit.rlim_cur = limit.rlim_max = RLIM_INFINITY;
+
+#if defined(RLIMIT_FSIZE)
+		if (setrlimit(RLIMIT_FSIZE, &limit) == -1)
+			ha_warning("[%s.main()] Failed to set the raise the maximum file size.\n", argv[0]);
+#endif
+
+#if defined(RLIMIT_CORE)
+		if (setrlimit(RLIMIT_CORE, &limit) == -1)
+			ha_warning("[%s.main()] Failed to set the raise the core dump size.\n", argv[0]);
+#endif
+
+#if defined(USE_PRCTL)
+		if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) == -1)
+			ha_warning("[%s.main()] Failed to set the dumpable flag, no core will be dumped.\n", argv[0]);
+#endif
+	}
+
 	/* check ulimits */
 	limit.rlim_cur = limit.rlim_max = 0;
 	getrlimit(RLIMIT_NOFILE, &limit);
@@ -3150,7 +2882,8 @@ int main(int argc, char **argv)
 
 		/* the father launches the required number of processes */
 		if (!(global.mode & MODE_MWORKER_WAIT)) {
-			children = calloc(global.nbproc, sizeof(int));
+			if (global.mode & MODE_MWORKER)
+				mworker_ext_launch_all();
 			for (proc = 0; proc < global.nbproc; proc++) {
 				ret = fork();
 				if (ret < 0) {
@@ -3160,7 +2893,6 @@ int main(int argc, char **argv)
 				}
 				else if (ret == 0) /* child breaks here */
 					break;
-				children[proc] = ret;
 				if (pidfd >= 0 && !(global.mode & MODE_MWORKER)) {
 					char pidstr[100];
 					snprintf(pidstr, sizeof(pidstr), "%d\n", ret);
@@ -3173,7 +2905,7 @@ int main(int argc, char **argv)
 					/* find the right mworker_proc */
 					list_for_each_entry(child, &proc_list, list) {
 						if (child->relative_pid == relative_pid &&
-						    child->reloads == 0) {
+						    child->reloads == 0 && child->options & PROC_O_TYPE_WORKER) {
 							child->timestamp = now.tv_sec;
 							child->pid = ret;
 							break;
@@ -3357,10 +3089,9 @@ int main(int argc, char **argv)
 			stop_proxy(curpeers->peers_fe);
 			/* disable this peer section so that it kills itself */
 			signal_unregister_handler(curpeers->sighandler);
-			task_delete(curpeers->sync_task);
-			task_free(curpeers->sync_task);
+			task_destroy(curpeers->sync_task);
 			curpeers->sync_task = NULL;
-			task_free(curpeers->peers_fe->task);
+			task_destroy(curpeers->peers_fe->task);
 			curpeers->peers_fe->task = NULL;
 			curpeers->peers_fe = NULL;
 		}

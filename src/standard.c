@@ -3577,12 +3577,14 @@ char *memvprintf(char **out, const char *format, va_list orig_args)
 		return NULL;
 
 	do {
+		char buf1;
+
 		/* vsnprintf() will return the required length even when the
 		 * target buffer is NULL. We do this in a loop just in case
 		 * intermediate evaluations get wrong.
 		 */
 		va_copy(args, orig_args);
-		needed = vsnprintf(ret, allocated, format, args);
+		needed = vsnprintf(ret ? ret : &buf1, allocated, format, args);
 		va_end(args);
 		if (needed < allocated) {
 			/* Note: on Solaris 8, the first iteration always
@@ -3695,6 +3697,38 @@ char *indent_msg(char **out, int level)
 	*out = ret;
 
 	return ret;
+}
+
+/* removes environment variable <name> from the environment as found in
+ * environ. This is only provided as an alternative for systems without
+ * unsetenv() (old Solaris and AIX versions). THIS IS NOT THREAD SAFE.
+ * The principle is to scan environ for each occurence of variable name
+ * <name> and to replace the matching pointers with the last pointer of
+ * the array (since variables are not ordered).
+ * It always returns 0 (success).
+ */
+int my_unsetenv(const char *name)
+{
+	extern char **environ;
+	char **p = environ;
+	int vars;
+	int next;
+	int len;
+
+	len = strlen(name);
+	for (vars = 0; p[vars]; vars++)
+		;
+	next = 0;
+	while (next < vars) {
+		if (strncmp(p[next], name, len) != 0 || p[next][len] != '=') {
+			next++;
+			continue;
+		}
+		if (next < vars - 1)
+			p[next] = p[vars - 1];
+		p[--vars] = NULL;
+	}
+	return 0;
 }
 
 /* Convert occurrences of environment variables in the input string to their

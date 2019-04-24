@@ -53,7 +53,6 @@ struct pipe;
 enum sub_event_type {
 	SUB_RETRY_RECV       = 0x00000001,  /* Schedule the tasklet when we can attempt to recv again */
 	SUB_RETRY_SEND       = 0x00000002,  /* Schedule the tasklet when we can attempt to send again */
-	SUB_CALL_UNSUBSCRIBE = 0x00000004,  /* The mux wants its unsubscribe() method to be called before destruction of the underlying object */
 };
 
 struct wait_event {
@@ -87,7 +86,8 @@ enum {
 	CS_FL_ERR_PENDING   = 0x00000800,  /* An error is pending, but there's still data to be read */
 	CS_FL_EOS           = 0x00001000,  /* End of stream delivered to data layer */
 	CS_FL_REOS          = 0x00002000,  /* End of stream received (buffer not empty) */
-	CS_FL_READ_NULL     = 0x00004000,  /* Last read received */
+	CS_FL_EOI           = 0x00004000,  /* end-of-input reached */
+	/* unused: 0x00008000 */
 	CS_FL_WAIT_FOR_HS   = 0x00010000,  /* This stream is waiting for handhskae */
 	CS_FL_KILL_CONN     = 0x00020000,  /* must kill the connection when the CS closes */
 
@@ -293,6 +293,7 @@ enum {
 enum {
 	MX_FL_NONE        = 0x00000000,
 	MX_FL_CLEAN_ABRT  = 0x00000001, /* abort is clearly reported as an error */
+	MX_FL_HTX         = 0x00000002, /* set if it is an HTX multiplexer */
 };
 
 /* xprt_ops describes transport-layer operations for a connection. They
@@ -301,22 +302,22 @@ enum {
  * and the other ones are used to setup and release the transport layer.
  */
 struct xprt_ops {
-	size_t (*rcv_buf)(struct connection *conn, struct buffer *buf, size_t count, int flags); /* recv callback */
-	size_t (*snd_buf)(struct connection *conn, const struct buffer *buf, size_t count, int flags); /* send callback */
-	int  (*rcv_pipe)(struct connection *conn, struct pipe *pipe, unsigned int count); /* recv-to-pipe callback */
-	int  (*snd_pipe)(struct connection *conn, struct pipe *pipe); /* send-to-pipe callback */
-	void (*shutr)(struct connection *, int);    /* shutr function */
-	void (*shutw)(struct connection *, int);    /* shutw function */
-	void (*close)(struct connection *);         /* close the transport layer */
-	int  (*init)(struct connection *conn);      /* initialize the transport layer */
+	size_t (*rcv_buf)(struct connection *conn, void *xprt_ctx, struct buffer *buf, size_t count, int flags); /* recv callback */
+	size_t (*snd_buf)(struct connection *conn, void *xprt_ctx, const struct buffer *buf, size_t count, int flags); /* send callback */
+	int  (*rcv_pipe)(struct connection *conn, void *xprt_ctx, struct pipe *pipe, unsigned int count); /* recv-to-pipe callback */
+	int  (*snd_pipe)(struct connection *conn, void *xprt_ctx, struct pipe *pipe); /* send-to-pipe callback */
+	void (*shutr)(struct connection *conn, void *xprt_ctx, int);    /* shutr function */
+	void (*shutw)(struct connection *conn, void *xprt_ctx, int);    /* shutw function */
+	void (*close)(struct connection *conn, void *xprt_ctx);         /* close the transport layer */
+	int  (*init)(struct connection *conn, void **ctx);      /* initialize the transport layer */
 	int  (*prepare_bind_conf)(struct bind_conf *conf); /* prepare a whole bind_conf */
 	void (*destroy_bind_conf)(struct bind_conf *conf); /* destroy a whole bind_conf */
 	int  (*prepare_srv)(struct server *srv);    /* prepare a server context */
 	void (*destroy_srv)(struct server *srv);    /* destroy a server context */
-	int  (*get_alpn)(const struct connection *conn, const char **str, int *len); /* get application layer name */
+	int  (*get_alpn)(const struct connection *conn, void *xprt_ctx, const char **str, int *len); /* get application layer name */
 	char name[8];                               /* transport layer name, zero-terminated */
-	int (*subscribe)(struct connection *conn, int event_type, void *param); /* Subscribe to events, such as "being able to send" */
-	int (*unsubscribe)(struct connection *conn, int event_type, void *param); /* Unsubscribe to events */
+	int (*subscribe)(struct connection *conn, void *xprt_ctx, int event_type, void *param); /* Subscribe to events, such as "being able to send" */
+	int (*unsubscribe)(struct connection *conn, void *xprt_ctx, int event_type, void *param); /* Unsubscribe to events */
 };
 
 /* mux_ops describes the mux operations, which are to be performed at the
@@ -327,7 +328,7 @@ struct xprt_ops {
  * layer is not ready yet.
  */
 struct mux_ops {
-	int  (*init)(struct connection *conn, struct proxy *prx, struct session *sess);  /* early initialization */
+	int  (*init)(struct connection *conn, struct proxy *prx, struct session *sess, struct buffer *input);  /* early initialization */
 	int  (*wake)(struct connection *conn);        /* mux-layer callback to report activity, mandatory */
 	size_t (*rcv_buf)(struct conn_stream *cs, struct buffer *buf, size_t count, int flags); /* Called from the upper layer to get data */
 	size_t (*snd_buf)(struct conn_stream *cs, struct buffer *buf, size_t count, int flags); /* Called from the upper layer to send data */
@@ -344,7 +345,7 @@ struct mux_ops {
 	int (*unsubscribe)(struct conn_stream *cs, int event_type, void *param); /* Unsubscribe to events */
 	int (*avail_streams)(struct connection *conn); /* Returns the number of streams still available for a connection */
 	int (*used_streams)(struct connection *conn);  /* Returns the number of streams in use on a connection. */
-	void (*destroy)(struct connection *conn); /* Let the mux know one of its users left, so it may have to disappear */
+	void (*destroy)(void *ctx); /* Let the mux know one of its users left, so it may have to disappear */
 	void (*reset)(struct connection *conn); /* Reset the mux, because we're re-trying to connect */
 	const struct cs_info *(*get_cs_info)(struct conn_stream *cs); /* Return info on the specified conn_stream or NULL if not defined */
 	unsigned int flags;                           /* some flags characterizing the mux's capabilities (MX_FL_*) */
@@ -441,9 +442,6 @@ struct connection {
 	struct wait_event *recv_wait; /* Task to wake when we're ready to recv */
 	struct list list;             /* attach point to various connection lists (idle, ...) */
 	struct list session_list;     /* List of attached connections to a session */
-	int xprt_st;                  /* transport layer state, initialized to zero */
-	int tmp_early_data;           /* 1st byte of early data, if any */
-	int sent_early_data;          /* Amount of early data we sent so far */
 	union conn_handle handle;     /* connection handle at the socket layer */
 	const struct netns_entry *proxy_netns;
 	int (*xprt_done_cb)(struct connection *conn);  /* callback to notify of end of handshake */

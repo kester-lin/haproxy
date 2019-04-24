@@ -169,7 +169,6 @@ static void stream_int_shutr(struct stream_interface *si)
 	struct channel *ic = si_ic(si);
 
 	si_rx_shut_blk(si);
-	ic->flags &= ~CF_SHUTR_NOW;
 	if (ic->flags & CF_SHUTR)
 		return;
 	ic->flags |= CF_SHUTR;
@@ -238,7 +237,6 @@ static void stream_int_shutw(struct stream_interface *si)
 	default:
 		si->flags &= ~SI_FL_NOLINGER;
 		si_rx_shut_blk(si);
-		ic->flags &= ~CF_SHUTR_NOW;
 		ic->flags |= CF_SHUTR;
 		ic->rex = TICK_ETERNITY;
 		si->exp = TICK_ETERNITY;
@@ -544,7 +542,7 @@ static void stream_int_notify(struct stream_interface *si)
 	    (si->state != SI_ST_EST && si->state != SI_ST_CON) ||
 	    (si->flags & SI_FL_ERR) ||
 	    ((ic->flags & CF_READ_PARTIAL) &&
-	     (!ic->to_forward || sio->state != SI_ST_EST)) ||
+	     ((ic->flags & CF_EOI) || !ic->to_forward || sio->state != SI_ST_EST)) ||
 
 	    /* changes on the consumption side */
 	    (oc->flags & (CF_WRITE_NULL|CF_WRITE_ERROR)) ||
@@ -608,16 +606,10 @@ static int si_cs_process(struct conn_stream *cs)
 		oc->flags |= CF_WRITE_NULL;
 	}
 
-	/* The last read was received but not reported to the channel
-	 * (CS_FL_READ_NULL set but not SI_FL_READ_NULL). So do it, even if the
-	 * EOS was already reported.
-	 *
-	 * NOTE: It is a temporary fix to handle client aborts.
-	 */
-	if (cs->flags & CS_FL_READ_NULL && !(si->flags & SI_FL_READ_NULL)) {
-		si->flags |= SI_FL_READ_NULL;
-		ic->flags |= CF_READ_NULL;
-	}
+	/* Report EOI on the channel if it was reached from the mux point of
+	 * view. */
+	if ((cs->flags & CS_FL_EOI) && !(ic->flags & CF_EOI))
+		ic->flags |= CF_EOI;
 
 	/* Second step : update the stream-int and channels, try to forward any
 	 * pending data, then possibly wake the stream up based on the new
@@ -879,9 +871,6 @@ void si_update_both(struct stream_interface *si_f, struct stream_interface *si_b
 	req->flags &= ~(CF_READ_NULL|CF_READ_PARTIAL|CF_READ_ATTACHED|CF_WRITE_NULL|CF_WRITE_PARTIAL);
 	res->flags &= ~(CF_READ_NULL|CF_READ_PARTIAL|CF_READ_ATTACHED|CF_WRITE_NULL|CF_WRITE_PARTIAL);
 
-	si_f->flags &= ~(SI_FL_ERR|SI_FL_EXP);
-	si_b->flags &= ~(SI_FL_ERR|SI_FL_EXP);
-
 	si_f->prev_state = si_f->state;
 	si_b->prev_state = si_b->state;
 
@@ -946,7 +935,6 @@ static void stream_int_shutr_conn(struct stream_interface *si)
 	struct channel *ic = si_ic(si);
 
 	si_rx_shut_blk(si);
-	ic->flags &= ~CF_SHUTR_NOW;
 	if (ic->flags & CF_SHUTR)
 		return;
 	ic->flags |= CF_SHUTR;
@@ -1053,7 +1041,6 @@ static void stream_int_shutw_conn(struct stream_interface *si)
 	default:
 		si->flags &= ~SI_FL_NOLINGER;
 		si_rx_shut_blk(si);
-		ic->flags &= ~CF_SHUTR_NOW;
 		ic->flags |= CF_SHUTR;
 		ic->rex = TICK_ETERNITY;
 		si->exp = TICK_ETERNITY;
@@ -1069,7 +1056,8 @@ static void stream_int_shutw_conn(struct stream_interface *si)
 static void stream_int_chk_rcv_conn(struct stream_interface *si)
 {
 	/* (re)start reading */
-	tasklet_wakeup(si->wait_event.task);
+	if (si->state == SI_ST_CON || si->state == SI_ST_EST)
+		tasklet_wakeup(si->wait_event.task);
 }
 
 
@@ -1083,7 +1071,8 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 	struct channel *oc = si_oc(si);
 	struct conn_stream *cs = __objt_cs(si->end);
 
-	if (unlikely(si->state > SI_ST_EST || (oc->flags & CF_SHUTW)))
+	if (unlikely((si->state != SI_ST_CON && si->state != SI_ST_EST) ||
+	    (oc->flags & CF_SHUTW)))
 		return;
 
 	if (unlikely(channel_is_empty(oc)))  /* called with nothing to send ! */
@@ -1465,7 +1454,6 @@ static void stream_int_read0(struct stream_interface *si)
 	struct channel *oc = si_oc(si);
 
 	si_rx_shut_blk(si);
-	ic->flags &= ~CF_SHUTR_NOW;
 	if (ic->flags & CF_SHUTR)
 		return;
 	ic->flags |= CF_SHUTR;
@@ -1531,9 +1519,8 @@ void si_applet_wake_cb(struct stream_interface *si)
 	 * appctx but in the case the task is not in runqueue we may have to
 	 * wakeup the appctx immediately.
 	 */
-	if (!task_in_rq(si_task(si)) &&
-	    ((si_rx_endp_ready(si) && !si_rx_blocked(si)) ||
-	     (si_tx_endp_ready(si) && !si_tx_blocked(si))))
+	if ((si_rx_endp_ready(si) && !si_rx_blocked(si)) ||
+	    (si_tx_endp_ready(si) && !si_tx_blocked(si)))
 		appctx_wakeup(si_appctx(si));
 }
 
@@ -1550,7 +1537,6 @@ static void stream_int_shutr_applet(struct stream_interface *si)
 	struct channel *ic = si_ic(si);
 
 	si_rx_shut_blk(si);
-	ic->flags &= ~CF_SHUTR_NOW;
 	if (ic->flags & CF_SHUTR)
 		return;
 	ic->flags |= CF_SHUTR;
@@ -1622,7 +1608,6 @@ static void stream_int_shutw_applet(struct stream_interface *si)
 	default:
 		si->flags &= ~SI_FL_NOLINGER;
 		si_rx_shut_blk(si);
-		ic->flags &= ~CF_SHUTR_NOW;
 		ic->flags |= CF_SHUTR;
 		ic->rex = TICK_ETERNITY;
 		si->exp = TICK_ETERNITY;

@@ -1276,8 +1276,7 @@ spoe_release_appctx(struct appctx *appctx)
 
 	/* Destroy the task attached to this applet */
 	if (spoe_appctx->task) {
-		task_delete(spoe_appctx->task);
-		task_free(spoe_appctx->task);
+		task_destroy(spoe_appctx->task);
 	}
 
 	/* Notify all waiting streams */
@@ -1944,8 +1943,6 @@ spoe_handle_appctx(struct appctx *appctx)
 
 	if (SPOE_APPCTX(appctx)->task->expire != TICK_ETERNITY)
 		task_queue(SPOE_APPCTX(appctx)->task);
-	si_oc(si)->flags |= CF_READ_DONTWAIT;
-	task_wakeup(si_strm(si)->task, TASK_WOKEN_IO);
 }
 
 struct applet spoe_applet = {
@@ -2023,7 +2020,7 @@ spoe_create_appctx(struct spoe_config *conf)
  out_free_sess:
 	session_free(sess);
  out_free_spoe:
-	task_free(SPOE_APPCTX(appctx)->task);
+	task_destroy(SPOE_APPCTX(appctx)->task);
  out_free_spoe_appctx:
 	pool_free(pool_head_spoe_appctx, SPOE_APPCTX(appctx));
  out_free_appctx:
@@ -2096,11 +2093,15 @@ spoe_queue_context(struct spoe_context *ctx)
 		return -1;
 	}
 
-	/* Add the SPOE context in the sending queue */
-	LIST_ADDQ(&agent->rt[tid].sending_queue, &ctx->list);
+	/* Add the SPOE context in the sending queue if the stream has no applet
+	 * already assigned and wakeup all idle applets. Otherwise, don't queue
+	 * it. */
 	_HA_ATOMIC_ADD(&agent->counters.nb_sending, 1);
 	spoe_update_stat_time(&ctx->stats.tv_request, &ctx->stats.t_request);
 	ctx->stats.tv_queue = now;
+	if (ctx->spoe_appctx)
+		return 1;
+	LIST_ADDQ(&agent->rt[tid].sending_queue, &ctx->list);
 
 	SPOE_PRINTF(stderr, "%d.%06d [SPOE/%-15s] %s: stream=%p"
 		    " - Add stream in sending queue"
@@ -2283,7 +2284,9 @@ spoe_encode_messages(struct stream *s, struct spoe_context *ctx,
 	return 1;
 
   too_big:
-	if (!(agent->flags & SPOE_FL_SND_FRAGMENTATION)) {
+	/* Return an error if fragmentation is unsupported or if nothing has
+	 * been encoded because its too big and not splittable. */
+	if (!(agent->flags & SPOE_FL_SND_FRAGMENTATION) || p == b_head(&ctx->buffer)) {
 		ctx->status_code = SPOE_CTX_ERR_TOO_BIG;
 		return -1;
 	}
@@ -2668,8 +2671,8 @@ spoe_process_messages(struct stream *s, struct spoe_context *ctx,
 	}
 
 	if (ctx->state == SPOE_CTX_ST_ENCODING_MSGS) {
-		if (!tv_iszero(&ctx->stats.tv_request))
-		    ctx->stats.tv_request = now;
+		if (tv_iszero(&ctx->stats.tv_request))
+			ctx->stats.tv_request = now;
 		if (!spoe_acquire_buffer(&ctx->buffer, &ctx->buffer_wait))
 			goto out;
 		ret = spoe_encode_messages(s, ctx, messages, dir, type);
