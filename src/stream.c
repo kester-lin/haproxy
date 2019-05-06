@@ -1340,8 +1340,13 @@ static int process_switching_rules(struct stream *s, struct channel *req, int an
 					if (!tmp)
 						goto sw_failed;
 
-					if (build_logline(s, tmp->area, tmp->size, &rule->be.expr))
+					if (build_logline(s, tmp->area, tmp->size, &rule->be.expr)) {
 						backend = proxy_be_by_name(tmp->area);
+					
+						if(!strcmp(tmp->area, "ft_group")) {
+							printf("FT_GROUP");
+						}
+					}
 
 					free_trash_chunk(tmp);
 					tmp = NULL;
@@ -2316,7 +2321,7 @@ redo:
 		     channel_is_empty(req))) {
 		if (req->flags & CF_READ_ERROR)
 			si_b->flags |= SI_FL_NOLINGER;
-		si_shutw(si_b);
+		si_shutw(si_b); /* Default Send FIN packet */
 	}
 
 	/* shutdown(write) done on server side, we must stop the client too */

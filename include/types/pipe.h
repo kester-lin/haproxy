@@ -39,6 +39,12 @@ struct pipe {
 #if ENABLE_CUJU_FT
   struct pipe *pipe_nxt;
   struct pipe *pipe_dup;
+  struct pipe *pipe_ted;
+
+  struct pipe *pipe_nxt_last;
+  struct pipe *pipe_dup_last;
+  struct pipe *pipe_ted_last;
+
   unsigned long flush_id;
   u_int32_t flush_idx;
   unsigned long epoch_id;

@@ -123,7 +123,7 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 		//printf("Dest. is Client Application, Conn is %p\n", conn);
 	} 
 	else {
-		//printf("Check Dest. Error\n");
+		//printf("Check Dest. No Info.\n");
 	}
 
 
@@ -247,6 +247,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	struct pipe *pipe_buf = NULL;
 	struct pipe *pipe_dup = NULL;
 	struct pipe *pipe_trans = NULL;
+	struct pipe *pipe_ted = NULL;
 	int t_flag = 0;
 	u_int32_t curr_flush_id;
 	struct in_addr ipv4_to;
@@ -295,6 +296,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			conn->frontend_pipecnt++;
 		}
 
+		pipe_ted = pipe->pipe_ted;
+
 		printf("Create Pipe CNT:%d\n", fd_pipe_cnt);
 		printf("Pipe: %p\n", pipe_buf);
 		printf("Pipe: %p\n\n", pipe_dup);
@@ -303,7 +306,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		if (pipe->pipe_nxt == NULL)	{
 			printf("########################NULL RETRANSMIT########################\n");
 			goto after_send;
-			}
+		}
 	}
 
 	fdtab[conn->handle.fd].enable_migration = 1;
@@ -361,9 +364,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		//printf("[WRITE] Dest. is Client Application, Conn is %p\n", conn);
 	} 
 	else {
-		//printf("Check Dest. Error\n");
+		//printf("[WRITE] Check Dest. NO Info.\n");
 	}
-
 
 	if (conn->direction == DIR_DEST_GUEST) {
 
@@ -371,7 +373,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 		if(pipe_trans->flush_idx) {
 			/* check for release */
-			ft_release_pipe_by_flush(pipe, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
+			ft_release_pipe_by_flush(pipe_ted, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
 			pipe_trans = pipe->pipe_nxt;
 
 			if (pipe_trans == NULL) {

@@ -17,8 +17,13 @@
 #endif
 
 #if ENABLE_CUJU_FT
-#define FAKE_CUJU_ID 0
+#define FAKE_CUJU_ID 1
 
+#if FAKE_CUJU_ID
+u_int32_t guest_ip_db = 0xd47ea8c0;
+#else 
+u_int32_t guest_ip_db = 0x0;
+#endif
 
 #define MAC_LENGTH 4
 #define DEFAULT_NIC_CNT 3
@@ -29,24 +34,26 @@
 u_int16_t fd_list_migration = 0;
 u_int16_t fd_pipe_cnt = 0;
 u_int16_t empty_pipe = 0;
-u_int32_t guest_ip_db = 0;  
+
+u_int32_t debug_var = 0;
+
 
 struct gctl_ipc gctl_ipc;
 
 #if FAKE_CUJU_ID
 /* FAKE */
-unsigned long flush_count = 0;
+unsigned long flush_count = 1;
+unsigned long epoch_count = 1;
+
 unsigned long ft_get_flushcnt()
 {
 	return flush_count++;
 }
 
-unsigned long epoch_count = 0;
 unsigned long ft_get_epochcnt()
 {
 	return epoch_count++;
 }
-
 #else
 /* FAKE */
 //unsigned long flush_count = 0;
@@ -474,7 +481,7 @@ int cuju_process(struct conn_stream *cs)
 	}
 
 	//printf("IPC Structure Size %lu\n", sizeof(struct proto_ipc));
-
+	debug_var = 0;
 	ipc_ptr = (struct proto_ipc *)ic->buf.area;
 	
 	if((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) && 
