@@ -43,7 +43,6 @@
 #define USE_SYSCALL_FUTEX
 #endif
 
-
 #ifndef UNIX_MAX_PATH
 #define UNIX_MAX_PATH 108
 #endif

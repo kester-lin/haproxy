@@ -10,6 +10,26 @@ extern u_int16_t fd_pipe_cnt;
 extern u_int16_t empty_pipe;
 extern u_int32_t guest_ip_db;
 
+
+extern struct timeval time_poll;
+extern struct timeval time_recv;
+extern struct timeval time_recv_end;
+extern struct timeval time_send;
+extern struct timeval time_send_end;
+
+
+
+extern int trace_cnt;
+extern int flush_cnt;
+
+extern struct timeval time_release;
+extern struct timeval time_release_end;
+extern unsigned long release_time;	
+
+extern struct timeval time_loop;
+extern struct timeval time_loop_end;
+extern unsigned long loop_time;	
+
 #if ENABLE_CUJU_IPC
 
 /* ipc_mode */
@@ -44,7 +64,7 @@ struct proto_ipc
     u_int32_t cuju_ft_arp:2;
     u_int32_t cuju_ft_mode : 6;
     u_int32_t gft_id : 16;
-    u_int32_t ephch_id;
+    u_int32_t epoch_id;
     u_int32_t packet_cnt : 16;
     u_int32_t packet_size : 16;
     u_int32_t time_interval;
@@ -53,10 +73,17 @@ struct proto_ipc
 };
 
 
-struct guest_ip
+struct guest_ip_list
 {
     u_int32_t guest_ip;
-    struct list next;
+    struct gctl_ipc gctl_ipc;
+    struct list list;
+};
+
+struct ft_fd_list
+{
+    u_int16_t ft_fd;
+    struct list list;
 };
 
 #endif /* End of ENABLE_CUJU_IPC*/
@@ -71,6 +98,15 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 int ft_close_pipe(struct pipe *pipe,  int* pipe_cnt);
 void ft_clean_pipe(struct pipe *pipe);
 char *arp_get_ip(const char *req_mac);
+void show_ft_time (void);
+struct guest_ip_list *find_guestip_ptr(u_int32_t guest_ip);
+u_int8_t find_guestip_exist(u_int32_t guest_ip);
+struct guest_ip_list* add_guestip(u_int32_t guest_ip);
+u_int8_t del_guestip(u_int32_t guest_ip);
+struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* dir);
+u_int8_t add_ft_fd(u_int16_t ftfd);
+u_int16_t get_ft_fd(void);
+
 #endif
 
 #endif

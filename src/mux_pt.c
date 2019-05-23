@@ -15,7 +15,63 @@
 #include <proto/connection.h>
 #include <proto/stream.h>
 #include <proto/task.h>
+#include <types/cuju_ft.h>
 
+#if ENABLE_TIME_MEASURE
+extern double time_taken;
+extern u_int16_t next_pipe_cnt;
+
+extern struct timeval time_flush;
+extern struct timeval time_flush_end;
+extern unsigned long flush_time;
+
+extern struct timeval time_rpbt;
+extern struct timeval time_rpbt_end;
+extern unsigned long rpbt_time;
+
+extern struct timeval time_dup;
+extern struct timeval time_dup_end;
+extern unsigned long dup_time;
+
+extern struct timeval time_transfer;
+extern struct timeval time_transfer_end;
+extern unsigned long transfer_time;	
+extern unsigned int transfer_cnt;
+extern unsigned int transfer_data_cnt;
+
+extern struct timeval time_az;
+extern struct timeval time_az_end;
+extern unsigned long time_azone;	
+
+extern struct timeval time_bz;
+extern struct timeval time_bz_end;
+extern unsigned long time_bzone;	
+
+extern struct timeval time_cz;
+extern struct timeval time_cz_end;
+extern unsigned long time_czone;	
+
+extern struct timeval time_dz;
+extern struct timeval time_dz_end;
+extern unsigned long time_dzone;	
+
+extern struct timeval time_get_pipe;
+extern struct timeval time_get_pipe_end;
+extern unsigned long get_pipe_time;
+
+extern struct timeval time_dup_pipe;
+extern struct timeval time_dup_pipe_end;
+extern unsigned long dup_pipe_time;	
+
+extern struct timeval time_a_other;
+extern struct timeval time_a_other_end;
+extern unsigned long a_other_time;	
+
+extern struct timeval time_cz_other;
+extern struct timeval time_cz_other_end;
+extern unsigned long cz_other_time;
+
+#endif
 struct mux_pt_ctx {
 	struct conn_stream *cs;
 	struct connection *conn;
@@ -302,8 +358,13 @@ static int mux_pt_unsubscribe(struct conn_stream *cs, int event_type, void *para
 static int mux_pt_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int count)
 {
 	int ret;
-
+#if ENABLE_TIME_MEASURE	
+gettimeofday(&time_recv, NULL);
+#endif
 	ret = cs->conn->xprt->rcv_pipe(cs->conn, cs->conn->xprt_ctx, pipe, count);
+#if ENABLE_TIME_MEASURE
+gettimeofday(&time_recv_end, NULL);
+#endif
 	if (conn_xprt_read0_pending(cs->conn))
 		cs->flags |= CS_FL_EOS;
 	if (cs->conn->flags & CO_FL_ERROR)
@@ -311,9 +372,47 @@ static int mux_pt_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned i
 	return (ret);
 }
 
+static inline __u64 tv_to_us(const struct timeval* tv) 
+{
+        __u64 us = tv->tv_usec;
+        us += (__u64)tv->tv_sec * (__u64)1000000;
+        return us;
+}
+
 static int mux_pt_snd_pipe(struct conn_stream *cs, struct pipe *pipe)
 {
+#if 0
 	return (cs->conn->xprt->snd_pipe(cs->conn, cs->conn->xprt_ctx, pipe));
+#else
+	int ret;
+
+#if ENABLE_TIME_MEASURE	
+	unsigned long send_time = 0;
+	unsigned long send_time_ms = 0;
+	gettimeofday(&time_send, NULL);
+#endif
+
+	ret = cs->conn->xprt->snd_pipe(cs->conn, cs->conn->xprt_ctx, pipe);
+#if ENABLE_TIME_MEASURE	
+	gettimeofday(&time_send_end, NULL);
+
+	send_time = tv_to_us(&time_send_end) - tv_to_us(&time_send);
+	send_time_ms = __tv_to_ms(&time_send_end) - __tv_to_ms(&time_send);
+
+    printf("SEND in MUX %lu  %lu\n", send_time, send_time_ms);
+	printf("Flush trace count:%d flush:%d  loop time:%lu Used:%d\n", trace_cnt, flush_cnt, loop_time, fd_pipe_cnt);
+	printf("ft_release_pipe_by_flush time: %lu\n", flush_time);
+	printf("Flush Clock Time: %f \n", time_taken);
+	printf("Pipe NXT Cnt:%d time:%lu\n", next_pipe_cnt++, dup_time);
+    printf("Real Transfer Time:%lu Cnt:%d Data:%d\n", transfer_time, transfer_cnt, transfer_data_cnt);	
+	printf("Release Pipe by Transfer time: %lu\n", rpbt_time);
+	printf("TimeA:%lu TimeB:%lu TimeC:%lu TimeD:%lu GetPipe:%lu DupPipe:%lu AOther:%lu CZ_other:%lu\n", 
+	       time_azone, time_bzone, time_czone, time_dzone, 
+		   get_pipe_time, dup_pipe_time, a_other_time, cz_other_time);
+#endif
+
+	return (ret);
+#endif
 }
 #endif
 

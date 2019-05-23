@@ -204,7 +204,6 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		unsigned int e = epoll_events[count].events;
 		fd = epoll_events[count].data.fd;
 
-
 		if (!fdtab[fd].owner) {
 			activity[tid].poll_dead++;
 			continue;
@@ -244,12 +243,19 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	/* the caller will take care of cached events */
 
 #if ENABLE_EPOLL_MIGRATION
-	if (pb_event && !(status) && fd_list_migration && fd_pipe_cnt) {
-		fd_want_send(fd_list_migration);
-		fd_update_events(fd_list_migration, FD_POLL_OUT);
-		return;
-	}
+	if (pb_event && !(status) && fd_pipe_cnt) {
+		int local_fd = 0; 
+
+		local_fd = get_ft_fd();	
+		if (local_fd) {
+			fd_want_send(local_fd);
+			fd_update_events(local_fd, FD_POLL_OUT);
+		}
+	}	
 #endif
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_poll, NULL);
+#endif	
 }
 
 static int init_epoll_per_thread()

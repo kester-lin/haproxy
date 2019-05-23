@@ -39,11 +39,11 @@ struct pipe {
 #if ENABLE_CUJU_FT
   struct pipe *pipe_nxt;
   struct pipe *pipe_dup;
-  struct pipe *pipe_ted;
+  struct pipe *pipe_ted; /* Only for Pipe Head */
 
   struct pipe *pipe_nxt_last;
   struct pipe *pipe_dup_last;
-  struct pipe *pipe_ted_last;
+  struct pipe *pipe_ted_last; /* Only for Pipe Head */
 
   unsigned long flush_id;
   u_int32_t flush_idx;

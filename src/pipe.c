@@ -84,11 +84,11 @@ struct pipe *get_pipe()
 
  out:
 	HA_SPIN_UNLOCK(PIPES_LOCK, &pipes_lock);
-
+#if 0
 	if (ret == NULL) {
 		assert(0);
 	}
-
+#endif
 	return ret;
 }
 

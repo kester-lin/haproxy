@@ -653,6 +653,7 @@ int si_cs_send(struct conn_stream *cs)
 		if ((ret > 0) || empty_pipe) {
 			oc->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
 			did_send = 1;
+			//show_ft_time();
 		}
 
 #if ENABLE_CUJU_FT
@@ -734,8 +735,8 @@ int si_cs_send(struct conn_stream *cs)
  end:
  
 	/* We couldn't send all of our data, let the mux know we'd like to send more */
-#if ENABLE_CUJU_FT
-	/* more data to transmit  */
+#if 0 //ENABLE_CUJU_FT
+	/* more data to transmit for failover */
 	if(!fdtab[conn->handle.fd].enable_migration)
 		if (!channel_is_empty(oc))
 			conn->mux->subscribe(cs, SUB_RETRY_SEND, &si->wait_event);

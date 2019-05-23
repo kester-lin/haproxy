@@ -10,6 +10,8 @@
 #define ENABLE_EPOLL_MIGRATION      1
 #define ENABLE_CUJU_IPC             1
 #define ENABLE_EXTEND_CHECK	        0
+#define ENABLE_NO_BUFFER_MODE       0
+#define ENABLE_TIME_MEASURE         0
 #endif
 
 struct gctl_ipc
@@ -25,7 +27,7 @@ struct gctl_ipc
     u_int32_t packet_cnt : 16;
     u_int32_t packet_size : 16;
     
-    uint32_t ephch_id;
+    uint32_t epoch_id;
     uint32_t flush_id;
     
     struct timeval last_trans_time;

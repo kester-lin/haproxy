@@ -50,6 +50,13 @@
 #include <assert.h>
 #endif
 
+#define DEBUG_SOCK_RAW 0
+#if DEBUG_SOCK_RAW
+#define DSRPRINTF(x...) printf(x)
+#else
+#define DSRPRINTF(x...)
+#endif
+
 /* A pipe contains 16 segments max, and it's common to see segments of 1448 bytes
  * because of timestamps. Use this as a hint for not looping on splice().
  */
@@ -57,7 +64,79 @@
 
 /* how many data we attempt to splice at once when the buffer is configured for
  * infinite forwarding */
+
 #define MAX_SPLICE_AT_ONCE	(1<<30)
+double time_taken = 0.0;
+u_int16_t next_pipe_cnt = 0;
+
+struct timeval time_flush;
+struct timeval time_flush_end;
+unsigned long flush_time;
+
+struct timeval time_rpbt;
+struct timeval time_rpbt_end;
+unsigned long rpbt_time;
+
+struct timeval time_dup;
+struct timeval time_dup_end;
+unsigned long dup_time;
+
+struct timeval time_transfer;
+struct timeval time_transfer_end;
+unsigned long transfer_time;	
+unsigned int transfer_cnt;
+unsigned int transfer_data_cnt;
+
+struct timeval time_az;
+struct timeval time_az_end;
+unsigned long time_azone;	
+
+struct timeval time_bz;
+struct timeval time_bz_end;
+unsigned long time_bzone;	
+
+struct timeval time_cz;
+struct timeval time_cz_end;
+unsigned long time_czone;	
+
+struct timeval time_dz;
+struct timeval time_dz_end;
+unsigned long time_dzone;	
+
+struct timeval time_get_pipe;
+struct timeval time_get_pipe_end;
+unsigned long get_pipe_time;
+
+struct timeval time_dup_pipe;
+struct timeval time_dup_pipe_end;
+unsigned long dup_pipe_time;	
+
+struct timeval time_a_other;
+struct timeval time_a_other_end;
+unsigned long a_other_time;	
+
+struct timeval time_cz_other;
+struct timeval time_cz_other_end;
+unsigned long cz_other_time;
+
+#if 0
+REGPRM1 static inline unsigned long tv_to_us(struct timeval *tv)
+{
+	unsigned long ret;
+
+	ret  = tv->tv_sec * 1000 * 1000 + tv->tv_usec;
+
+	return ret;
+}
+#else
+/** Convert to micro-seconds */
+static inline __u64 tv_to_us(const struct timeval* tv) 
+{
+        __u64 us = tv->tv_usec;
+        us += (__u64)tv->tv_sec * (__u64)1000000;
+        return us;
+}
+#endif
 
 /* Versions of splice between 2.6.25 and 2.6.27.12 were bogus and would return EAGAIN
  * on incoming shutdowns. On these versions, we have to call recv() after such a return
@@ -80,6 +159,7 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	int retval = 0;
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
+	struct guest_ip_list* guest_info = NULL;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -114,6 +194,9 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
 
+#if 1
+	guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+#else
 	if (ipv4_to.s_addr == guest_ip_db) {
 		conn->direction = DIR_DEST_GUEST;
 		//printf("Dest. is Guest, Conn is %p\n", conn);
@@ -125,7 +208,7 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	else {
 		//printf("Check Dest. No Info.\n");
 	}
-
+#endif
 
 	while (count) {
 		if (count > MAX_SPLICE_AT_ONCE)
@@ -197,7 +280,8 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 
 		/* Recv the Data tag epoch id*/
 		if ((pipe->epoch_idx == 0) && (conn->direction == DIR_DEST_CLIENT)) {
-			pipe->epoch_id = ft_get_epochcnt();
+			//pipe->epoch_id = ft_get_epochcnt();
+			pipe->epoch_id = guest_info->gctl_ipc.epoch_id;
 			pipe->epoch_idx = 1; 
 		}
 
@@ -225,11 +309,11 @@ leave:
 out_read0:
 	conn_sock_read0(conn);
 
-	fd_list_migration = 0;
+	////fd_list_migration = 0;
 	fdtab[conn->handle.fd].enable_migration = 0;
 	empty_pipe = 1;
-	printf("CURRENT PIPE CNT IN RELEASE:%d\n", fd_pipe_cnt);
-	printf("Close FD:%d\n", conn->handle.fd);
+	DSRPRINTF("CURRENT PIPE CNT IN RELEASE:%d\n", fd_pipe_cnt);
+	DSRPRINTF("Close FD:%d\n", conn->handle.fd);
 
 	conn->flags &= ~CO_FL_WAIT_L4_CONN;
 	goto leave;
@@ -241,17 +325,27 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 {
 	int ret = 0;
 	int done = 0;
+	
+#if ENABLE_TIME_MEASURE	
+	clock_t start, end; 
+#endif	
 
 #if ENABLE_CUJU_FT
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_buf = NULL;
 	struct pipe *pipe_dup = NULL;
-	struct pipe *pipe_trans = NULL;
-	struct pipe *pipe_ted = NULL;
+	struct pipe *pipe_trans = pipe;
+	//struct pipe *pipe_ted = NULL;
 	int t_flag = 0;
 	u_int32_t curr_flush_id;
 	struct in_addr ipv4_to;
-	struct in_addr ipv4_from;	
+	struct in_addr ipv4_from;
+	struct guest_ip_list* guest_info = NULL;
+#endif
+
+#if ENABLE_TIME_MEASURE
+ 	gettimeofday(&time_az, NULL);
+	gettimeofday(&time_a_other, NULL);
 #endif
 
 	if (!conn_ctrl_ready(conn))
@@ -262,13 +356,25 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	conn_refresh_polling_flags(conn);
 
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_a_other_end, NULL);
+#endif
+
 #if ENABLE_CUJU_FT	
-	
+#if !(ENABLE_NO_BUFFER_MODE)
 	pipe->out_fd = conn->handle.fd;
 
 	if (pipe->data) {
+		DSRPRINTF("Pipe Have Data:%d\n", pipe->data);
+#if ENABLE_TIME_MEASURE
+		gettimeofday(&time_get_pipe, NULL);
+#endif
 		pipe_buf = get_pipe();
 		pipe_dup = get_pipe();
+		
+#if ENABLE_TIME_MEASURE		
+		gettimeofday(&time_get_pipe_end, NULL);
+#endif
 
 		if (pipe_buf == NULL) {
 #if PIPE_ASSERT
@@ -285,8 +391,15 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #endif			
 		}
 
+#if ENABLE_TIME_MEASURE		
+		gettimeofday(&time_dup_pipe, NULL);
+#endif
 		ft_dup_pipe(pipe, pipe_buf, 0);
 		ft_dup_pipe(pipe, pipe_dup, 1);
+
+#if ENABLE_TIME_MEASURE		
+		gettimeofday(&time_dup_pipe_end, NULL);
+#endif
 		fd_pipe_cnt++;
 
 		if(conn->direction == DIR_DEST_GUEST) {
@@ -296,23 +409,39 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			conn->frontend_pipecnt++;
 		}
 
-		pipe_ted = pipe->pipe_ted;
+		//pipe_ted = pipe->pipe_ted;
 
-		printf("Create Pipe CNT:%d\n", fd_pipe_cnt);
-		printf("Pipe: %p\n", pipe_buf);
-		printf("Pipe: %p\n\n", pipe_dup);
+		DSRPRINTF("Create Pipe CNT:%d\n", fd_pipe_cnt);
+		//printf("Pipe: %p\n", pipe_buf);
+		//printf("Pipe: %p\n\n", pipe_dup);
 	}
 	else {
 		if (pipe->pipe_nxt == NULL)	{
-			printf("########################NULL RETRANSMIT########################\n");
+			DSRPRINTF("########################NULL RETRANSMIT########################\n");
 			goto after_send;
 		}
 	}
+#endif
 
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_az_end, NULL);
+	gettimeofday(&time_bz, NULL);
+#endif
+
+#if !(ENABLE_NO_BUFFER_MODE)
+	/* enable when enter FT */
 	fdtab[conn->handle.fd].enable_migration = 1;
 
 	if (pipe->pipe_nxt) {
+		//DSRPRINTF("Pipe Have NXT\n");
+
 		/* search pipe_nxt is empty insert new incoming to the pipe buffer tail */
+#if ENABLE_TIME_MEASURE
+		gettimeofday(&time_dup, NULL);
+#endif
+		
+		next_pipe_cnt = 0;
+
 		while (1) {
 			if (pipe_trace->pipe_nxt == NULL) {
 				if(pipe->data) {
@@ -321,6 +450,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				}
 				break;
 			}
+
+			next_pipe_cnt++;
 	
 			pipe_trace = pipe_trace->pipe_nxt;
 
@@ -329,10 +460,18 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, 0);
 			}
 		}
+
+#if ENABLE_TIME_MEASURE		
+		gettimeofday(&time_dup_end, NULL);
+		dup_time = tv_to_us(&time_dup_end) - tv_to_us(&time_dup);
+#endif
+		//		
 	}
 	else {
 		if (pipe_buf == NULL || pipe_dup == NULL) {
-#if DEBUG_FULL
+			DSRPRINTF("Pipe BUF&DUP are Zero\n");
+
+#if PIPE_ASSERT
 			assert(1);
 #else
 			return 0;
@@ -342,19 +481,28 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		pipe->pipe_nxt = pipe_buf;
 		pipe->pipe_nxt->pipe_dup = pipe_dup;
 	}
-	
 	done = 0;
 	pipe_trans = pipe->pipe_nxt;
 	pipe->data = 0;
 
+#endif	
+
+
 	if (pipe_trans == NULL) { 
-		printf("pipe_trans is NULL\n");
+		DSRPRINTF("pipe_trans is NULL\n");
+#if PIPE_ASSERT	
 		assert(1);
+#else
+		return 0;
+#endif
 	}
 
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
 
+#if 1
+	guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+#else
 	if (ipv4_to.s_addr == guest_ip_db) {
 		conn->direction = DIR_DEST_GUEST;
 		//printf("[WRITE] Dest. is Guest, Conn is %p\n", conn);
@@ -366,18 +514,43 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	else {
 		//printf("[WRITE] Check Dest. NO Info.\n");
 	}
+#endif
+
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_bz_end, NULL);
+	gettimeofday(&time_cz, NULL);
+#endif	
 
 	if (conn->direction == DIR_DEST_GUEST) {
+#if ENABLE_TIME_MEASURE
+		gettimeofday(&time_cz_other, NULL);
+#endif
 
-		curr_flush_id = ft_get_flushcnt();
+#if !(ENABLE_NO_BUFFER_MODE)
+		//curr_flush_id = ft_get_flushcnt();
+		curr_flush_id = guest_info->gctl_ipc.flush_id;
+
 
 		if(pipe_trans->flush_idx) {
+			DSRPRINTF("Enter Flush\n");
+#if ENABLE_TIME_MEASURE
+			gettimeofday(&time_flush, NULL);
+			start = clock();
+#endif			
 			/* check for release */
-			ft_release_pipe_by_flush(pipe_ted, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
+			ft_release_pipe_by_flush(pipe, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
+#if ENABLE_TIME_MEASURE			
+			end = clock();
+			gettimeofday(&time_flush_end, NULL);
+
+			flush_time = tv_to_us(&time_flush_end) - tv_to_us(&time_flush);
+
+			time_taken = ((double) (end - start)) / CLOCKS_PER_SEC; 
+#endif
 			pipe_trans = pipe->pipe_nxt;
 
 			if (pipe_trans == NULL) {
-				printf("pipe_trans is NULL\n");
+				DSRPRINTF("pipe_trans is NULL in Flush\n");
 				empty_pipe = 1;
 				goto after_send;
 			}
@@ -386,10 +559,22 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			pipe_trans->flush_idx = 1;
 			pipe_trans->flush_id = curr_flush_id;
 		}
+#endif		
+
+#if ENABLE_TIME_MEASURE
+		gettimeofday(&time_cz_other_end, NULL);
+		gettimeofday(&time_transfer, NULL);
+#endif
+
+		transfer_cnt = 0;
+		transfer_data_cnt = 0;
 
 		/* WRITE */
 		while (pipe_trans->data) {
 			if (!pipe_trans->transfered) {
+				
+				DSRPRINTF("pipe_trans->data:%d\n", pipe_trans->data);
+
 				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
 							pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
@@ -414,27 +599,38 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 					conn->flags |= CO_FL_ERROR;
 					break;
 				}
-
+				transfer_cnt++;
 				done += ret;
 				pipe_trans->data -= ret;
 				pipe_trans->transfer_cnt++;
 				pipe_trans->trans_suspend = 0;
+#if !(ENABLE_NO_BUFFER_MODE)				
 				pipe_trans->transfered = 1;
+#endif				
 				//printf("Transfered\n");
 			}
-
+#if !(ENABLE_NO_BUFFER_MODE)
 			if (pipe_trans->pipe_nxt != NULL) {
 				pipe_trans = pipe_trans->pipe_nxt;
 				//printf("Transfered then goto pipe_nxt\n");
 			}
 			else {
 				break;
-			}		
+			}
+#endif					
 		}
+		transfer_data_cnt = done;
+
+#if ENABLE_TIME_MEASURE		
+		gettimeofday(&time_transfer_end, NULL);
+		transfer_time = tv_to_us(&time_transfer_end) - tv_to_us(&time_transfer);
+#endif
+		
 	}
 	else if (conn->direction == DIR_DEST_CLIENT) {
-		curr_flush_id = ft_get_epochcnt();
-//
+		//curr_flush_id = ft_get_epochcnt();
+		curr_flush_id = guest_info->gctl_ipc.epoch_id;
+
 		while (pipe_trans->data) {
 			if (curr_flush_id > pipe_trans->flush_id) {
 				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
@@ -468,26 +664,35 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				pipe_trans->trans_suspend = 0;
 				pipe_trans->transfered = 1;
 				//printf("Transfered\n");
-
 				/* Pipe Release for DEST */
-				
 			}
-
+#if !(ENABLE_NO_BUFFER_MODE)
 			if (pipe_trans->pipe_nxt != NULL) {
 				pipe_trans = pipe_trans->pipe_nxt;
 				//printf("Transfered then goto pipe_nxt\n");
 			}
 			else {
 				break;
-			}		
+			}
+#endif					
 		}
+#if !(ENABLE_NO_BUFFER_MODE)
 		if (done) {
+#if ENABLE_TIME_MEASURE
+			gettimeofday(&time_rpbt, NULL);
+#endif			
 			ft_release_pipe_by_transfer(pipe, &fd_pipe_cnt , &conn->frontend_pipecnt);
-		}
+#if ENABLE_TIME_MEASURE	
+			gettimeofday(&time_rpbt_end, NULL);
+			rpbt_time = tv_to_us(&time_rpbt_end) - tv_to_us(&time_rpbt);
+#endif     	
+		 }
+#endif
 //
 	}
 	else {
 		done = 0;
+
 		while (pipe->data) {
 			ret = splice(pipe->cons, NULL, conn->handle.fd, NULL, pipe->data,
 						SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
@@ -533,6 +738,11 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	}
 #endif
 
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_cz_end, NULL);
+	gettimeofday(&time_dz, NULL);
+#endif	
+	
 after_send:
 
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
@@ -540,17 +750,32 @@ after_send:
 
 	conn_cond_update_sock_polling(conn);
 
+#if ENABLE_TIME_MEASURE
+	gettimeofday(&time_dz_end, NULL);
+	time_azone = tv_to_us(&time_az_end) - tv_to_us(&time_az);
+	time_bzone = tv_to_us(&time_bz_end) - tv_to_us(&time_bz);
+	time_czone = tv_to_us(&time_cz_end) - tv_to_us(&time_cz);
+	time_dzone = tv_to_us(&time_dz_end) - tv_to_us(&time_dz);
+	get_pipe_time = tv_to_us(&time_get_pipe_end) - tv_to_us(&time_get_pipe);
+	dup_pipe_time = tv_to_us(&time_dup_pipe_end) - tv_to_us(&time_dup_pipe);
+	a_other_time = tv_to_us(&time_a_other_end) - tv_to_us(&time_a_other);
+	cz_other_time = tv_to_us(&time_cz_other_end) - tv_to_us(&time_cz_other);
+#endif
+
+
+
 #if ENABLE_CUJU_FT
 	if (pipe->pipe_nxt == NULL) {
-		//fd_list_migration = 0;
-		//fdtab[conn->handle.fd].enable_migration = 0;
-		//empty_pipe = 1;
-		printf("FD done:%d\n", conn->handle.fd);
+		DSRPRINTF("FD done:%d\n", conn->handle.fd);
 		return done;
 	}
 
 	if (fdtab[conn->handle.fd].enable_migration) {
-		fd_list_migration = pipe_trans->out_fd;
+
+		//fd_list_migration = pipe_trans->out_fd;
+		
+		add_ft_fd(pipe_trans->out_fd);
+		
 		conn->flags |= CO_FL_XPRT_WR_ENA;
 	}
 
