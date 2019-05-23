@@ -1454,6 +1454,12 @@ clear table <table> [ data.<type> <operator> <value> ] | [ key <key> ]
         $ echo "show table http_proxy" | socat stdio /tmp/sock1
     >>> # table: http_proxy, type: ip, size:204800, used:1
 
+debug dev <command> [args]*
+  Call a developer-specific command. Only supported when haproxy is built with
+  DEBUG_DEV defined. Supported commands are then listed in the help message.
+  All of these commands require admin privileges, and must never appear on a
+  production system as most of them are unsafe and dangerous.
+
 del acl <acl> [<key>|#<ref>]
   Delete all the acl entries from the acl <acl> corresponding to the key <key>.
   <acl> is the #<id> or the <file> returned by "show acl". If the <ref> is used,
@@ -1667,7 +1673,7 @@ set maxconn global <maxconn>
   delayed until the threshold is reached. A value of zero restores the initial
   setting.
 
-set profiling { tasks } { on | off }
+set profiling { tasks } { auto | on | off }
   Enables or disables CPU profiling for the indicated subsystem. This is
   equivalent to setting or clearing the "profiling" settings in the "global"
   section of the configuration file. Please also see "show profiling".
@@ -1837,6 +1843,18 @@ user
   Decrease the CLI level of the current CLI session to user. It can't be
   increase. See also "show cli level"
 
+show activity
+  Reports some counters about internal events that will help developers and
+  more generally people who know haproxy well enough to narrow down the causes
+  of reports of abnormal behaviours. A typical example would be a properly
+  running process never sleeping and eating 100% of the CPU. The output fields
+  will be made of one line per metric, and per-thread counters on the same
+  line. These counters are 32-bit and will wrap during the process' life, which
+  is not a problem since calls to this command will typically be performed
+  twice. The fields are purposely not documented so that their exact meaning is
+  verified in the code where the counters are fed. These values are also reset
+  by the "clear counters" command.
+
 show cli sockets
   List CLI sockets. The output format is composed of 3 fields separated by
   spaces. The first field is the socket address, it can be a unix socket, a
@@ -1960,18 +1978,6 @@ show fd [<fd>]
   this command without a good knowledge of the internals. It's worth noting
   that the output format may evolve over time so this output must not be parsed
   by tools designed to be durable.
-
-show activity
-  Reports some counters about internal events that will help developers and
-  more generally people who know haproxy well enough to narrow down the causes
-  of reports of abnormal behaviours. A typical example would be a properly
-  running process never sleeping and eating 100% of the CPU. The output fields
-  will be made of one line per metric, and per-thread counters on the same
-  line. These counters are 32-bit and will wrap during the process' life, which
-  is not a problem since calls to this command will typically be performed
-  twice. The fields are purposely not documented so that their exact meaning is
-  verified in the code where the counters are fed. These values are also reset
-  by the "clear counters" command.
 
 show info [typed|json]
   Dump info about haproxy status on current process. If "typed" is passed as an
@@ -2511,6 +2517,26 @@ show table <name> [ data.<type> <operator> <value> ] | [ key <key> ]
           | socat stdio /tmp/sock1 \
           | fgrep 'key=' | cut -d' ' -f2 | cut -d= -f2 > abusers-ip.txt
           ( or | awk '/key/{ print a[split($2,a,"=")]; }' )
+
+show threads
+  Dumps some internal states and structures for each thread, that may be useful
+  to help developers understand a problem. The output tries to be readable by
+  showing one block per thread. When haproxy is built with USE_THREAD_DUMP=1,
+  an advanced dump mechanism involving thread signals is used so that each
+  thread can dump its own state in turn. Without this option, the thread
+  processing the command shows all its details but the other ones are less
+  detailed. A star ('*') is displayed in front of the thread handling the
+  command. A right angle bracket ('>') may also be displayed in front of
+  threads which didn't make any progress since last invocation of this command,
+  indicating a bug in the code which must absolutely be reported. When this
+  happens between two threads it usually indicates a deadlock. If a thread is
+  alone, it's a different bug like a corrupted list. In all cases the process
+  needs is not fully functional anymore and needs to be restarted.
+
+  The output format is purposely not documented so that it can easily evolve as
+  new needs are identified, without having to maintain any form of backwards
+  compatibility, and just like with "show activity", the values are meaningless
+  without the code at hand.
 
 show tls-keys [id|*]
   Dump all loaded TLS ticket keys references. The TLS ticket key reference ID

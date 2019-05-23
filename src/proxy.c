@@ -77,7 +77,7 @@ const struct cfg_opt cfg_opts[] =
 	{ "nolinger",     PR_O_TCP_NOLING, PR_CAP_FE | PR_CAP_BE, 0, 0 },
 	{ "persist",      PR_O_PERSIST,    PR_CAP_BE, 0, 0 },
 	{ "srvtcpka",     PR_O_TCP_SRV_KA, PR_CAP_BE, 0, 0 },
-#ifdef TPROXY
+#ifdef USE_TPROXY
 	{ "transparent",  PR_O_TRANSP,     PR_CAP_BE, 0, 0 },
 #else
 	{ "transparent",  0, 0, 0, 0 },
@@ -89,7 +89,7 @@ const struct cfg_opt cfg_opts[] =
 /* proxy->options2 */
 const struct cfg_opt cfg_opts2[] =
 {
-#ifdef CONFIG_HAP_LINUX_SPLICE
+#ifdef USE_LINUX_SPLICE
 	{ "splice-request",  PR_O2_SPLIC_REQ, PR_CAP_FE|PR_CAP_BE, 0, 0 },
 	{ "splice-response", PR_O2_SPLIC_RTR, PR_CAP_FE|PR_CAP_BE, 0, 0 },
 	{ "splice-auto",     PR_O2_SPLIC_AUT, PR_CAP_FE|PR_CAP_BE, 0, 0 },
@@ -501,6 +501,71 @@ static int proxy_parse_declare(char **args, int section, struct proxy *curpx,
 	}
 }
 
+/* This function parses a "retry-on" statement */
+static int
+proxy_parse_retry_on(char **args, int section, struct proxy *curpx,
+                               struct proxy *defpx, const char *file, int line,
+                               char **err)
+{
+	int i;
+
+	if (!(*args[1])) {
+		memprintf(err, "'%s' needs at least one keyword to specify when to retry", args[0]);
+		return -1;
+	}
+	if (!(curpx->cap & PR_CAP_BE)) {
+		memprintf(err, "'%s' only available in backend or listen section", args[0]);
+		return -1;
+	}
+	curpx->retry_type = 0;
+	for (i = 1; *(args[i]); i++) {
+		if (!strcmp(args[i], "conn-failure"))
+			curpx->retry_type |= PR_RE_CONN_FAILED;
+		else if (!strcmp(args[i], "empty-response"))
+			curpx->retry_type |= PR_RE_DISCONNECTED;
+		else if (!strcmp(args[i], "response-timeout"))
+			curpx->retry_type |= PR_RE_TIMEOUT;
+		else if (!strcmp(args[i], "404"))
+			curpx->retry_type |= PR_RE_404;
+		else if (!strcmp(args[i], "408"))
+			curpx->retry_type |= PR_RE_408;
+		else if (!strcmp(args[i], "425"))
+			curpx->retry_type |= PR_RE_425;
+		else if (!strcmp(args[i], "500"))
+			curpx->retry_type |= PR_RE_500;
+		else if (!strcmp(args[i], "501"))
+			curpx->retry_type |= PR_RE_501;
+		else if (!strcmp(args[i], "502"))
+			curpx->retry_type |= PR_RE_502;
+		else if (!strcmp(args[i], "503"))
+			curpx->retry_type |= PR_RE_503;
+		else if (!strcmp(args[i], "504"))
+			curpx->retry_type |= PR_RE_504;
+		else if (!strcmp(args[i], "0rtt-rejected"))
+			curpx->retry_type |= PR_RE_EARLY_ERROR;
+		else if (!strcmp(args[i], "junk-response"))
+			curpx->retry_type |= PR_RE_JUNK_REQUEST;
+		else if (!(strcmp(args[i], "all-retryable-errors")))
+			curpx->retry_type |= PR_RE_CONN_FAILED | PR_RE_DISCONNECTED |
+			                     PR_RE_TIMEOUT | PR_RE_500 | PR_RE_502 |
+					     PR_RE_503 | PR_RE_504 | PR_RE_EARLY_ERROR |
+					     PR_RE_JUNK_REQUEST;
+		else if (!strcmp(args[i], "none")) {
+			if (i != 1 || *args[i + 1]) {
+				memprintf(err, "'%s' 'none' keyworld only usable alone", args[0]);
+				return -1;
+			}
+		} else {
+			memprintf(err, "'%s': unknown keyword '%s'", args[0], args[i]);
+			return -1;
+		}
+
+	}
+
+
+	return 0;
+}
+
 /* This function inserts proxy <px> into the tree of known proxies. The proxy's
  * name is used as the storing key so it must already have been initialized.
  */
@@ -527,7 +592,7 @@ struct proxy *proxy_find_by_id(int id, int cap, int table)
 		if ((px->cap & cap) != cap)
 			continue;
 
-		if (table && !px->table.size)
+		if (table && (!px->table || !px->table->size))
 			continue;
 
 		return px;
@@ -560,7 +625,7 @@ struct proxy *proxy_find_by_name(const char *name, int cap, int table)
 			if ((curproxy->cap & cap) != cap)
 				continue;
 
-			if (table && !curproxy->table.size)
+			if (table && (!curproxy->table || !curproxy->table->size))
 				continue;
 
 			return curproxy;
@@ -823,6 +888,9 @@ void init_new_proxy(struct proxy *p)
 	/* HTX is the default mode, for HTTP and TCP */
 	p->options2 |= PR_O2_USE_HTX;
 
+	/* Default to only allow L4 retries */
+	p->retry_type = PR_RE_CONN_FAILED;
+
 	HA_SPIN_INIT(&p->lock);
 }
 
@@ -930,12 +998,12 @@ struct task *manage_proxy(struct task *t, void *context, unsigned short state)
 	 * be in neither list. Any entry being dumped will have ref_cnt > 0.
 	 * However we protect tables that are being synced to peers.
 	 */
-	if (unlikely(stopping && p->state == PR_STSTOPPED && p->table.current)) {
-		if (!p->table.syncing) {
-			stktable_trash_oldest(&p->table, p->table.current);
+	if (unlikely(stopping && p->state == PR_STSTOPPED && p->table && p->table->current)) {
+		if (!p->table->syncing) {
+			stktable_trash_oldest(p->table, p->table->current);
 			pool_gc(NULL);
 		}
-		if (p->table.current) {
+		if (p->table->current) {
 			/* some entries still remain, let's recheck in one second */
 			next = tick_first(next, tick_add(now_ms, 1000));
 		}
@@ -1075,8 +1143,8 @@ void soft_stop(void)
 			/* Note: do not wake up stopped proxies' task nor their tables'
 			 * tasks as these ones might point to already released entries.
 			 */
-			if (p->table.size && p->table.sync_task)
-				task_wakeup(p->table.sync_task, TASK_WOKEN_MSG);
+			if (p->table && p->table->size && p->table->sync_task)
+				task_wakeup(p->table->sync_task, TASK_WOKEN_MSG);
 
 			if (p->task)
 				task_wakeup(p->task, TASK_WOKEN_MSG);
@@ -1590,6 +1658,7 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_LISTEN, "rate-limit", proxy_parse_rate_limit },
 	{ CFG_LISTEN, "max-keep-alive-queue", proxy_parse_max_ka_queue },
 	{ CFG_LISTEN, "declare", proxy_parse_declare },
+	{ CFG_LISTEN, "retry-on", proxy_parse_retry_on },
 	{ 0, NULL, NULL },
 }};
 

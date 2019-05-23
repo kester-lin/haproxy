@@ -27,7 +27,7 @@
 #include <types/cuju_ft_def.h>
 
 #ifdef USE_OPENSSL
-#include <openssl/ssl.h>
+#include <common/openssl-compat.h>
 #include <types/ssl_sock.h>
 #endif
 
@@ -131,7 +131,7 @@ struct ssl_bind_conf {
 	char *ca_file;             /* CAfile to use on verify */
 	char *crl_file;            /* CRLfile to use on verify */
 	char *ciphers;             /* cipher suite to use if non-null */
-#if (OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
+#if (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 	char *ciphersuites;        /* TLS 1.3 cipher suite to use if non-null */
 #endif
 	char *curves;	           /* curves suite to use for ECDHE */
@@ -202,7 +202,7 @@ struct listener {
 	int nbconn;			/* current number of connections on this listener */
 	int maxconn;			/* maximum connections allowed on this listener */
 	unsigned int backlog;		/* if set, listen backlog */
-	unsigned int maxaccept;         /* if set, max number of connections accepted at once */
+	int maxaccept;         /* if set, max number of connections accepted at once (-1 when disabled) */
 	int (*accept)(struct listener *l, int fd, struct sockaddr_storage *addr); /* upper layer's accept() */
 	enum obj_type *default_target;  /* default target to use for accepted sessions or NULL */
 	/* cache line boundary */

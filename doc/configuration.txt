@@ -4,7 +4,7 @@
                          ----------------------
                               version 2.0
                              willy tarreau
-                              2019/03/26
+                              2019/05/22
 
 
 This document covers the configuration language as implemented in the version
@@ -571,6 +571,7 @@ The following keywords are supported in the "global" section :
    - log-tag
    - log-send-hostname
    - lua-load
+   - mworker-max-reloads
    - nbproc
    - nbthread
    - node
@@ -615,6 +616,7 @@ The following keywords are supported in the "global" section :
    - maxzlibmem
    - noepoll
    - nokqueue
+   - noevports
    - nopoll
    - nosplice
    - nogetaddrinfo
@@ -823,7 +825,8 @@ group <group name>
   Similar to "gid" but uses the GID of group name <group name> from /etc/group.
   See also "gid" and "user".
 
-log <address> [len <length>] [format <format>] <facility> [max level [min level]]
+log <address> [len <length>] [format <format>] [sample <ranges>:<smp_size>]
+    <facility> [max level [min level]]
   Adds a global syslog server. Several global servers can be defined. They
   will receive logs for starts and exits, as well as all logs from proxies
   configured with "log global".
@@ -899,6 +902,19 @@ log <address> [len <length>] [format <format>] <facility> [max level [min level]
               used in containers or during development, where the severity only
               depends on the file descriptor used (stdout/stderr).
 
+  <ranges>   A list of comma-separated ranges to identify the logs to sample.
+             This is used to balance the load of the logs to send to the log
+             server. The limits of the ranges cannot be null. They are numbered
+             from 1. The size or period (in number of logs) of the sample must be
+             set with <sample_size> parameter.
+
+  <sample_size>
+             The size of the sample in number of logs to consider when balancing
+             their logging loads. It is used to balance the load of the logs to
+             send to the syslog server. This size must be greater or equal to the
+             maximum of the high limits of the ranges.
+             (see also <ranges> parameter).
+
   <facility> must be one of the 24 standard syslog facilities :
 
                  kern   user   mail   daemon auth   syslog lpr    news
@@ -951,6 +967,13 @@ master-worker [no-exit-on-failure]
   this behavior, you must use the keyword "no-exit-on-failure".
 
   See also "-W" in the management guide.
+
+mworker-max-reloads <number>
+  In master-worker mode, this option limits the number of time a worker can
+  survive to a reload. If the worker did not left after a reload, once its
+  number of reloads is greater than this number, the worker will receive a
+  SIGTERM. This option helps to keep under control the number of workers.
+  See also "show proc" in the Management Guide.
 
 nbproc <number>
   Creates <number> processes when going daemon. This requires the "daemon"
@@ -1438,11 +1461,18 @@ nokqueue
   equivalent to the command-line argument "-dk". The next polling system
   used will generally be "poll". See also "nopoll".
 
+noevports
+  Disables the use of the event ports event polling system on SunOS systems
+  derived from Solaris 10 and later. It is equivalent to the command-line
+  argument "-dv". The next polling system used will generally be "poll". See
+  also "nopoll".
+
 nopoll
   Disables the use of the "poll" event polling system. It is equivalent to the
   command-line argument "-dp". The next polling system used will be "select".
   It should never be needed to disable "poll" since it's available on all
-  platforms supported by HAProxy. See also "nokqueue" and "noepoll".
+  platforms supported by HAProxy. See also "nokqueue", "noepoll" and
+  "noevports".
 
 nosplice
   Disables the use of kernel tcp splicing between sockets on Linux. It is
@@ -1462,11 +1492,22 @@ noreuseport
   Disables the use of SO_REUSEPORT - see socket(7). It is equivalent to the
   command line argument "-dR".
 
-profiling.tasks { on | off }
-  Enables ('on') or disables ('off') per-task CPU profiling. CPU profiling per
-  task can be very convenient to report where the time is spent and which
-  requests have what effect on which other request. It is not enabled by
-  default as it may consume a little bit extra CPU. This requires a system
+profiling.tasks { auto | on | off }
+  Enables ('on') or disables ('off') per-task CPU profiling. When set to 'auto'
+  the profiling automatically turns on a thread when it starts to suffer from
+  an average latency of 1000 microseconds or higher as reported in the
+  "avg_loop_us" activity field, and automatically turns off when the latency
+  reutnrs below 990 microseconds (this value is an average over the last 1024
+  loops so it does not vary quickly and tends to significantly smooth short
+  spikes). It may also spontaneously trigger from time to time on overloaded
+  systems, containers, or virtual machines, or when the system swaps (which
+  must absolutely never happen on a load balancer).
+
+  CPU profiling per task can be very convenient to report where the time is
+  spent and which requests have what effect on which other request. Enabling
+  it will typically affect the overall's performance by less than 1%, thus it
+  is recommended to leave it to the default 'auto' value so that it only
+  operates when a problem is identified. This feature requires a system
   supporting the clock_gettime(2) syscall with clock identifiers
   CLOCK_MONOTONIC and CLOCK_THREAD_CPUTIME_ID, otherwise the reported time will
   be zero. This option may be changed at run time using "set profiling" on the
@@ -2057,6 +2098,56 @@ server <peername> [<ip>:<port>] [param*]
          server hostA  127.0.0.10:10000
          server hostB  #local peer
 
+
+table <tablename> type {ip | integer | string [len <length>] | binary [len <length>]}
+      size <size> [expire <expire>] [nopurge] [store <data_type>]*
+
+  Configure a stickiness table for the current section. This line is parsed
+  exactly the same way as the "stick-table" keyword in others section, except
+  for the "peers" argument which is not required here and with an aditionnal
+  mandatory first parameter to designate the stick-table. Contrary to others
+  sections, there may be several "table" lines in "peers" sections (see also
+  "stick-table" keyword).
+
+  Also be aware of the fact that "peers" sections have their own stick-table
+  namespaces to avoid collisions between stick-table names identical in
+  different "peers" section. This is internally handled prepending the "peers"
+  sections names to the name of the stick-tables followed by a '/' character.
+  If somewhere else in the configuration file you have to refer to such
+  stick-tables declared in "peers" sections you must use the prefixed version
+  of the stick-table name as follows:
+
+      peers mypeers
+          peer A ...
+          peer B ...
+          table t1 ...
+
+      frontend fe1
+          tcp-request content track-sc0 src table mypeers/t1
+
+  This is also this prefixed version of the stick-table names which must be
+  used to refer to stick-tables through the CLI.
+
+  About "peers" protocol, as only "peers" belonging to the same section may
+  communicate with each others, there is no need to do such a distinction.
+  Several "peers" sections may declare stick-tables with the same name.
+  This is shorter version of the stick-table name  which is sent over the network.
+  There is only a '/' character as prefix to avoid stick-table name collisions between
+  stick-tables declared as backends and stick-table declared in "peers" sections
+  as follows in this weird but supported configuration:
+
+      peers mypeers
+          peer A ...
+          peer B ...
+          table t1 type string size 10m store gpc0
+
+      backend t1
+          stick-table type string size 10m store gpc0 peers mypeers
+
+  Here "t1" table declared in "mypeeers" section has "mypeers/t1" as global name.
+  "t1" table declared as a backend as "t1" as global name. But at peer protocol
+  level the former table is named "/t1", the latter is again named "t1".
+
 3.6. Mailers
 ------------
 It is possible to send email alerts when the state of servers changes.
@@ -2196,7 +2287,6 @@ specified in a previous "defaults" section.
  keyword                              defaults   frontend   listen    backend
 ------------------------------------+----------+----------+---------+---------
 acl                                       -          X         X         X
-appsession                                -          -         -         -
 backlog                                   X          X         X         -
 balance                                   X          -         X         X
 bind                                      -          X         X         -
@@ -2260,7 +2350,6 @@ option clitcpka                      (*)  X          X         X         -
 option contstats                     (*)  X          X         X         -
 option dontlog-normal                (*)  X          X         X         -
 option dontlognull                   (*)  X          X         X         -
-option forceclose      (deprectated) (*)  X          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
 option forwardfor                         X          X         X         X
 option http-buffer-request           (*)  X          X         X         X
@@ -2312,28 +2401,29 @@ rate-limit sessions                       X          X         X         -
 redirect                                  -          X         X         X
 redisp                      (deprecated)  X          -         X         X
 redispatch                  (deprecated)  X          -         X         X
-reqadd                                    -          X         X         X
-reqallow                                  -          X         X         X
-reqdel                                    -          X         X         X
-reqdeny                                   -          X         X         X
-reqiallow                                 -          X         X         X
-reqidel                                   -          X         X         X
-reqideny                                  -          X         X         X
-reqipass                                  -          X         X         X
-reqirep                                   -          X         X         X
-reqitarpit                                -          X         X         X
-reqpass                                   -          X         X         X
-reqrep                                    -          X         X         X
+reqadd                      (deprecated)  -          X         X         X
+reqallow                    (deprecated)  -          X         X         X
+reqdel                      (deprecated)  -          X         X         X
+reqdeny                     (deprecated)  -          X         X         X
+reqiallow                   (deprecated)  -          X         X         X
+reqidel                     (deprecated)  -          X         X         X
+reqideny                    (deprecated)  -          X         X         X
+reqipass                    (deprecated)  -          X         X         X
+reqirep                     (deprecated)  -          X         X         X
+reqitarpit                  (deprecated)  -          X         X         X
+reqpass                     (deprecated)  -          X         X         X
+reqrep                      (deprecated)  -          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
-reqtarpit                                 -          X         X         X
+reqtarpit                   (deprecated)  -          X         X         X
 retries                                   X          -         X         X
-rspadd                                    -          X         X         X
-rspdel                                    -          X         X         X
-rspdeny                                   -          X         X         X
-rspidel                                   -          X         X         X
-rspideny                                  -          X         X         X
-rspirep                                   -          X         X         X
-rsprep                                    -          X         X         X
+retry-on                                  X          -         X         X
+rspadd                      (deprecated)  -          X         X         X
+rspdel                      (deprecated)  -          X         X         X
+rspdeny                     (deprecated)  -          X         X         X
+rspidel                     (deprecated)  -          X         X         X
+rspideny                    (deprecated)  -          X         X         X
+rspirep                     (deprecated)  -          X         X         X
+rsprep                      (deprecated)  -          X         X         X
 server                                    -          -         X         X
 server-state-file-name                    X          -         X         X
 server-template                           -          -         X         X
@@ -2406,59 +2496,6 @@ acl <aclname> <criterion> [flags] [operator] <value> ...
         acl local_dst    hdr(host) -i localhost
 
   See section 7 about ACL usage.
-
-
-appsession <cookie> len <length> timeout <holdtime>
-           [request-learn] [prefix] [mode <path-parameters|query-string>]
-  Define session stickiness on an existing application cookie.
-  May be used in sections :   defaults | frontend | listen | backend
-                                 no    |    no    |   yes  |   yes
-  Arguments :
-    <cookie>   this is the name of the cookie used by the application and which
-               HAProxy will have to learn for each new session.
-
-    <length>   this is the max number of characters that will be memorized and
-               checked in each cookie value.
-
-    <holdtime> this is the time after which the cookie will be removed from
-               memory if unused. If no unit is specified, this time is in
-               milliseconds.
-
-    request-learn
-               If this option is specified, then haproxy will be able to learn
-               the cookie found in the request in case the server does not
-               specify any in response. This is typically what happens with
-               PHPSESSID cookies, or when haproxy's session expires before
-               the application's session and the correct server is selected.
-               It is recommended to specify this option to improve reliability.
-
-    prefix     When this option is specified, haproxy will match on the cookie
-               prefix (or URL parameter prefix). The appsession value is the
-               data following this prefix.
-
-               Example :
-               appsession ASPSESSIONID len 64 timeout 3h prefix
-
-               This will match the cookie ASPSESSIONIDXXX=XXXX,
-               the appsession value will be XXX=XXXX.
-
-    mode       This option allows to change the URL parser mode.
-               2 modes are currently supported :
-               - path-parameters :
-                 The parser looks for the appsession in the path parameters
-                 part (each parameter is separated by a semi-colon), which is
-                 convenient for JSESSIONID for example.
-                 This is the default mode if the option is not set.
-               - query-string :
-                 In this mode, the parser will look for the appsession in the
-                 query string.
-
-  As of version 1.6, appsessions was removed. It is more flexible and more
-  convenient to use stick-tables instead, and stick-tables support multi-master
-  replication and data conservation across reloads, which appsessions did not.
-
-  See also : "cookie", "capture cookie", "balance", "stick", "stick-table",
-             "ignore-persist", "nbproc" and "bind-process".
 
 
 backlog <conns>
@@ -4267,6 +4304,11 @@ http-request deny [deny_status <status>] [ { if | unless } <condition> ]
   those that can be overridden by the "errorfile" directive.
   No further "http-request" rules are evaluated.
 
+http-request disable-l7-retry [ { if | unless } <condition> ]
+  This disables any attempt to retry the request if it fails for any other
+  reason than a connection failure. This can be useful for example to make
+  sure POST requests aren't retried on failure.
+
 http-request do-resolve(<var>,<resolvers>,[ipv4,ipv6]) <expr> :
 
   This action performs a DNS resolution of the output of <expr> and stores
@@ -5303,7 +5345,8 @@ load-server-state-from-file { global | local | none }
 
 
 log global
-log <address> [len <length>] [format <format>] <facility> [<level> [<minlevel>]]
+log <address> [len <length>] [format <format>] [sample <ranges>:<smp_size>]
+    <facility> [<level> [<minlevel>]]
 no log
   Enable per-instance logging of events and traffic.
   May be used in sections :   defaults | frontend | listen | backend
@@ -5374,6 +5417,19 @@ no log
                values are 80 to 65535 inclusive. The default value of 1024 is
                generally fine for all standard usages. Some specific cases of
                long captures or JSON-formatted logs may require larger values.
+
+    <ranges>   A list of comma-separated ranges to identify the logs to sample.
+               This is used to balance the load of the logs to send to the log
+               server. The limits of the ranges cannot be null. They are numbered
+               from 1. The size or period (in number of logs) of the sample must
+               be set with <sample_size> parameter.
+
+    <sample_size>
+               The size of the sample in number of logs to consider when balancing
+               their logging loads. It is used to balance the load of the logs to
+               send to the syslog server. This size must be greater or equal to the
+               maximum of the high limits of the ranges.
+               (see also <ranges> parameter).
 
     <format> is the log format used when generating syslog messages. It may be
              one of the following :
@@ -5996,13 +6052,6 @@ no option dontlognull
 
   See also : "log", "http-ignore-probes", "monitor-net", "monitor-uri", and
              section 8 about logging.
-
-
-option forceclose (deprecated)
-no option forceclose (deprecated)
-  This is an alias for "option httpclose". Thus this option is deprecated.
-
-  See also : "option httpclose" and "option http-pretend-keepalive"
 
 
 option forwardfor [ except <network> ] [ header <name> ] [ if-none ]
@@ -7685,7 +7734,7 @@ redispatch (deprecated)
   See also : "option redispatch"
 
 
-reqadd  <string> [{if | unless} <cond>]
+reqadd  <string> [{if | unless} <cond>] (deprecated)
   Add a header at the end of the HTTP request
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7712,8 +7761,8 @@ reqadd  <string> [{if | unless} <cond>]
             and section 7 about ACLs.
 
 
-reqallow  <search> [{if | unless} <cond>]
-reqiallow <search> [{if | unless} <cond>] (ignore case)
+reqallow  <search> [{if | unless} <cond>] (deprecated)
+reqiallow <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Definitely allow an HTTP request if a line matches a regular expression
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7747,8 +7796,8 @@ reqiallow <search> [{if | unless} <cond>] (ignore case)
             manipulation, and section 7 about ACLs.
 
 
-reqdel  <search> [{if | unless} <cond>]
-reqidel <search> [{if | unless} <cond>]  (ignore case)
+reqdel  <search> [{if | unless} <cond>] (deprecated)
+reqidel <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Delete all headers matching a regular expression in an HTTP request
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7781,8 +7830,8 @@ reqidel <search> [{if | unless} <cond>]  (ignore case)
             HTTP header manipulation, and section 7 about ACLs.
 
 
-reqdeny  <search> [{if | unless} <cond>]
-reqideny <search> [{if | unless} <cond>]  (ignore case)
+reqdeny  <search> [{if | unless} <cond>] (deprecated)
+reqideny <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Deny an HTTP request if a line matches a regular expression
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7820,8 +7869,8 @@ reqideny <search> [{if | unless} <cond>]  (ignore case)
             HTTP header manipulation, and section 7 about ACLs.
 
 
-reqpass  <search> [{if | unless} <cond>]
-reqipass <search> [{if | unless} <cond>]  (ignore case)
+reqpass  <search> [{if | unless} <cond>] (deprecated)
+reqipass <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Ignore any HTTP request line matching a regular expression in next rules
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7855,8 +7904,8 @@ reqipass <search> [{if | unless} <cond>]  (ignore case)
             HTTP header manipulation, and section 7 about ACLs.
 
 
-reqrep  <search> <string> [{if | unless} <cond>]
-reqirep <search> <string> [{if | unless} <cond>]   (ignore case)
+reqrep  <search> <string> [{if | unless} <cond>] (deprecated)
+reqirep <search> <string> [{if | unless} <cond>] (ignore case) (deprecated)
   Replace a regular expression with a string in an HTTP request line
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7897,8 +7946,8 @@ reqirep <search> <string> [{if | unless} <cond>]   (ignore case)
             section 6 about HTTP header manipulation, and section 7 about ACLs.
 
 
-reqtarpit  <search> [{if | unless} <cond>]
-reqitarpit <search> [{if | unless} <cond>]  (ignore case)
+reqtarpit  <search> [{if | unless} <cond>] (deprecated)
+reqitarpit <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Tarpit an HTTP request containing a line matching a regular expression
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7965,7 +8014,89 @@ retries <value>
   See also : "option redispatch"
 
 
-rspadd <string> [{if | unless} <cond>]
+retry-on [list of keywords]
+  Specify when to attempt to automatically retry a failed request
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    no    |   yes  |   yes
+  Arguments :
+    <keywords>  is a list of keywords or HTTP status codes, each representing a
+                type of failure event on which an attempt to retry the request
+                is desired. Please read the notes at the bottom before changing
+                this setting. The following keywords are supported :
+
+      none              never retry
+
+      conn-failure      retry when the connection or the SSL handshake failed
+                        and the request could not be sent. This is the default.
+
+      empty-response    retry when the server connection was closed after part
+                        of the request was sent, and nothing was received from
+                        the server. This type of failure may be caused by the
+                        request timeout on the server side, poor network
+                        condition, or a server crash or restart while
+                        processing the request.
+
+      junk-response     retry when the server returned something not looking
+                        like a complete HTTP response. This includes partial
+                        responses headers as well as non-HTTP contents. It
+                        usually is a bad idea to retry on such events, which
+                        may be caused a configuration issue (wrong server port)
+                        or by the request being harmful to the server (buffer
+                        overflow attack for example).
+
+      response-timeout  the server timeout stroke while waiting for the server
+                        to respond to the request. This may be caused by poor
+                        network condition, the reuse of an idle connection
+                        which has expired on the path, or by the request being
+                        extremely expensive to process. It generally is a bad
+                        idea to retry on such events on servers dealing with
+                        heavy database processing (full scans, etc) as it may
+                        amplify denial of service attacks.
+
+      0rtt-rejected     retry requests which were sent over early data and were
+                        rejected by the server. These requests are generally
+                        considered to be safe to retry.
+
+      <status>          any HTTP status code among "404" (Not Found), "408"
+                        (Request Timeout), "425" (Too Early), "500" (Server
+                        Error), "501" (Not Implemented), "502" (Bad Gateway),
+                        "503" (Service Unavailable), "504" (Gateway Timeout).
+
+      all-retryable-errors
+                        retry request for any error that are considered
+			retryable. This currently activates "conn-failure",
+			"empty-response", "junk-response", "response-timeout",
+			"0rtt-rejected", "500", "502", "503", and "504".
+
+  Using this directive replaces any previous settings with the new ones; it is
+  not cumulative.
+
+  Please note that using anything other than "none" and "conn-failure" requires
+  to allocate a buffer and copy the whole request into it, so it has memory and
+  performance impacts. Requests not fitting in a single buffer will never be
+  retried (see the global tune.bufsize setting).
+
+  You have to make sure the application has a replay protection mechanism built
+  in such as a unique transaction IDs passed in requests, or that replaying the
+  same request has no consequence, or it is very dangerous to use any retry-on
+  value beside "conn-failure" and "none". Static file servers and caches are
+  generally considered safe against any type of retry. Using a status code can
+  be useful to quickly leave a server showing an abnormal behavior (out of
+  memory, file system issues, etc), but in this case it may be a good idea to
+  immediately redispatch the connection to another server (please see "option
+  redispatch" for this). Last, it is important to understand that most causes
+  of failures are the requests themselves and that retrying a request causing a
+  server to misbehave will often make the situation even worse for this server,
+  or for the whole service in case of redispatch.
+
+  Unless you know exactly how the application deals with replayed requests, you
+  should not use this directive.
+
+  The default is "conn-failure".
+
+  See also: "retries", "option redispatch", "tune.bufsize"
+
+rspadd <string> [{if | unless} <cond>] (deprecated)
   Add a header at the end of the HTTP response
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -7988,8 +8119,8 @@ rspadd <string> [{if | unless} <cond>]
             manipulation, and section 7 about ACLs.
 
 
-rspdel  <search> [{if | unless} <cond>]
-rspidel <search> [{if | unless} <cond>]  (ignore case)
+rspdel  <search> [{if | unless} <cond>] (deprecated)
+rspidel <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Delete all headers matching a regular expression in an HTTP response
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -8022,8 +8153,8 @@ rspidel <search> [{if | unless} <cond>]  (ignore case)
             HTTP header manipulation, and section 7 about ACLs.
 
 
-rspdeny  <search> [{if | unless} <cond>]
-rspideny <search> [{if | unless} <cond>]  (ignore case)
+rspdeny  <search> [{if | unless} <cond>] (deprecated)
+rspideny <search> [{if | unless} <cond>] (ignore case) (deprecated)
   Block an HTTP response if a line matches a regular expression
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -8060,8 +8191,8 @@ rspideny <search> [{if | unless} <cond>]  (ignore case)
             HTTP header manipulation and section 7 about ACLs.
 
 
-rsprep  <search> <string> [{if | unless} <cond>]
-rspirep <search> <string> [{if | unless} <cond>]  (ignore case)
+rsprep  <search> <string> [{if | unless} <cond>] (deprecated)
+rspirep <search> <string> [{if | unless} <cond>] (ignore case) (deprecated)
   Replace a regular expression with a string in an HTTP response line
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
@@ -11692,6 +11823,11 @@ agent-port <port>
 
   See also the "agent-check" and "agent-inter" parameters.
 
+allow-0rtt
+  Allow sending early data to the server when using TLS 1.3.
+  Note that early data will be sent only if the client used early data, or
+  if the backend uses "retry-on" with the "0rtt-rejected" keyword.
+
 alpn <protocols>
   This enables the TLS ALPN extension and advertises the specified protocol
   list as supported on top of ALPN. The protocol list consists in a comma-
@@ -12439,6 +12575,14 @@ tcp-ut <delay>
   argument is a delay expressed in milliseconds by default. This only works for
   regular TCP connections, and is ignored for other protocols.
 
+tfo
+  This option enables using TCP fast open when connecting to servers, on
+  systems that support it (currently only the Linux kernel >= 4.11).
+  See the "tfo" bind option for more information about TCP fast open.
+  Please note that when using tfo, you should also use the "conn-failure",
+  "empty-response" and "response-timeout" keywords for "retry-on", or haproxy
+  won't be able to retry the connection on failure.
+
 track [<proxy>/]<server>
   This option enables ability to set the current state of the server by tracking
   another one. It is possible to track a server which itself tracks another
@@ -12622,11 +12766,6 @@ hold <status> <period>
                <period> is in milliseconds by default.
 
   Default value is 10s for "valid", 0s for "obsolete" and 30s for others.
-
-resolution_pool_size <nb>  (deprecated)
-  Defines the number of resolutions available in the pool for this resolvers.
-  If not defines, it defaults to 64. If your configuration requires more than
-  <nb>, then HAProxy will return an error when parsing the configuration.
 
 resolve_retries <nb>
   Defines the number <nb> of queries to send to resolve a server name before

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/wait.h>
 
+#include <common/cfgparse.h>
 #include <common/initcall.h>
 #include <common/mini-clist.h>
 
@@ -41,6 +42,7 @@
 #endif
 
 static int exitcode = -1;
+static int max_reloads = -1; /* number max of reloads a worker can have until they are killed */
 
 /* ----- children processes handling ----- */
 
@@ -59,6 +61,16 @@ static void mworker_kill(int sig)
 	}
 }
 
+void mworker_kill_max_reloads(int sig)
+{
+	struct mworker_proc *child;
+
+	list_for_each_entry(child, &proc_list, list) {
+		if (max_reloads != -1 && (child->options & PROC_O_TYPE_WORKER) &&
+		    (child->pid > 0) && (child->reloads > max_reloads))
+			kill(child->pid, sig);
+	}
+}
 
 /* return 1 if a pid is a current child otherwise 0 */
 int mworker_current_child(int pid)
@@ -168,14 +180,13 @@ void mworker_env_to_proc_list()
 			}
 		}
 		if (child->pid) {
+			/* this is a process inherited from a reload that should be leaving */
+			child->options |= PROC_O_LEAVING;
+
 			LIST_ADDQ(&proc_list, &child->list);
 		} else {
-			free(child->id);
-			free(child);
-
+			mworker_free_child(child);
 		}
-		/* this is a process inherited from a reload that should be leaving */
-		child->options |= PROC_O_LEAVING;
 	}
 
 	unsetenv("HAPROXY_PROCESSES");
@@ -232,7 +243,6 @@ void mworker_catch_sigchld(struct sig_handler *sh)
 {
 	int exitpid = -1;
 	int status = 0;
-	struct mworker_proc *child, *it;
 	int childfound;
 
 restart_wait:
@@ -241,6 +251,8 @@ restart_wait:
 
 	exitpid = waitpid(-1, &status, WNOHANG);
 	if (exitpid > 0) {
+		struct mworker_proc *child, *it;
+
 		if (WIFEXITED(status))
 			status = WEXITSTATUS(status);
 		else if (WIFSIGNALED(status))
@@ -288,7 +300,8 @@ restart_wait:
 					ha_warning("Former program '%s' (%d) exited with code %d (%s)\n", child->id, exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
 				}
 			}
-			free(child);
+			mworker_free_child(child);
+			child = NULL;
 		}
 
 		/* do it again to check if it was the last worker */
@@ -344,21 +357,28 @@ void mworker_accept_wrapper(int fd)
 }
 
 /*
- * This function register the accept wrapper for the sockpair of the master worker
+ * This function registers the accept wrapper for the sockpair of the master
+ * worker. It's only handled by worker thread #0. Other threads and master do
+ * nothing here. It always returns 1 (success).
  */
-void mworker_pipe_register()
+static int mworker_pipe_register_per_thread()
 {
-	/* The iocb should be already initialized with listener_accept */
-	if (fdtab[proc_self->ipc_fd[1]].iocb == mworker_accept_wrapper)
-		return;
+	if (!(global.mode & MODE_MWORKER) || master)
+		return 1;
+
+	if (tid != 0)
+		return 1;
 
 	fcntl(proc_self->ipc_fd[1], F_SETFL, O_NONBLOCK);
 	/* In multi-tread, we need only one thread to process
 	 * events on the pipe with master
 	 */
-	fd_insert(proc_self->ipc_fd[1], fdtab[proc_self->ipc_fd[1]].owner, mworker_accept_wrapper, 1);
+	fd_insert(proc_self->ipc_fd[1], fdtab[proc_self->ipc_fd[1]].owner, mworker_accept_wrapper, tid_bit);
 	fd_want_recv(proc_self->ipc_fd[1]);
+	return 1;
 }
+
+REGISTER_PER_THREAD_INIT(mworker_pipe_register_per_thread);
 
 /* ----- proxies ----- */
 /*
@@ -513,6 +533,64 @@ static int cli_parse_reload(char **args, char *payload, struct appctx *appctx, v
 
 	return 1;
 }
+
+
+static int mworker_parse_global_max_reloads(char **args, int section_type, struct proxy *curpx,
+           struct proxy *defpx, const char *file, int linenum, char **err)
+{
+
+	int err_code = 0;
+
+	if (alertif_too_many_args(1, file, linenum, args, &err_code))
+		goto out;
+
+	if (*(args[1]) == 0) {
+		memprintf(err, "%sparsing [%s:%d] : '%s' expects an integer argument.\n", *err, file, linenum, args[0]);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	max_reloads = atol(args[1]);
+	if (max_reloads < 0) {
+		memprintf(err, "%sparsing [%s:%d] '%s' : invalid value %d, must be >= 0", *err, file, linenum, args[0], max_reloads);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+out:
+	return err_code;
+}
+
+void mworker_free_child(struct mworker_proc *child)
+{
+	if (child == NULL)
+		return;
+
+	if (child->command) {
+		int i;
+
+		for (i = 0; child->command[i]; i++) {
+			if (child->command[i]) {
+				free(child->command[i]);
+				child->command[i] = NULL;
+			}
+		}
+		free(child->command);
+		child->command = NULL;
+	}
+	if (child->id) {
+		free(child->id);
+		child->id = NULL;
+	}
+	free(child);
+}
+
+static struct cfg_kw_list mworker_kws = {{ }, {
+	{ CFG_GLOBAL, "mworker-max-reloads", mworker_parse_global_max_reloads },
+	{ 0, NULL, NULL },
+}};
+
+INITCALL1(STG_REGISTER, cfg_register_keywords, &mworker_kws);
 
 
 /* register cli keywords */

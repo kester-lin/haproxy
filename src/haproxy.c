@@ -83,6 +83,7 @@
 #include <common/memory.h>
 #include <common/mini-clist.h>
 #include <common/namespace.h>
+#include <common/openssl-compat.h>
 #include <common/regex.h>
 #include <common/standard.h>
 #include <common/time.h>
@@ -125,9 +126,7 @@
 #include <proto/task.h>
 #include <proto/dns.h>
 #include <proto/vars.h>
-#ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
-#endif
 
 /* array of init calls for older platforms */
 DECLARE_INIT_STAGES;
@@ -269,15 +268,14 @@ struct post_check_fct {
 	int (*fct)();
 };
 
-/* These functions are called when freeing the global sections at the end
- * of deinit, after everything is stopped. They don't return anything, and
- * they work in best effort mode as their sole goal is to make valgrind
- * mostly happy.
- */
-struct list post_deinit_list = LIST_HEAD_INIT(post_deinit_list);
-struct post_deinit_fct {
+/* These functions are called for each thread just after the thread creation
+ * and before running the init functions. They should be used to do per-thread
+ * (re-)allocations that are needed by subsequent functoins. They must return 0
+ * if an error occurred. */
+struct list per_thread_alloc_list = LIST_HEAD_INIT(per_thread_alloc_list);
+struct per_thread_alloc_fct {
 	struct list list;
-	void (*fct)();
+	int (*fct)();
 };
 
 /* These functions are called for each thread just after the thread creation
@@ -285,6 +283,29 @@ struct post_deinit_fct {
  * initializations. They must return 0 if an error occurred. */
 struct list per_thread_init_list = LIST_HEAD_INIT(per_thread_init_list);
 struct per_thread_init_fct {
+	struct list list;
+	int (*fct)();
+};
+
+/* These functions are called when freeing the global sections at the end of
+ * deinit, after everything is stopped. They don't return anything. They should
+ * not release shared resources that are possibly used by other deinit
+ * functions, only close/release what is private. Use the per_thread_free_list
+ * to release shared resources.
+ */
+struct list post_deinit_list = LIST_HEAD_INIT(post_deinit_list);
+struct post_deinit_fct {
+	struct list list;
+	void (*fct)();
+};
+
+/* These functions are called when freeing the global sections at the end of
+ * deinit, after the thread deinit functions, to release unneeded memory
+ * allocations. They don't return anything, and they work in best effort mode
+ * as their sole goal is to make valgrind mostly happy.
+ */
+struct list per_thread_free_list = LIST_HEAD_INIT(per_thread_free_list);
+struct per_thread_free_fct {
 	struct list list;
 	int (*fct)();
 };
@@ -350,6 +371,20 @@ void hap_register_post_deinit(void (*fct)())
 	LIST_ADDQ(&post_deinit_list, &b->list);
 }
 
+/* used to register some allocation functions to call for each thread. */
+void hap_register_per_thread_alloc(int (*fct)())
+{
+	struct per_thread_alloc_fct *b;
+
+	b = calloc(1, sizeof(*b));
+	if (!b) {
+		fprintf(stderr, "out of memory\n");
+		exit(1);
+	}
+	b->fct = fct;
+	LIST_ADDQ(&per_thread_alloc_list, &b->list);
+}
+
 /* used to register some initialization functions to call for each thread. */
 void hap_register_per_thread_init(int (*fct)())
 {
@@ -376,6 +411,20 @@ void hap_register_per_thread_deinit(void (*fct)())
 	}
 	b->fct = fct;
 	LIST_ADDQ(&per_thread_deinit_list, &b->list);
+}
+
+/* used to register some free functions to call for each thread. */
+void hap_register_per_thread_free(int (*fct)())
+{
+	struct per_thread_free_fct *b;
+
+	b = calloc(1, sizeof(*b));
+	if (!b) {
+		fprintf(stderr, "out of memory\n");
+		exit(1);
+	}
+	b->fct = fct;
+	LIST_ADDQ(&per_thread_free_list, &b->list);
 }
 
 static void display_version()
@@ -453,16 +502,19 @@ static void usage(char *name)
 		"        -N sets the default, per-proxy maximum # of connections (%d)\n"
 		"        -L set local peer name (default to hostname)\n"
 		"        -p writes pids of all children to this file\n"
-#if defined(ENABLE_EPOLL)
+#if defined(USE_EPOLL)
 		"        -de disables epoll() usage even when available\n"
 #endif
-#if defined(ENABLE_KQUEUE)
+#if defined(USE_KQUEUE)
 		"        -dk disables kqueue() usage even when available\n"
 #endif
-#if defined(ENABLE_POLL)
+#if defined(USE_EVPORTS)
+		"        -dv disables event ports usage even when available\n"
+#endif
+#if defined(USE_POLL)
 		"        -dp disables poll() usage even when available\n"
 #endif
-#if defined(CONFIG_HAP_LINUX_SPLICE)
+#if defined(USE_LINUX_SPLICE)
 		"        -dS disables splice usage (broken on old kernels)\n"
 #endif
 #if defined(USE_GETADDRINFO)
@@ -587,6 +639,11 @@ void mworker_reload()
 		ptdf->fct();
 	if (fdtab)
 		deinit_pollers();
+#if defined(USE_OPENSSL) && (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L)
+	if (global.ssl_used_frontend || global.ssl_used_backend)
+		/* close random device FDs */
+		RAND_keep_random_devices_open(0);
+#endif
 
 	/* restore the initial FD limits */
 	limit.rlim_cur = rlim_fd_cur_at_boot;
@@ -690,7 +747,7 @@ static void mworker_loop()
 		leave */
 
 	fork_poller();
-	run_thread_poll_loop((int []){0});
+	run_thread_poll_loop(0);
 }
 
 /*
@@ -1338,16 +1395,19 @@ static void init(int argc, char **argv)
 	vars_init(&global.vars, SCOPE_PROC);
 
 	global.tune.options |= GTUNE_USE_SELECT;  /* select() is always available */
-#if defined(ENABLE_POLL)
+#if defined(USE_POLL)
 	global.tune.options |= GTUNE_USE_POLL;
 #endif
-#if defined(ENABLE_EPOLL)
+#if defined(USE_EPOLL)
 	global.tune.options |= GTUNE_USE_EPOLL;
 #endif
-#if defined(ENABLE_KQUEUE)
+#if defined(USE_KQUEUE)
 	global.tune.options |= GTUNE_USE_KQUEUE;
 #endif
-#if defined(CONFIG_HAP_LINUX_SPLICE)
+#if defined(USE_EVPORTS)
+	global.tune.options |= GTUNE_USE_EVPORTS;
+#endif
+#if defined(USE_LINUX_SPLICE)
 	global.tune.options |= GTUNE_USE_SPLICE;
 #endif
 #if defined(USE_GETADDRINFO)
@@ -1379,19 +1439,23 @@ static void init(int argc, char **argv)
 					display_build_opts();
 				exit(0);
 			}
-#if defined(ENABLE_EPOLL)
+#if defined(USE_EPOLL)
 			else if (*flag == 'd' && flag[1] == 'e')
 				global.tune.options &= ~GTUNE_USE_EPOLL;
 #endif
-#if defined(ENABLE_POLL)
+#if defined(USE_POLL)
 			else if (*flag == 'd' && flag[1] == 'p')
 				global.tune.options &= ~GTUNE_USE_POLL;
 #endif
-#if defined(ENABLE_KQUEUE)
+#if defined(USE_KQUEUE)
 			else if (*flag == 'd' && flag[1] == 'k')
 				global.tune.options &= ~GTUNE_USE_KQUEUE;
 #endif
-#if defined(CONFIG_HAP_LINUX_SPLICE)
+#if defined(USE_EVPORTS)
+			else if (*flag == 'd' && flag[1] == 'v')
+				global.tune.options &= ~GTUNE_USE_EVPORTS;
+#endif
+#if defined(USE_LINUX_SPLICE)
 			else if (*flag == 'd' && flag[1] == 'S')
 				global.tune.options &= ~GTUNE_USE_SPLICE;
 #endif
@@ -1572,6 +1636,7 @@ static void init(int argc, char **argv)
 
 	/* in wait mode, we don't try to read the configuration files */
 	if (!(global.mode & MODE_MWORKER_WAIT)) {
+		struct buffer *trash = get_trash_chunk();
 
 		/* handle cfgfiles that are actually directories */
 		cfgfiles_expand_directories();
@@ -1582,6 +1647,11 @@ static void init(int argc, char **argv)
 
 		list_for_each_entry(wl, &cfg_cfgfiles, list) {
 			int ret;
+
+			if (trash->data)
+				chunk_appendf(trash, ";");
+
+			chunk_appendf(trash, "%s", wl->s);
 
 			ret = readcfgfile(wl->s);
 			if (ret == -1) {
@@ -1604,6 +1674,9 @@ static void init(int argc, char **argv)
 			ha_alert("Fatal errors found in configuration.\n");
 			exit(1);
 		}
+		if (trash->data)
+			setenv("HAPROXY_CFGFILES", trash->area, 1);
+
 	}
 	if (global.mode & MODE_MWORKER) {
 		int proc;
@@ -1704,7 +1777,7 @@ static void init(int argc, char **argv)
 #endif
 	}
 
-#ifdef CONFIG_HAP_NS
+#ifdef USE_NS
         err_code |= netns_init();
         if (err_code & (ERR_ABORT|ERR_FATAL)) {
                 ha_alert("Failed to initialize namespace support.\n");
@@ -2017,6 +2090,9 @@ static void init(int argc, char **argv)
 	if (!(global.tune.options & GTUNE_USE_KQUEUE))
 		disable_poller("kqueue");
 
+	if (!(global.tune.options & GTUNE_USE_EVPORTS))
+		disable_poller("evports");
+
 	if (!(global.tune.options & GTUNE_USE_EPOLL))
 		disable_poller("epoll");
 
@@ -2173,11 +2249,7 @@ void deinit(void)
 		}
 
 		for (exp = p->req_exp; exp != NULL; ) {
-			if (exp->preg) {
-				regex_free(exp->preg);
-				free(exp->preg);
-			}
-
+			regex_free(exp->preg);
 			free((char *)exp->replace);
 			expb = exp;
 			exp = exp->next;
@@ -2185,11 +2257,7 @@ void deinit(void)
 		}
 
 		for (exp = p->rsp_exp; exp != NULL; ) {
-			if (exp->preg) {
-				regex_free(exp->preg);
-				free(exp->preg);
-			}
-
+			regex_free(exp->preg);
 			free((char *)exp->replace);
 			expb = exp;
 			exp = exp->next;
@@ -2230,8 +2298,8 @@ void deinit(void)
 			if (rule->cond) {
 				prune_acl_cond(rule->cond);
 				free(rule->cond);
-				free(rule->file);
 			}
+			free(rule->file);
 			free(rule);
 		}
 
@@ -2256,11 +2324,15 @@ void deinit(void)
 
 		list_for_each_entry_safe(lf, lfb, &p->logformat, list) {
 			LIST_DEL(&lf->list);
+			release_sample_expr(lf->expr);
+			free(lf->arg);
 			free(lf);
 		}
 
 		list_for_each_entry_safe(lf, lfb, &p->logformat_sd, list) {
 			LIST_DEL(&lf->list);
+			release_sample_expr(lf->expr);
+			free(lf->arg);
 			free(lf);
 		}
 
@@ -2293,13 +2365,15 @@ void deinit(void)
 		while (s) {
 			s_next = s->next;
 
-			if (s->check.task)
-				task_destroy(s->check.task);
-			if (s->agent.task)
-				task_destroy(s->agent.task);
+			task_destroy(s->check.task);
+			task_destroy(s->agent.task);
 
-			if (s->warmup)
-				task_destroy(s->warmup);
+			if (s->check.wait_list.task)
+				tasklet_free(s->check.wait_list.task);
+			if (s->agent.wait_list.task)
+				tasklet_free(s->agent.wait_list.task);
+
+			task_destroy(s->warmup);
 
 			free(s->id);
 			free(s->cookie);
@@ -2365,7 +2439,8 @@ void deinit(void)
 
 		pool_destroy(p->req_cap_pool);
 		pool_destroy(p->rsp_cap_pool);
-		pool_destroy(p->table.pool);
+		if (p->table)
+			pool_destroy(p->table->pool);
 
 		p0 = p;
 		p = p->next;
@@ -2486,13 +2561,39 @@ static void run_poll_loop()
 
 static void *run_thread_poll_loop(void *data)
 {
+	struct per_thread_alloc_fct  *ptaf;
 	struct per_thread_init_fct   *ptif;
 	struct per_thread_deinit_fct *ptdf;
-	__decl_hathreads(static HA_SPINLOCK_T start_lock);
+	struct per_thread_free_fct   *ptff;
 
-	ha_set_tid(*((unsigned int *)data));
+	ha_set_tid((unsigned long)data);
+
+#if (_POSIX_TIMERS > 0) && defined(_POSIX_THREAD_CPUTIME)
+#ifdef USE_THREAD
+	pthread_getcpuclockid(pthread_self(), &ti->clock_id);
+#else
+	ti->clock_id = CLOCK_THREAD_CPUTIME_ID;
+#endif
+#endif
+
 	tv_update_date(-1,-1);
 
+	/* per-thread alloc calls performed here are not allowed to snoop on
+	 * other threads, so they are free to initialize at their own rhythm
+	 * as long as they act as if they were alone. None of them may rely
+	 * on resources initialized by the other ones.
+	 */
+	list_for_each_entry(ptaf, &per_thread_alloc_list, list) {
+		if (!ptaf->fct()) {
+			ha_alert("failed to allocate resources for thread %u.\n", tid);
+			exit(1);
+		}
+	}
+
+	/* per-thread init calls performed here are not allowed to snoop on
+	 * other threads, so they are free to initialize at their own rhythm
+	 * as long as they act as if they were alone.
+	 */
 	list_for_each_entry(ptif, &per_thread_init_list, list) {
 		if (!ptif->fct()) {
 			ha_alert("failed to initialize thread %u.\n", tid);
@@ -2500,17 +2601,19 @@ static void *run_thread_poll_loop(void *data)
 		}
 	}
 
-	if ((global.mode & MODE_MWORKER) && master == 0) {
-		HA_SPIN_LOCK(START_LOCK, &start_lock);
-		mworker_pipe_register();
-		HA_SPIN_UNLOCK(START_LOCK, &start_lock);
-	}
+	/* broadcast that we are ready and wait for other threads to finish
+	 * their initialization.
+	 */
+	thread_release();
 
 	protocol_enable_all();
 	run_poll_loop();
 
 	list_for_each_entry(ptdf, &per_thread_deinit_list, list)
 		ptdf->fct();
+
+	list_for_each_entry(ptff, &per_thread_free_list, list)
+		ptff->fct();
 
 #ifdef USE_THREAD
 	_HA_ATOMIC_AND(&all_threads_mask, ~tid_bit);
@@ -2780,6 +2883,10 @@ int main(int argc, char **argv)
 	if (nb_oldpids && !(global.mode & MODE_MWORKER_WAIT))
 		nb_oldpids = tell_old_pids(oldpids_sig);
 
+	/* send a SIGTERM to workers who have a too high reloads number  */
+	if ((global.mode & MODE_MWORKER) && !(global.mode & MODE_MWORKER_WAIT))
+		mworker_kill_max_reloads(SIGTERM);
+
 	if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)) {
 		nb_oldpids = 0;
 		free(oldpids);
@@ -3000,7 +3107,8 @@ int main(int argc, char **argv)
 					continue;
 				}
 				LIST_DEL(&child->list);
-				free(child);
+				mworker_free_child(child);
+				child = NULL;
 			}
 		}
 
@@ -3123,14 +3231,8 @@ int main(int argc, char **argv)
 	 */
 #ifdef USE_THREAD
 	{
-		unsigned int *tids    = calloc(global.nbthread, sizeof(unsigned int));
-		pthread_t    *threads = calloc(global.nbthread, sizeof(pthread_t));
-		int          i;
 		sigset_t     blocked_sig, old_sig;
-
-		/* Init tids array */
-		for (i = 0; i < global.nbthread; i++)
-			tids[i] = i;
+		int          i;
 
 		/* ensure the signals will be blocked in every thread */
 		sigfillset(&blocked_sig);
@@ -3141,26 +3243,32 @@ int main(int argc, char **argv)
 		sigdelset(&blocked_sig, SIGSEGV);
 		pthread_sigmask(SIG_SETMASK, &blocked_sig, &old_sig);
 
+		/* mark the fact that threads must wait for each other
+		 * during startup. Once initialized, they just have to
+		 * call thread_release().
+		 */
+		threads_want_rdv_mask = all_threads_mask;
+
 		/* Create nbthread-1 thread. The first thread is the current process */
-		threads[0] = pthread_self();
+		thread_info[0].pthread = pthread_self();
 		for (i = 1; i < global.nbthread; i++)
-			pthread_create(&threads[i], NULL, &run_thread_poll_loop, &tids[i]);
+			pthread_create(&thread_info[i].pthread, NULL, &run_thread_poll_loop, (void *)(long)i);
 
 #ifdef USE_CPU_AFFINITY
 		/* Now the CPU affinity for all threads */
 		for (i = 0; i < global.nbthread; i++) {
 			if (global.cpu_map.proc[relative_pid-1])
-				global.cpu_map.thread[relative_pid-1][i] &= global.cpu_map.proc[relative_pid-1];
+				global.cpu_map.thread[i] &= global.cpu_map.proc[relative_pid-1];
 
 			if (i < MAX_THREADS &&       /* only the first 32/64 threads may be pinned */
-			    global.cpu_map.thread[relative_pid-1][i]) {/* only do this if the thread has a THREAD map */
+			    global.cpu_map.thread[i]) {/* only do this if the thread has a THREAD map */
 #if defined(__FreeBSD__) || defined(__NetBSD__)
 				cpuset_t cpuset;
 #else
 				cpu_set_t cpuset;
 #endif
 				int j;
-				unsigned long cpu_map = global.cpu_map.thread[relative_pid-1][i];
+				unsigned long cpu_map = global.cpu_map.thread[i];
 
 				CPU_ZERO(&cpuset);
 
@@ -3168,7 +3276,7 @@ int main(int argc, char **argv)
 					CPU_SET(j - 1, &cpuset);
 					cpu_map &= ~(1UL << (j - 1));
 				}
-				pthread_setaffinity_np(threads[i],
+				pthread_setaffinity_np(thread_info[i].pthread,
 						       sizeof(cpuset), &cpuset);
 			}
 		}
@@ -3178,14 +3286,11 @@ int main(int argc, char **argv)
 		haproxy_unblock_signals();
 
 		/* Finally, start the poll loop for the first thread */
-		run_thread_poll_loop(&tids[0]);
+		run_thread_poll_loop(0);
 
 		/* Wait the end of other threads */
 		for (i = 1; i < global.nbthread; i++)
-			pthread_join(threads[i], NULL);
-
-		free(tids);
-		free(threads);
+			pthread_join(thread_info[i].pthread, NULL);
 
 #if defined(DEBUG_THREAD) || defined(DEBUG_FULL)
 		show_lock_stats();
@@ -3193,8 +3298,7 @@ int main(int argc, char **argv)
 	}
 #else /* ! USE_THREAD */
 	haproxy_unblock_signals();
-	run_thread_poll_loop((int []){0});
-
+	run_thread_poll_loop(0);
 #endif
 
 	/* Do some cleanup */

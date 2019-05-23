@@ -454,7 +454,7 @@ static int srv_parse_id(char **args, int *cur_arg, struct proxy *curproxy, struc
 static int srv_parse_namespace(char **args, int *cur_arg,
                                struct proxy *curproxy, struct server *newsrv, char **err)
 {
-#ifdef CONFIG_HAP_NS
+#ifdef USE_NS
 	char *arg;
 
 	arg = args[*cur_arg + 1];
@@ -889,6 +889,13 @@ static int srv_parse_track(char **args, int *cur_arg,
 }
 
 
+/* parse the "tfo" server keyword */
+static int srv_parse_tfo(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+{
+	newsrv->flags |= SRV_F_FASTOPEN;
+	return 0;
+}
+
 /* Shutdown all connections of a server. The caller must pass a termination
  * code in <why>, which must be one of SF_ERR_* indicating the reason for the
  * shutdown.
@@ -1277,6 +1284,7 @@ static struct srv_kw_list srv_kws = { "ALL", { }, {
 	{ "send-proxy-v2",       srv_parse_send_proxy_v2,       0,  1 }, /* Enforce use of PROXY V2 protocol */
 	{ "source",              srv_parse_source,             -1,  1 }, /* Set the source address to be used to connect to the server */
 	{ "stick",               srv_parse_stick,               0,  1 }, /* Enable stick-table persistence */
+	{ "tfo",                 srv_parse_tfo,                 0,  0 }, /* enable TCP Fast Open of server */
 	{ "track",               srv_parse_track,               1,  1 }, /* Set the current state of the server, tracking another one */
 	{ NULL, NULL, 0 },
 }};
@@ -1536,7 +1544,7 @@ static void srv_ssl_settings_cpy(struct server *srv, struct server *src)
 		srv->ssl_ctx.verify_host = strdup(src->ssl_ctx.verify_host);
 	if (src->ssl_ctx.ciphers != NULL)
 		srv->ssl_ctx.ciphers = strdup(src->ssl_ctx.ciphers);
-#if (OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
+#if (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL)
 	if (src->ssl_ctx.ciphersuites != NULL)
 		srv->ssl_ctx.ciphersuites = strdup(src->ssl_ctx.ciphersuites);
 #endif
@@ -1639,7 +1647,7 @@ static void srv_settings_cpy(struct server *srv, struct server *src, int srv_tmp
 	srv->check.port               = src->check.port;
 	srv->check.sni                = src->check.sni;
 	srv->check.alpn_str           = src->check.alpn_str;
-	srv->check.alpn_len           = srv->check.alpn_len;
+	srv->check.alpn_len           = src->check.alpn_len;
 	/* Note: 'flags' field has potentially been already initialized. */
 	srv->flags                   |= src->flags;
 	srv->do_check                 = src->do_check;

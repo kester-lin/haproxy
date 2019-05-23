@@ -54,6 +54,8 @@ struct activity {
 	unsigned int accepted;     // accepted incoming connections
 	unsigned int accq_pushed;  // accept queue connections pushed
 	unsigned int accq_full;    // accept queue connection not pushed because full
+	unsigned int ctxsw;        // total number of context switches
+	unsigned int tasksw;       // total number of task switches
 	char __pad[0]; // unused except to check remaining room
 	char __end[0] __attribute__((aligned(64))); // align size to 64.
 };

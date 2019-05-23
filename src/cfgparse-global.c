@@ -68,6 +68,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		global.tune.options &= ~GTUNE_USE_KQUEUE;
 	}
+	else if (!strcmp(args[0], "noevports")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
+		global.tune.options &= ~GTUNE_USE_EVPORTS;
+	}
 	else if (!strcmp(args[0], "nopoll")) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
 			goto out;
@@ -141,6 +146,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.maxpollevents = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.maxaccept")) {
+		long max;
+
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
 			goto out;
 		if (global.tune.maxaccept != 0) {
@@ -153,7 +160,13 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.tune.maxaccept = atol(args[1]);
+		max = atol(args[1]);
+		if (/*max < -1 || */max > INT_MAX) {
+			ha_alert("parsing [%s:%d] : '%s' expects -1 or an integer from 0 to INT_MAX.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.maxaccept = max;
 	}
 	else if (!strcmp(args[0], "tune.chksize")) {
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -1001,33 +1014,34 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		for (i = n = 0; i < MAX_PROCS; i++) {
-			/* No mapping for this process */
-			if (!(proc & (1UL << i)))
-				continue;
-
+		if (atleast2(proc)) {
 			/* Mapping at the process level */
-			if (!thread) {
+			for (i = n = 0; i < MAX_PROCS; i++) {
+				/* No mapping for this process */
+				if (!(proc & (1UL << i)))
+					continue;
+
 				if (!autoinc)
 					global.cpu_map.proc[i] = cpus;
 				else {
 					n += my_ffsl(cpus >> n);
 					global.cpu_map.proc[i] = (1UL << (n-1));
 				}
-				continue;
 			}
+		}
 
+		if (atleast2(thread)) {
 			/* Mapping at the thread level */
-			for (j = 0; j < MAX_THREADS; j++) {
-				/* Np mapping for this thread */
+			for (j = n = 0; j < MAX_THREADS; j++) {
+				/* No mapping for this thread */
 				if (!(thread & (1UL << j)))
 					continue;
 
 				if (!autoinc)
-					global.cpu_map.thread[i][j] = cpus;
+					global.cpu_map.thread[j] = cpus;
 				else {
 					n += my_ffsl(cpus >> n);
-					global.cpu_map.thread[i][j] = (1UL << (n-1));
+					global.cpu_map.thread[j] = (1UL << (n-1));
 				}
 			}
 		}

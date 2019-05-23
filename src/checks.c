@@ -60,10 +60,7 @@
 #include <proto/log.h>
 #include <proto/dns.h>
 #include <proto/proto_udp.h>
-
-#ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
-#endif /* USE_OPENSSL */
 
 static int httpchk_expect(struct server *s, int done);
 static int tcpcheck_get_step_id(struct check *);
@@ -1488,11 +1485,15 @@ static struct task *server_warmup(struct task *t, void *context, unsigned short 
 	    (s->next_state != SRV_ST_STARTING))
 		return t;
 
+	HA_SPIN_LOCK(SERVER_LOCK, &s->lock);
+
 	/* recalculate the weights and update the state */
 	server_recalc_eweight(s, 1);
 
 	/* probably that we can refill this server with a bit more connections */
 	pendconn_grab_from_px(s);
+
+	HA_SPIN_UNLOCK(SERVER_LOCK, &s->lock);
 
 	/* get back there in 1 second or 1/20th of the slowstart interval,
 	 * whichever is greater, resulting in small 5% steps.
@@ -1541,7 +1542,7 @@ static int connect_conn_chk(struct task *t)
 	struct protocol *proto;
 	struct tcpcheck_rule *tcp_rule = NULL;
 	int ret;
-	int quickack;
+	int connflags = 0;
 
 	/* we cannot have a connection here */
 	if (conn)
@@ -1633,14 +1634,15 @@ static int connect_conn_chk(struct task *t)
 	cs_attach(cs, check, &check_conn_cb);
 
 	/* only plain tcp-check supports quick ACK */
-	quickack = check->type == 0 || check->type == PR_O2_TCPCHK_CHK;
-
-	if (tcp_rule && tcp_rule->action == TCPCHK_ACT_EXPECT)
-		quickack = 0;
+	if (check->type != 0)
+		connflags |= CONNECT_HAS_DATA;
+	if ((check->type == 0 || check->type == PR_O2_TCPCHK_CHK) &&
+	    (!tcp_rule || tcp_rule->action != TCPCHK_ACT_EXPECT))
+		connflags |= CONNECT_DELACK_ALWAYS;
 
 	ret = SF_ERR_INTERNAL;
 	if (proto && proto->connect)
-		ret = proto->connect(conn, check->type, quickack ? 2 : 0);
+		ret = proto->connect(conn, connflags);
 
 
 #ifdef USE_OPENSSL
@@ -2841,8 +2843,7 @@ static int tcpcheck_main(struct check *check)
 			ret = SF_ERR_INTERNAL;
 			if (proto && proto->connect)
 				ret = proto->connect(conn,
-						     1 /* I/O polling is always needed */,
-						     (next && next->action == TCPCHK_ACT_EXPECT) ? 0 : 2);
+						     CONNECT_HAS_DATA /* I/O polling is always needed */ | (next && next->action == TCPCHK_ACT_EXPECT) ? 0 : CONNECT_DELACK_ALWAYS);
 			if (check->current_step->conn_opts & TCPCHK_OPT_SEND_PROXY) {
 				conn->send_proxy_ofs = 1;
 				conn->flags |= CO_FL_SEND_PROXY;
@@ -3189,8 +3190,7 @@ void email_alert_free(struct email_alert *alert)
 		LIST_DEL(&rule->list);
 		free(rule->comment);
 		free(rule->string);
-		if (rule->expect_regex)
-			regex_free(rule->expect_regex);
+		regex_free(rule->expect_regex);
 		pool_free(pool_head_tcpcheck_rule, rule);
 	}
 	pool_free(pool_head_email_alert, alert);
@@ -3300,10 +3300,7 @@ int init_email_alert(struct mailers *mls, struct proxy *p, char **err)
 		struct email_alertq *q     = &queues[i];
 		struct check        *check = &q->check;
 
-		if (check->task) {
-			task_destroy(check->task);
-			check->task = NULL;
-		}
+		task_destroy(check->task);
 		free_check(check);
 	}
 	free(queues);

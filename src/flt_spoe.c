@@ -1275,9 +1275,7 @@ spoe_release_appctx(struct appctx *appctx)
 	}
 
 	/* Destroy the task attached to this applet */
-	if (spoe_appctx->task) {
-		task_destroy(spoe_appctx->task);
-	}
+	task_destroy(spoe_appctx->task);
 
 	/* Notify all waiting streams */
 	list_for_each_entry_safe(ctx, back, &spoe_appctx->waiting_queue, list) {
@@ -2182,6 +2180,7 @@ spoe_encode_message(struct stream *s, struct spoe_context *ctx,
 	list_for_each_entry(arg, &msg->args, list) {
 		ctx->frag_ctx.curarg = arg;
 		ctx->frag_ctx.curoff = UINT_MAX;
+		ctx->frag_ctx.curlen = 0;
 
 	  encode_argument:
 		if (ctx->frag_ctx.curoff != UINT_MAX)
@@ -2196,7 +2195,11 @@ spoe_encode_message(struct stream *s, struct spoe_context *ctx,
 
 		/* Fetch the argument value */
 		smp = sample_process(s->be, s->sess, s, dir|SMP_OPT_FINAL, arg->expr, NULL);
-		ret = spoe_encode_data(smp, &ctx->frag_ctx.curoff, buf, end);
+		if (smp) {
+			smp->ctx.a[0] = &ctx->frag_ctx.curlen;
+			smp->ctx.a[1] = &ctx->frag_ctx.curoff;
+		}
+		ret = spoe_encode_data(smp, buf, end);
 		if (ret == -1 || ctx->frag_ctx.curoff)
 			goto too_big;
 	}
@@ -4170,6 +4173,7 @@ parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 		arg.type = ARGT_STR;
 		arg.data.str.area = trash.area;
 		arg.data.str.data = trash.data;
+		arg.data.str.size = 0; /* Set it to 0 to not release it in vars_check_args() */
 		if (!vars_check_arg(&arg, err)) {
 			memprintf(err, "SPOE agent '%s': failed to register variable %s.%s (%s)",
 				  curagent->id, curagent->var_pfx, curagent->var_on_error, *err);
@@ -4186,6 +4190,7 @@ parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 		arg.type = ARGT_STR;
 		arg.data.str.area = trash.area;
 		arg.data.str.data = trash.data;
+		arg.data.str.size = 0;  /* Set it to 0 to not release it in vars_check_args() */
 		if (!vars_check_arg(&arg, err)) {
 			memprintf(err, "SPOE agent '%s': failed to register variable %s.%s (%s)",
 				  curagent->id, curagent->var_pfx, curagent->var_t_process, *err);
@@ -4202,6 +4207,7 @@ parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 		arg.type = ARGT_STR;
 		arg.data.str.area = trash.area;
 		arg.data.str.data = trash.data;
+		arg.data.str.size = 0;  /* Set it to 0 to not release it in vars_check_args() */
 		if (!vars_check_arg(&arg, err)) {
 			memprintf(err, "SPOE agent '%s': failed to register variable %s.%s (%s)",
 				  curagent->id, curagent->var_pfx, curagent->var_t_process, *err);
@@ -4407,6 +4413,7 @@ parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 		arg.type = ARGT_STR;
 		arg.data.str.area = trash.area;
 		arg.data.str.data = trash.data;
+		arg.data.str.size = 0;  /* Set it to 0 to not release it in vars_check_args() */
 		if (!vars_check_arg(&arg, err)) {
 			memprintf(err, "SPOE agent '%s': failed to register variable %s.%s (%s)",
 				  curagent->id, curagent->var_pfx, vph->name, *err);

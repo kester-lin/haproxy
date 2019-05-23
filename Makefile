@@ -11,6 +11,7 @@
 # explicitly specified :
 #   USE_EPOLL            : enable epoll() on Linux 2.6. Automatic.
 #   USE_KQUEUE           : enable kqueue() on BSD. Automatic.
+#   USE_EVPORTS          : enable event ports on SunOS systems. Automatic.
 #   USE_MY_EPOLL         : redefine epoll_* syscalls. Automatic.
 #   USE_MY_SPLICE        : redefine the splice syscall if build fails without.
 #   USE_NETFILTER        : enable netfilter on Linux. Automatic.
@@ -50,6 +51,7 @@
 #   USE_WURFL            : enable WURFL detection library from Scientiamobile
 #   USE_SYSTEMD          : enable sd_notify() support.
 #   USE_OBSOLETE_LINKER  : use when the linker fails to emit __start_init/__stop_init
+#   USE_THREAD_DUMP      : use the more advanced thread state dump system. Automatic.
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
 # "USE_xxx=" (empty string).
@@ -285,7 +287,7 @@ use_opts = USE_EPOLL USE_KQUEUE USE_MY_EPOLL USE_MY_SPLICE USE_NETFILTER      \
            USE_GETADDRINFO USE_OPENSSL USE_LUA USE_FUTEX USE_ACCEPT4          \
            USE_MY_ACCEPT4 USE_ZLIB USE_SLZ USE_CPU_AFFINITY USE_TFO USE_NS    \
            USE_DL USE_RT USE_DEVICEATLAS USE_51DEGREES USE_WURFL USE_SYSTEMD  \
-           USE_OBSOLETE_LINKER USE_PRCTL
+           USE_OBSOLETE_LINKER USE_PRCTL USE_THREAD_DUMP USE_EVPORTS
 
 #### Target system options
 # Depending on the target platform, some options are set, as well as some
@@ -344,15 +346,16 @@ ifeq ($(TARGET),linux2628)
   set_target_defaults = $(call default_opts, \
     USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT USE_CRYPT_H USE_NETFILTER  \
     USE_CPU_AFFINITY USE_THREAD USE_EPOLL USE_FUTEX USE_LINUX_TPROXY          \
-    USE_ACCEPT4 USE_LINUX_SPLICE USE_PRCTL ASSUME_SPLICE_WORKS)
+    USE_ACCEPT4 USE_LINUX_SPLICE USE_PRCTL USE_THREAD_DUMP)
 endif
 
 # Solaris 8 and above
 ifeq ($(TARGET),solaris)
   # We also enable getaddrinfo() which works since solaris 8.
   set_target_defaults = $(call default_opts, \
-    USE_POLL USE_TPROXY USE_LIBCRYPT USE_CRYPT_H USE_GETADDRINFO USE_THREAD)
-  TARGET_CFLAGS  = -fomit-frame-pointer -DFD_SETSIZE=65536 -D_REENTRANT -D_XOPEN_SOURCE=500 -D__EXTENSIONS__
+    USE_POLL USE_TPROXY USE_LIBCRYPT USE_CRYPT_H USE_GETADDRINFO USE_THREAD \
+    USE_OBSOLETE_LINKER USE_EVPORTS)
+  TARGET_CFLAGS  = -DFD_SETSIZE=65536 -D_REENTRANT -D_XOPEN_SOURCE=500 -D__EXTENSIONS__
   TARGET_LDFLAGS = -lnsl -lsocket
 endif
 
@@ -462,25 +465,8 @@ BUILD_FEATURES := $(foreach opt,$(patsubst USE_%,%,$(use_opts)),$(if $(USE_$(opt
 # possibly be unused though)
 OPTIONS_CFLAGS += $(foreach opt,$(use_opts),$(if $($(opt)),-D$(opt),))
 
-ifneq ($(USE_LINUX_SPLICE),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_LINUX_SPLICE
-endif
-
-ifneq ($(USE_TPROXY),)
-OPTIONS_CFLAGS += -DTPROXY
-endif
-
-ifneq ($(USE_LINUX_TPROXY),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_LINUX_TPROXY
-endif
-
 ifneq ($(USE_LIBCRYPT),)
-OPTIONS_CFLAGS  += -DCONFIG_HAP_CRYPT
 OPTIONS_LDFLAGS += -lcrypt
-endif
-
-ifneq ($(USE_CRYPT_H),)
-OPTIONS_CFLAGS  += -DNEED_CRYPT_H
 endif
 
 ifneq ($(USE_SLZ),)
@@ -500,31 +486,23 @@ OPTIONS_LDFLAGS += $(if $(ZLIB_LIB),-L$(ZLIB_LIB)) -lz
 endif
 
 ifneq ($(USE_POLL),)
-OPTIONS_CFLAGS += -DENABLE_POLL
 OPTIONS_OBJS   += src/ev_poll.o
 endif
 
 ifneq ($(USE_EPOLL),)
-OPTIONS_CFLAGS += -DENABLE_EPOLL
 OPTIONS_OBJS   += src/ev_epoll.o
 endif
 
 ifneq ($(USE_KQUEUE),)
-OPTIONS_CFLAGS += -DENABLE_KQUEUE
 OPTIONS_OBJS   += src/ev_kqueue.o
+endif
+
+ifneq ($(USE_EVPORTS),)
+OPTIONS_OBJS   += src/ev_evports.o
 endif
 
 ifneq ($(USE_VSYSCALL),)
 OPTIONS_OBJS   += src/i386-linux-vsys.o
-OPTIONS_CFLAGS += -DCONFIG_HAP_LINUX_VSYSCALL
-endif
-
-ifneq ($(ASSUME_SPLICE_WORKS),)
-OPTIONS_CFLAGS += -DASSUME_SPLICE_WORKS
-endif
-
-ifneq ($(USE_NETFILTER),)
-OPTIONS_CFLAGS += -DNETFILTER
 endif
 
 ifneq ($(USE_REGPARM),)
@@ -748,7 +726,6 @@ COPTS += -finstrument-functions
 endif
 
 ifneq ($(USE_NS),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_NS
 OPTIONS_OBJS  += src/namespace.o
 endif
 
@@ -812,7 +789,7 @@ OBJS = src/proto_http.o src/cfgparse-listen.o src/proto_htx.o src/stream.o    \
        src/xxhash.o src/hpack-enc.o src/h2.o src/freq_ctr.o src/lru.o         \
        src/protocol.o src/arg.o src/hpack-huff.o src/hdr_idx.o src/base64.o   \
        src/hash.o src/mailers.o src/activity.o src/http_msg.o src/version.o   \
-       src/mworker.o src/mworker-prog.o src/cuju_ft.o
+       src/mworker.o src/mworker-prog.o src/debug.o src/wdt.o src/cuju_ft.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o $(EBTREE_DIR)/eb32sctree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \

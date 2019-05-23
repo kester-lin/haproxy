@@ -501,8 +501,10 @@ int htx_process_req_common(struct stream *s, struct channel *req, int an_bit, st
 
 	htx = htxbuf(&req->buf);
 
-	/* just in case we have some per-backend tracking */
-	stream_inc_be_http_req_ctr(s);
+	/* just in case we have some per-backend tracking. Only called the first
+	 * execution of the analyser. */
+	if (!s->current_rule || s->current_rule_list != &px->http_req_rules)
+		stream_inc_be_http_req_ctr(s);
 
 	/* evaluate http-request rules */
 	if (!LIST_ISEMPTY(&px->http_req_rules)) {
@@ -1384,6 +1386,49 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	return 0;
 }
 
+/* Reset the stream and the backend stream_interface to a situation suitable for attemption connection */
+/* Returns 0 if we can attempt to retry, -1 otherwise */
+static __inline int do_l7_retry(struct stream *s, struct stream_interface *si)
+{
+	struct channel *req, *res;
+	int co_data;
+
+	si->conn_retries--;
+	if (si->conn_retries < 0)
+		return -1;
+
+	if (objt_server(s->target))
+		_HA_ATOMIC_ADD(&__objt_server(s->target)->counters.retries, 1);
+	_HA_ATOMIC_ADD(&s->be->be_counters.retries, 1);
+
+	req = &s->req;
+	res = &s->res;
+	/* Remove any write error from the request, and read error from the response */
+	req->flags &= ~(CF_WRITE_ERROR | CF_WRITE_TIMEOUT | CF_SHUTW | CF_SHUTW_NOW);
+	res->flags &= ~(CF_READ_ERROR | CF_READ_TIMEOUT | CF_SHUTR | CF_EOI | CF_READ_NULL | CF_SHUTR_NOW);
+	res->analysers = 0;
+	si->flags &= ~(SI_FL_ERR | SI_FL_EXP | SI_FL_RXBLK_SHUT);
+	si->state = SI_ST_REQ;
+	si->exp = TICK_ETERNITY;
+	res->rex = TICK_ETERNITY;
+	res->to_forward = 0;
+	res->analyse_exp = TICK_ETERNITY;
+	res->total = 0;
+	s->flags &= ~(SF_ASSIGNED | SF_ADDR_SET | SF_ERR_SRVTO | SF_ERR_SRVCL);
+	si_release_endpoint(&s->si[1]);
+	b_free(&req->buf);
+	/* Swap the L7 buffer with the channel buffer */
+	/* We know we stored the co_data as b_data, so get it there */
+	co_data = b_data(&si->l7_buffer);
+	b_set_data(&si->l7_buffer, b_size(&si->l7_buffer));
+	b_xfer(&req->buf, &si->l7_buffer, b_data(&si->l7_buffer));
+
+	co_set_data(req, co_data);
+	b_reset(&res->buf);
+	co_set_data(res, 0);
+	return 0;
+}
+
 /* This stream analyser waits for a complete HTTP response. It returns 1 if the
  * processing can continue on next analysers, or zero if it either needs more
  * data or wants to immediately abort the response (eg: timeout, error, ...). It
@@ -1404,6 +1449,7 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	struct http_txn *txn = s->txn;
 	struct http_msg *msg = &txn->rsp;
 	struct htx *htx;
+	struct stream_interface *si_b = &s->si[1];
 	struct connection *srv_conn;
 	struct htx_sl *sl;
 	int n;
@@ -1448,6 +1494,23 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		/* 1: have we encountered a read error ? */
 		if (rep->flags & CF_READ_ERROR) {
+			struct connection *conn = NULL;
+
+			if (objt_cs(s->si[1].end))
+				conn = objt_cs(s->si[1].end)->conn;
+
+			if (si_b->flags & SI_FL_L7_RETRY &&
+			    (!conn || conn->err_code != CO_ER_SSL_EARLY_FAILED)) {
+				/* If we arrive here, then CF_READ_ERROR was
+				 * set by si_cs_recv() because we matched a
+				 * status, overwise it would have removed
+				 * the SI_FL_L7_RETRY flag, so it's ok not
+				 * to check s->be->retry_type.
+				 */
+				if (co_data(rep) || do_l7_retry(s, si_b) == 0)
+					return 0;
+			}
+
 			if (txn->flags & TX_NOT_FIRST)
 				goto abort_keep_alive;
 
@@ -1463,11 +1526,12 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 			/* Check to see if the server refused the early data.
 			 * If so, just send a 425
 			 */
-			if (objt_cs(s->si[1].end)) {
-				struct connection *conn = objt_cs(s->si[1].end)->conn;
-
-				if (conn->err_code == CO_ER_SSL_EARLY_FAILED)
-					txn->status = 425;
+			if (conn->err_code == CO_ER_SSL_EARLY_FAILED) {
+				if ((s->be->retry_type & PR_RE_EARLY_ERROR) &&
+				    (si_b->flags & SI_FL_L7_RETRY) &&
+				    do_l7_retry(s, si_b) == 0)
+					return 0;
+				txn->status = 425;
 			}
 
 			s->si[1].flags |= SI_FL_NOLINGER;
@@ -1482,6 +1546,11 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		/* 2: read timeout : return a 504 to the client. */
 		else if (rep->flags & CF_READ_TIMEOUT) {
+			if ((si_b->flags & SI_FL_L7_RETRY) &&
+			    (s->be->retry_type & PR_RE_TIMEOUT)) {
+				if (co_data(rep) || do_l7_retry(s, si_b) == 0)
+					return 0;
+			}
 			_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
 			if (objt_server(s->target)) {
 				_HA_ATOMIC_ADD(&__objt_server(s->target)->counters.failed_resp, 1);
@@ -1522,6 +1591,12 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		/* 4: close from server, capture the response if the server has started to respond */
 		else if (rep->flags & CF_SHUTR) {
+			if ((si_b->flags & SI_FL_L7_RETRY) &&
+			    (s->be->retry_type & PR_RE_DISCONNECTED)) {
+				if (co_data(rep) || do_l7_retry(s, si_b) == 0)
+					return 0;
+			}
+
 			if (txn->flags & TX_NOT_FIRST)
 				goto abort_keep_alive;
 
@@ -1742,6 +1817,10 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		_HA_ATOMIC_ADD(&__objt_server(s->target)->counters.failed_resp, 1);
 		health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_HDRRSP);
 	}
+	if ((s->be->retry_type & PR_RE_JUNK_REQUEST) &&
+	    (si_b->flags & SI_FL_L7_RETRY) &&
+	    do_l7_retry(s, si_b) == 0)
+		return 0;
 	txn->status = 502;
 	s->si[1].flags |= SI_FL_NOLINGER;
 	htx_reply_and_close(s, txn->status, htx_error_message(s));
@@ -2824,7 +2903,7 @@ static enum rule_result htx_req_get_intercept_rule(struct proxy *px, struct list
 				if (htx_transform_header(s, &s->req, htx,
 							 ist2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len),
 							 &rule->arg.hdr_add.fmt,
-							 &rule->arg.hdr_add.re, rule->action)) {
+							 rule->arg.hdr_add.re, rule->action)) {
 					rule_ret = HTTP_RULE_RES_BADREQ;
 					goto end;
 				}
@@ -3166,7 +3245,7 @@ resume_execution:
 				if (htx_transform_header(s, &s->res, htx,
 							 ist2(rule->arg.hdr_add.name, rule->arg.hdr_add.name_len),
 							 &rule->arg.hdr_add.fmt,
-							 &rule->arg.hdr_add.re, rule->action)) {
+							 rule->arg.hdr_add.re, rule->action)) {
 					rule_ret = HTTP_RULE_RES_BADREQ;
 					goto end;
 				}

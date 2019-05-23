@@ -40,19 +40,6 @@
 #include <eb32sctree.h>
 #include <types/protocol.h>
 
-#ifndef LLONG_MAX
-# define LLONG_MAX 9223372036854775807LL
-# define LLONG_MIN (-LLONG_MAX - 1LL)
-#endif
-
-#ifndef ULLONG_MAX
-# define ULLONG_MAX	(LLONG_MAX * 2ULL + 1)
-#endif
-
-#ifndef LONGBITS
-#define LONGBITS  ((unsigned int)sizeof(long) * 8)
-#endif
-
 /* size used for max length of decimal representation of long long int. */
 #define NB_LLMAX_STR (sizeof("-9223372036854775807")-1)
 
@@ -446,7 +433,7 @@ int url2sa(const char *url, int ulen, struct sockaddr_storage *addr, struct spli
  * is returned upon error, with errno set. AF_INET, AF_INET6 and AF_UNIX are
  * supported.
  */
-int addr_to_str(struct sockaddr_storage *addr, char *str, int size);
+int addr_to_str(const struct sockaddr_storage *addr, char *str, int size);
 
 /* Tries to convert a sockaddr_storage port to text form. Upon success, the
  * address family is returned so that it's easy for the caller to adapt to the
@@ -454,7 +441,7 @@ int addr_to_str(struct sockaddr_storage *addr, char *str, int size);
  * is returned upon error, with errno set. AF_INET, AF_INET6 and AF_UNIX are
  * supported.
  */
-int port_to_str(struct sockaddr_storage *addr, char *str, int size);
+int port_to_str(const struct sockaddr_storage *addr, char *str, int size);
 
 /* check if the given address is local to the system or not. It will return
  * -1 when it's not possible to know, 0 when the address is not local, 1 when
@@ -1423,6 +1410,8 @@ int dump_text(struct buffer *out, const char *buf, int bsize);
 int dump_binary(struct buffer *out, const char *buf, int bsize);
 int dump_text_line(struct buffer *out, const char *buf, int bsize, int len,
                    int *line, int ptr);
+void dump_hex(struct buffer *out, const char *pfx, const void *buf, int len, int unsafe);
+int may_access(const void *ptr);
 
 /* same as realloc() except that ptr is also freed upon failure */
 static inline void *my_realloc2(void *ptr, size_t size)

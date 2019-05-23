@@ -431,8 +431,7 @@ static int h1_init(struct connection *conn, struct proxy *proxy, struct session 
 	return 0;
 
   fail:
-	if (t)
-		task_destroy(t);
+	task_destroy(t);
 	if (h1c->wait_event.task)
 		tasklet_free(h1c->wait_event.task);
 	pool_free(pool_head_h1c, h1c);
@@ -1220,7 +1219,7 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				if (h1s->flags & H1S_F_HAVE_I_TLR)
 					goto skip_tlr_parsing;
 
-				ret = h1_measure_trailers(buf, *ofs, *ofs + max);
+				ret = h1_measure_trailers(buf, *ofs, max);
 				if (ret > data_space)
 					ret = (htx_is_empty(htx) ? -1 : 0);
 				if (ret <= 0)
@@ -1643,12 +1642,6 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 					}
 				}
 				h1m->state = H1_MSG_DONE;
-				break;
-
-			case HTX_BLK_OOB:
-				v = htx_get_blk_value(chn_htx, blk);
-				if (!chunk_memcat(tmp, v.ptr, v.len))
-					goto copy;
 				break;
 
 			default:
@@ -2185,17 +2178,15 @@ static int h1_unsubscribe(struct conn_stream *cs, int event_type, void *param)
 
 	if (event_type & SUB_RETRY_RECV) {
 		sw = param;
-		if (h1s->recv_wait == sw) {
-			sw->events &= ~SUB_RETRY_RECV;
-			h1s->recv_wait = NULL;
-		}
+		BUG_ON(h1s->recv_wait != sw);
+		sw->events &= ~SUB_RETRY_RECV;
+		h1s->recv_wait = NULL;
 	}
 	if (event_type & SUB_RETRY_SEND) {
 		sw = param;
-		if (h1s->send_wait == sw) {
-			sw->events &= ~SUB_RETRY_SEND;
-			h1s->send_wait = NULL;
-		}
+		BUG_ON(h1s->send_wait != sw);
+		sw->events &= ~SUB_RETRY_SEND;
+		h1s->send_wait = NULL;
 	}
 	return 0;
 }
@@ -2212,19 +2203,15 @@ static int h1_subscribe(struct conn_stream *cs, int event_type, void *param)
 	switch (event_type) {
 		case SUB_RETRY_RECV:
 			sw = param;
-			if (!(sw->events & SUB_RETRY_RECV)) {
-				sw->events |= SUB_RETRY_RECV;
-				sw->handle = h1s;
-				h1s->recv_wait = sw;
-			}
+			BUG_ON(h1s->recv_wait != NULL || (sw->events & SUB_RETRY_RECV));
+			sw->events |= SUB_RETRY_RECV;
+			h1s->recv_wait = sw;
 			return 0;
 		case SUB_RETRY_SEND:
 			sw = param;
-			if (!(sw->events & SUB_RETRY_SEND)) {
-				sw->events |= SUB_RETRY_SEND;
-				sw->handle = h1s;
-				h1s->send_wait = sw;
-			}
+			BUG_ON(h1s->send_wait != NULL || (sw->events & SUB_RETRY_SEND));
+			sw->events |= SUB_RETRY_SEND;
+			h1s->send_wait = sw;
 			return 0;
 		default:
 			break;
@@ -2286,7 +2273,7 @@ static size_t h1_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	return total;
 }
 
-#if defined(CONFIG_HAP_LINUX_SPLICE)
+#if defined(USE_LINUX_SPLICE)
 /* Send and get, using splicing */
 static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int count)
 {
@@ -2392,7 +2379,7 @@ static const struct mux_ops mux_h1_ops = {
 	.used_streams = h1_used_streams,
 	.rcv_buf     = h1_rcv_buf,
 	.snd_buf     = h1_snd_buf,
-#if defined(CONFIG_HAP_LINUX_SPLICE)
+#if defined(USE_LINUX_SPLICE)
 	.rcv_pipe    = h1_rcv_pipe,
 	.snd_pipe    = h1_snd_pipe,
 #endif
@@ -2403,7 +2390,7 @@ static const struct mux_ops mux_h1_ops = {
 	.show_fd     = h1_show_fd,
 	.reset       = h1_reset,
 	.flags       = MX_FL_HTX,
-	.name        = "h1",
+	.name        = "H1",
 };
 
 

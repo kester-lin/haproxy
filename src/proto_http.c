@@ -1581,7 +1581,7 @@ resume_execution:
 			if (http_transform_header(s, &txn->req, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action)) {
+			                          rule->arg.hdr_add.re, rule->action)) {
 				rule_ret = HTTP_RULE_RES_BADREQ;
 				goto end;
 			}
@@ -1939,7 +1939,7 @@ resume_execution:
 			if (http_transform_header(s, &txn->rsp, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action)) {
+			                          rule->arg.hdr_add.re, rule->action)) {
 				rule_ret = HTTP_RULE_RES_BADREQ;
 				goto end;
 			}
@@ -2533,8 +2533,10 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 		ci_data(req),
 		req->analysers);
 
-	/* just in case we have some per-backend tracking */
-	stream_inc_be_http_req_ctr(s);
+	/* just in case we have some per-backend tracking. Only called the first
+	 * execution of the analyser. */
+	if (!s->current_rule || s->current_rule_list != &px->http_req_rules)
+		stream_inc_be_http_req_ctr(s);
 
 	/* evaluate http-request rules */
 	if (!LIST_ISEMPTY(&px->http_req_rules)) {
@@ -3449,7 +3451,8 @@ void http_end_txn_clean_session(struct stream *s)
 	s->task->calls     = 0;
 	s->task->cpu_time  = 0;
 	s->task->lat_time  = 0;
-	s->task->call_date = (profiling & HA_PROF_TASKS) ? now_mono_time() : 0;
+	s->task->call_date = ((profiling & HA_PROF_TASKS_MASK) >= HA_PROF_TASKS_AUTO) ? now_mono_time() : 0;
+	s->call_rate.curr_sec = s->call_rate.curr_ctr = s->call_rate.prev_ctr = 0;
 
 	s->logs.accept_date = date; /* user-visible date for logging */
 	s->logs.tv_accept = now;  /* corrected date for internal use */

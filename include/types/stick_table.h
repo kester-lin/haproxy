@@ -31,6 +31,7 @@
 #include <eb32tree.h>
 #include <common/memory.h>
 #include <types/freq_ctr.h>
+#include <types/peers.h>
 #include <types/sample.h>
 
 /* The types of extra data we can store in a stick table */
@@ -143,7 +144,16 @@ struct stksess {
 
 /* stick table */
 struct stktable {
-	char *id;		  /* table id name */
+	char *id;		  /* local table id name. */
+	char *nid;		  /* table id name sent over the network with peers protocol. */
+	struct stktable *next;    /* The stick-table may be linked when belonging to
+	                           * the same configuration section.
+	                           */
+	struct {
+		const char *file;     /* The file where the stick-table is declared. */
+		int line;             /* The line in this <file> the stick-table is declared. */
+	} conf;
+	struct ebpt_node name;    /* Stick-table are lookup by name here. */
 	struct eb_root keys;      /* head of sticky session tree */
 	struct eb_root exps;      /* head of sticky session expiration tree */
 	struct eb_root updates;   /* head of sticky updates sequence tree */
@@ -175,6 +185,8 @@ struct stktable {
 		unsigned int u;
 		void *p;
 	} data_arg[STKTABLE_DATA_TYPES]; /* optional argument of each data type */
+	struct proxy *proxy;      /* The proxy this stick-table is attached to, if any.*/
+	struct proxy *proxies_list; /* The list of proxies which reference this stick-table. */
 };
 
 extern struct stktable_data_type stktable_data_types[STKTABLE_DATA_TYPES];

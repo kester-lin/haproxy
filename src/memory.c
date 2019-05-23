@@ -252,7 +252,7 @@ void pool_gc(struct pool_head *pool_ctx)
 				break;
 			new.free_list = *POOL_LINK(entry, cmp.free_list);
 			new.seq = cmp.seq + 1;
-			if (__ha_cas_dw(&entry->free_list, &cmp, &new) == 0)
+			if (HA_ATOMIC_DWCAS(&entry->free_list, &cmp, &new) == 0)
 				continue;
 			free(cmp.free_list);
 			_HA_ATOMIC_SUB(&entry->allocated, 1);
@@ -594,7 +594,7 @@ int mem_should_fail(const struct pool_head *pool)
 		else
 			ret = 0;
 	}
-	HA_SPIN_LOCK(START_LOCK, &mem_fail_lock);
+	HA_SPIN_LOCK(OTHER_LOCK, &mem_fail_lock);
 	n = snprintf(&mem_fail_str[mem_fail_cur_idx * MEM_FAIL_MAX_CHAR],
 	    MEM_FAIL_MAX_CHAR - 2,
 	    "%d %.18s %d %d", mem_fail_cur_idx, pool->name, ret, tid);
@@ -607,7 +607,7 @@ int mem_should_fail(const struct pool_head *pool)
 	mem_fail_cur_idx++;
 	if (mem_fail_cur_idx == MEM_FAIL_MAX_STR)
 		mem_fail_cur_idx = 0;
-	HA_SPIN_UNLOCK(START_LOCK, &mem_fail_lock);
+	HA_SPIN_UNLOCK(OTHER_LOCK, &mem_fail_lock);
 	return ret;
 
 }

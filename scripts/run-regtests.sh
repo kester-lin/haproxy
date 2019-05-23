@@ -49,12 +49,12 @@ _help()
 
   Including text below into a .vtc file will check for its requirements
   related to haproxy's target and compilation options
-    # Below targets are not capable of completing this test succesfully
+    # Below targets are not capable of completing this test successfully
     #EXCLUDE_TARGET=freebsd, abns sockets are not available on freebsd
 
     #EXCLUDE_TARGETS=dos,freebsd,windows
 
-    # Below option is required to complete this test succesfully
+    # Below option is required to complete this test successfully
     #REQUIRE_OPTION=OPENSSL, this test needs OPENSSL compiled in.
 
     #REQUIRE_OPTIONS=ZLIB|SLZ,OPENSSL,LUA
@@ -346,7 +346,7 @@ if [ -n "$testlist" ]; then
   if [ -n "$jobcount" ]; then
     jobcount="-j $jobcount"
   fi
-  cmd="$VTEST_PROGRAM -k -t 10 -Dno-htx=${no_htx} $keep_logs $verbose $debug $jobcount $vtestparams $testlist"
+  cmd="$VTEST_PROGRAM -b $((2<<20)) -k -t 10 -Dno-htx=${no_htx} $keep_logs $verbose $debug $jobcount $vtestparams $testlist"
   eval $cmd
   _vtresult=$?
 else
@@ -355,7 +355,7 @@ fi
 
 
 if [ $_vtresult -eq 0 ]; then
-  # all tests were succesfull, removing tempdir (the last part.)
+  # all tests were successful, removing tempdir (the last part.)
   # ignore errors is the directory is not empty or if it does not exist
    rmdir "$TESTDIR" 2>/dev/null
 fi

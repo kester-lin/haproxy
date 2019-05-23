@@ -82,6 +82,8 @@
 #define GTUNE_LISTENER_MQ        (1<<12)
 #define GTUNE_SET_DUMPABLE       (1<<13)
 
+#define GTUNE_USE_EVPORTS        (1<<14)
+
 /* Access level for a stats socket */
 #define ACCESS_LVL_NONE     0
 #define ACCESS_LVL_USER     1
@@ -188,8 +190,8 @@ struct global {
 	struct vars   vars;         /* list of variables for the process scope. */
 #ifdef USE_CPU_AFFINITY
 	struct {
-		unsigned long proc[MAX_PROCS];             /* list of CPU masks for the 32/64 first processes */
-		unsigned long thread[MAX_PROCS][MAX_THREADS]; /* list of CPU masks for the 32/64 first threads per process */
+		unsigned long proc[MAX_PROCS];      /* list of CPU masks for the 32/64 first processes */
+		unsigned long thread[MAX_THREADS];  /* list of CPU masks for the 32/64 first threads */
 	} cpu_map;
 #endif
 };
@@ -259,6 +261,19 @@ extern int atexit_flag;
 #define WARN_CLITO_DEPRECATED       0x00000008
 #define WARN_SRVTO_DEPRECATED       0x00000010
 #define WARN_CONTO_DEPRECATED       0x00000020
+#define WARN_FORCECLOSE_DEPRECATED  0x00000040
+
+#define WARN_REQREP_DEPRECATED      0x00000080
+#define WARN_REQDEL_DEPRECATED      0x00000100
+#define WARN_REQDENY_DEPRECATED     0x00000200
+#define WARN_REQPASS_DEPRECATED     0x00000400
+#define WARN_REQALLOW_DEPRECATED    0x00000800
+#define WARN_REQTARPIT_DEPRECATED   0x00001000
+#define WARN_REQADD_DEPRECATED      0x00002000
+#define WARN_RSPREP_DEPRECATED      0x00004000
+#define WARN_RSPDEL_DEPRECATED      0x00008000
+#define WARN_RSPDENY_DEPRECATED     0x00010000
+#define WARN_RSPADD_DEPRECATED      0x00020000
 
 /* to be used with warned and WARN_* */
 static inline int already_warned(unsigned int warning)
@@ -289,8 +304,10 @@ void hap_register_build_opts(const char *str, int must_free);
 void hap_register_post_check(int (*fct)());
 void hap_register_post_deinit(void (*fct)());
 
+void hap_register_per_thread_alloc(int (*fct)());
 void hap_register_per_thread_init(int (*fct)());
 void hap_register_per_thread_deinit(void (*fct)());
+void hap_register_per_thread_free(int (*fct)());
 
 void mworker_accept_wrapper(int fd);
 void mworker_reload();
@@ -307,6 +324,10 @@ void mworker_reload();
 #define REGISTER_POST_DEINIT(fct) \
 	INITCALL1(STG_REGISTER, hap_register_post_deinit, (fct))
 
+/* simplified way to declare a per-thread allocation callback in a file */
+#define REGISTER_PER_THREAD_ALLOC(fct) \
+	INITCALL1(STG_REGISTER, hap_register_per_thread_alloc, (fct))
+
 /* simplified way to declare a per-thread init callback in a file */
 #define REGISTER_PER_THREAD_INIT(fct) \
 	INITCALL1(STG_REGISTER, hap_register_per_thread_init, (fct))
@@ -314,6 +335,10 @@ void mworker_reload();
 /* simplified way to declare a per-thread deinit callback in a file */
 #define REGISTER_PER_THREAD_DEINIT(fct) \
 	INITCALL1(STG_REGISTER, hap_register_per_thread_deinit, (fct))
+
+/* simplified way to declare a per-thread free callback in a file */
+#define REGISTER_PER_THREAD_FREE(fct) \
+	INITCALL1(STG_REGISTER, hap_register_per_thread_free, (fct))
 
 #endif /* _TYPES_GLOBAL_H */
 

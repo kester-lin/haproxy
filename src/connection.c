@@ -25,10 +25,7 @@
 #include <proto/proto_tcp.h>
 #include <proto/stream_interface.h>
 #include <proto/sample.h>
-
-#ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
-#endif
 
 DECLARE_POOL(pool_head_connection, "connection",  sizeof(struct connection));
 DECLARE_POOL(pool_head_connstream, "conn_stream", sizeof(struct conn_stream));
@@ -322,18 +319,16 @@ int conn_unsubscribe(struct connection *conn, void *xprt_ctx, int event_type, vo
 
 	if (event_type & SUB_RETRY_RECV) {
 		sw = param;
-		if (sw->events & SUB_RETRY_RECV) {
-			conn->recv_wait = NULL;
-			sw->events &= ~SUB_RETRY_RECV;
-		}
+		BUG_ON(conn->recv_wait != sw);
+		conn->recv_wait = NULL;
+		sw->events &= ~SUB_RETRY_RECV;
 		__conn_xprt_stop_recv(conn);
 	}
 	if (event_type & SUB_RETRY_SEND) {
 		sw = param;
-		if (sw->events & SUB_RETRY_SEND) {
-			conn->send_wait = NULL;
-			sw->events &= ~SUB_RETRY_SEND;
-		}
+		BUG_ON(conn->send_wait != sw);
+		conn->send_wait = NULL;
+		sw->events &= ~SUB_RETRY_SEND;
 		__conn_xprt_stop_send(conn);
 	}
 	conn_update_xprt_polling(conn);
@@ -346,19 +341,17 @@ int conn_subscribe(struct connection *conn, void *xprt_ctx, int event_type, void
 
 	if (event_type & SUB_RETRY_RECV) {
 		sw = param;
-		if (!(sw->events & SUB_RETRY_RECV)) {
-			sw->events |= SUB_RETRY_RECV;
-			conn->recv_wait = sw;
-		}
+		BUG_ON(conn->recv_wait != NULL || (sw->events & SUB_RETRY_RECV));
+		sw->events |= SUB_RETRY_RECV;
+		conn->recv_wait = sw;
 		event_type &= ~SUB_RETRY_RECV;
 		__conn_xprt_want_recv(conn);
 	}
 	if (event_type & SUB_RETRY_SEND) {
 		sw = param;
-		if (!(sw->events & SUB_RETRY_SEND)) {
-			sw->events |= SUB_RETRY_SEND;
-			conn->send_wait = sw;
-		}
+		BUG_ON(conn->send_wait != NULL || (sw->events & SUB_RETRY_SEND));
+		sw->events |= SUB_RETRY_SEND;
+		conn->send_wait = sw;
 		event_type &= ~SUB_RETRY_SEND;
 		__conn_xprt_want_send(conn);
 	}
@@ -701,7 +694,7 @@ not_v1:
 						goto bad_header;
 					break;
 				}
-#ifdef CONFIG_HAP_NS
+#ifdef USE_NS
 				case PP2_TYPE_NETNS: {
 					const struct netns_entry *ns;
 					ns = netns_store_lookup((char*)tlv_packet->value, tlv_len);
@@ -1235,7 +1228,7 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 	}
 #endif
 
-#ifdef CONFIG_HAP_NS
+#ifdef USE_NS
 	if (remote && (remote->proxy_netns)) {
 		if ((buf_len - ret) < sizeof(struct tlv))
 			return 0;

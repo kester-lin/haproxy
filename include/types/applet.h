@@ -22,6 +22,7 @@
 #ifndef _TYPES_APPLET_H
 #define _TYPES_APPLET_H
 
+#include <types/freq_ctr.h>
 #include <types/hlua.h>
 #include <types/obj_type.h>
 #include <types/proxy.h>
@@ -70,6 +71,7 @@ struct appctx {
 	struct buffer_wait buffer_wait; /* position in the list of objects waiting for a buffer */
 	unsigned long thread_mask;      /* mask of thread IDs authorized to process the applet */
 	struct task *t;                  /* task associated to the applet */
+	struct freq_ctr call_rate;       /* appctx call rate */
 
 	union {
 		struct {
@@ -142,7 +144,7 @@ struct appctx {
 		} errors;
 		struct {
 			void *target;		/* table we want to dump, or NULL for all */
-			struct proxy *proxy;	/* table being currently dumped (first if NULL) */
+			struct stktable *t;	/* table being currently dumped (first if NULL) */
 			struct stksess *entry;	/* last entry we were trying to dump (or first if NULL) */
 			long long value;	/* value to compare against */
 			signed char data_type;	/* type of data to compare, or -1 if none */

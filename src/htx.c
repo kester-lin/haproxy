@@ -345,10 +345,10 @@ struct htx_ret htx_drain(struct htx *htx, uint32_t count)
 }
 
 /* Tries to append data to the last inserted block, if the type matches and if
- * there is enough non-wrapping space. Only DATA and TRAILERS content can be
- * appended. If the append fails, a new block is inserted. If an error occurred,
- * NULL is returned. Otherwise, on success, the updated block (or the new one)
- * is returned.
+ * there is enough non-wrapping space. Only DATA content can be appended. If the
+ * append fails, a new block is inserted. If an error occurred, NULL is
+ * returned. Otherwise, on success, the updated block (or the new one) is
+ * returned.
 */
 static struct htx_blk *htx_append_blk_value(struct htx *htx, enum htx_blk_type type,
 					    const struct ist data)
@@ -364,8 +364,8 @@ static struct htx_blk *htx_append_blk_value(struct htx *htx, enum htx_blk_type t
 	if (data.len > htx_free_data_space(htx))
 		return NULL;
 
-	/* Append only DATA et TRAILERS data */
-	if (type != HTX_BLK_DATA && type != HTX_BLK_TLR)
+	/* Append only DATA */
+	if (type != HTX_BLK_DATA)
 		goto add_new_block;
 
 	/* get the tail and head block */
@@ -516,13 +516,13 @@ struct htx_ret htx_xfer_blks(struct htx *dst, struct htx *src, uint32_t count,
 
 		info = blk->info;
 		max = htx_free_data_space(dst);
-		if (max > count)
-			max = count;
+		if (max > count - ret)
+			max = count - ret;
 		if (sz > max) {
 			sz = max;
 			info = (type << 28) + sz;
 			/* Headers and pseudo headers must be fully copied  */
-			if (type < HTX_BLK_DATA || !sz)
+			if (type != HTX_BLK_DATA || !sz)
 				break;
 		}
 
@@ -785,29 +785,20 @@ struct htx_blk *htx_add_data(struct htx *htx, const struct ist data)
 	return htx_append_blk_value(htx, HTX_BLK_DATA, data);
 }
 
-/* Adds an HTX block of type TLR in <htx>. It first tries to append trailers
- * data if possible. It returns the new block on success. Otherwise, it returns
- * NULL.
+/* Adds an HTX block of type TLR in <htx>. It returns the new block on
+ * success. Otherwise, it returns NULL.
  */
 struct htx_blk *htx_add_trailer(struct htx *htx, const struct ist tlr)
 {
-	return htx_append_blk_value(htx, HTX_BLK_TLR, tlr);
-}
-
-/* Adds an HTX block of type OOB in <htx>. It returns the new block on
- * success. Otherwise, it returns NULL.
- */
-struct htx_blk *htx_add_oob(struct htx *htx, const struct ist oob)
-{
 	struct htx_blk *blk;
 
-	/* FIXME: check oob.len (< 256MB) */
-	blk = htx_add_blk(htx, HTX_BLK_OOB, oob.len);
+	/* FIXME: check tlr.len (< 256MB) */
+	blk = htx_add_blk(htx, HTX_BLK_TLR, tlr.len);
 	if (!blk)
 		return NULL;
 
-	blk->info += oob.len;
-	memcpy(htx_get_blk_ptr(htx, blk), oob.ptr, oob.len);
+	blk->info += tlr.len;
+	memcpy(htx_get_blk_ptr(htx, blk), tlr.ptr, tlr.len);
 	return blk;
 }
 

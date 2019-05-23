@@ -57,11 +57,8 @@
 #include <proto/session.h>
 #include <proto/stream.h>
 #include <proto/stream_interface.h>
-#include <proto/task.h>
-
-#ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
-#endif /* USE_OPENSSL */
+#include <proto/task.h>
 
 int be_lastsession(const struct proxy *be)
 {
@@ -1406,6 +1403,7 @@ int connect_server(struct stream *s)
 				session_unown_conn(s->sess, old_conn);
 				old_conn->owner = sess;
 				if (!session_add_conn(sess, old_conn, old_conn->target)) {
+					old_conn->flags &= ~CO_FL_SESS_IDLE;
 					old_conn->owner = NULL;
 					old_conn->mux->destroy(old_conn->ctx);
 				} else
@@ -1581,15 +1579,21 @@ int connect_server(struct stream *s)
 	}
 
 
-#ifdef USE_OPENSSL
+#if USE_OPENSSL && (defined(OPENSSL_IS_BORINGSSL) || (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L))
+
 	if (!reuse && cli_conn && srv &&
 	    (srv->ssl_ctx.options & SRV_SSL_O_EARLY_DATA) &&
-		    (cli_conn->flags & CO_FL_EARLY_DATA) &&
-		    !channel_is_empty(si_oc(&s->si[1])) &&
-		    srv_conn->flags & CO_FL_SSL_WAIT_HS) {
+	    /* Only attempt to use early data if either the client sent
+	     * early data, so that we know it can handle a 425, or if
+	     * we are allwoed to retry requests on early data failure, and
+	     * it's our first try
+	     */
+	    ((cli_conn->flags & CO_FL_EARLY_DATA) ||
+	     ((s->be->retry_type & PR_RE_EARLY_ERROR) &&
+	      s->si[1].conn_retries == s->be->conn_retries)) &&
+	    !channel_is_empty(si_oc(&s->si[1])) &&
+	    srv_conn->flags & CO_FL_SSL_WAIT_HS)
 		srv_conn->flags &= ~(CO_FL_SSL_WAIT_HS | CO_FL_WAIT_L6_CONN);
-		srv_conn->flags |= CO_FL_EARLY_SSL_HS;
-	}
 #endif
 
 	if (err != SF_ERR_NONE)

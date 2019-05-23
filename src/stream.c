@@ -201,6 +201,7 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	s->buffer_wait.target = s;
 	s->buffer_wait.wakeup_cb = stream_buf_available;
 
+	s->call_rate.curr_sec = s->call_rate.curr_ctr = s->call_rate.prev_ctr = 0;
 	s->pcli_next_pid = 0;
 	s->pcli_flags = 0;
 	s->unique_id = NULL;
@@ -322,6 +323,7 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	if (flt_stream_init(s) < 0 || flt_stream_start(s) < 0)
 		goto out_fail_accept;
 
+	s->si[1].l7_buffer = BUF_NULL;
 	/* finish initialization of the accepted file descriptor */
 	if (appctx)
 		si_want_get(&s->si[0]);
@@ -361,6 +363,12 @@ static void stream_free(struct stream *s)
 	struct conn_stream *cli_cs = objt_cs(s->si[0].end);
 	int must_free_sess;
 	int i;
+
+	/* detach the stream from its own task before even releasing it so
+	 * that walking over a task list never exhibits a dying stream.
+	 */
+	s->task->context = NULL;
+	__ha_barrier_store();
 
 	pendconn_free(s);
 
@@ -474,6 +482,7 @@ static void stream_free(struct stream *s)
 	tasklet_free(s->si[0].wait_event.task);
 	tasklet_free(s->si[1].wait_event.task);
 
+	b_free(&s->si[1].l7_buffer);
 	if (must_free_sess) {
 		sess->origin = NULL;
 		session_free(sess);
@@ -666,7 +675,13 @@ static int sess_update_st_con_tcp(struct stream *s)
 			 */
 			si->state    = SI_ST_EST;
 			si->err_type = SI_ET_DATA_ERR;
-			req->flags |= CF_WRITE_ERROR;
+			/* Don't add CF_WRITE_ERROR if we're here because
+			 * early data were rejected by the server, or
+			 * http_wait_for_response() will never be called
+			 * to send a 425.
+			 */
+			if (conn->err_code != CO_ER_SSL_EARLY_FAILED)
+				req->flags |= CF_WRITE_ERROR;
 			rep->flags |= CF_READ_ERROR;
 			return 1;
 		}
@@ -700,6 +715,16 @@ static int sess_update_st_con_tcp(struct stream *s)
 		if (s->srv_error)
 			s->srv_error(s, si);
 		return 1;
+	}
+
+	/* If the request channel is waiting for the connect(), we mark the read
+	 * side as attached on the response channel and we wake up it once. So
+	 * it will have a chance to forward data now.
+	 */
+	if (req->flags & CF_WAKE_CONNECT) {
+		rep->flags |= CF_READ_ATTACHED;
+		req->flags |= CF_WAKE_ONCE;
+		req->flags &= ~CF_WAKE_CONNECT;
 	}
 
 	/* we need to wait a bit more if there was no activity either */
@@ -762,7 +787,7 @@ static int sess_update_st_cer(struct stream *s)
 
 	/* ensure that we have enough retries left */
 	si->conn_retries--;
-	if (si->conn_retries < 0) {
+	if (si->conn_retries < 0 || !(s->be->retry_type & PR_RE_CONN_FAILED)) {
 		if (!si->err_type) {
 			si->err_type = SI_ET_CONN_ERR;
 		}
@@ -855,6 +880,11 @@ static int sess_update_st_cer(struct stream *s)
  * This function handles the transition between the SI_ST_CON state and the
  * SI_ST_EST state. It must only be called after switching from SI_ST_CON (or
  * SI_ST_INI) to SI_ST_EST, but only when a ->proto is defined.
+ * Note that it will switch the interface to SI_ST_DIS if we already have
+ * the CF_SHUTR flag, it means we were able to forward the request, and
+ * receive the response, before process_stream() had the opportunity to
+ * make the switch from SI_ST_CON to SI_ST_EST. When that happens, we want
+ * to go through sess_establish() anyway, to make sure the analysers run.
  */
 static void sess_establish(struct stream *s)
 {
@@ -891,10 +921,6 @@ static void sess_establish(struct stream *s)
 
 	si_rx_endp_more(si);
 	rep->flags |= CF_READ_ATTACHED; /* producer is now attached */
-	if (req->flags & CF_WAKE_CONNECT) {
-		req->flags |= CF_WAKE_ONCE;
-		req->flags &= ~CF_WAKE_CONNECT;
-	}
 	if (objt_cs(si->end)) {
 		/* real connections have timeouts */
 		req->wto = s->be->timeout.server;
@@ -907,6 +933,9 @@ static void sess_establish(struct stream *s)
 		si_chk_rcv(si);
 	}
 	req->wex = TICK_ETERNITY;
+	/* If we managed to get the whole response, switch to SI_ST_DIS now. */
+	if (rep->flags & CF_SHUTR)
+		si->state = SI_ST_DIS;
 }
 
 /* Check if the connection request is in such a state that it can be aborted. */
@@ -1170,6 +1199,17 @@ static void sess_prepare_conn_req(struct stream *s)
 			if (s->srv_error)
 				s->srv_error(s, si);
 			return;
+		}
+
+		/* For applets, there is no connection establishment, but if the
+		 * request channel is waiting for it, we mark the read side as
+		 * attached on the response channel and we wake up it once. So
+		 * it will have a chance to forward data now.
+		 */
+		if (s->req.flags & CF_WAKE_CONNECT) {
+			s->res.flags |= CF_READ_ATTACHED;
+			s->req.flags |= CF_WAKE_ONCE;
+			s->req.flags &= ~CF_WAKE_CONNECT;
 		}
 
 		if (tv_iszero(&s->logs.tv_request))
@@ -1740,6 +1780,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	unsigned int req_ana_back;
 	struct channel *req, *res;
 	struct stream_interface *si_f, *si_b;
+	unsigned int rate;
 
 	activity[tid].stream++;
 
@@ -1754,6 +1795,10 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	si_sync_recv(si_b);
 
 redo:
+	rate = update_freq_ctr(&s->call_rate, 1);
+	if (rate >= 100000 && s->call_rate.prev_ctr) { // make sure to wait at least a full second
+		stream_dump_and_crash(&s->obj_type, read_freq_ctr(&s->call_rate));
+	}
 
 	//DPRINTF(stderr, "%s:%d: cs=%d ss=%d(%d) rqf=0x%08x rpf=0x%08x\n", __FUNCTION__, __LINE__,
 	//        si_f->state, si_b->state, si_b->err_type, req->flags, res->flags);
@@ -2360,6 +2405,9 @@ redo:
 				 */
 				si_b->state = SI_ST_REQ; /* new connection requested */
 				si_b->conn_retries = s->be->conn_retries;
+				if ((s->be->retry_type &~ PR_RE_CONN_FAILED) &&
+				    !(si_b->flags & SI_FL_D_L7_RETRY))
+					si_b->flags |= SI_FL_L7_RETRY;
 			}
 		}
 		else {
@@ -2644,14 +2692,8 @@ redo:
 			now_ms, t->expire, req->rex, req->wex, req->analyse_exp,
 			res->rex, res->wex, si_f->exp, si_b->exp, si_f->state, si_b->state);
 
-#ifdef DEBUG_DEV
-		/* this may only happen when no timeout is set or in case of an FSM bug */
-		if (!tick_isset(t->expire))
-			ABORT_NOW();
-#endif
 		s->pending_events &= ~(TASK_WOKEN_TIMER | TASK_WOKEN_RES);
 		stream_release_buffers(s);
-		/* We may have free'd some space in buffers, or have more to send/recv, try again */
 		return t; /* nothing more to do */
 	}
 
@@ -2841,6 +2883,108 @@ void stream_shutdown(struct stream *stream, int why)
 	if (!(stream->flags & SF_ERR_MASK))
 		stream->flags |= why;
 	task_wakeup(stream->task, TASK_WOKEN_OTHER);
+}
+
+/* Appends a dump of the state of stream <s> into buffer <buf> which must have
+ * preliminary be prepared by its caller, with each line prepended by prefix
+ * <pfx>, and each line terminated by character <eol>.
+ */
+void stream_dump(struct buffer *buf, const struct stream *s, const char *pfx, char eol)
+{
+	const struct conn_stream *csf, *csb;
+	const struct connection  *cof, *cob;
+	const struct appctx      *acf, *acb;
+	const struct server      *srv;
+	const char *src = "unknown";
+	const char *dst = "unknown";
+	char pn[INET6_ADDRSTRLEN];
+	const struct channel *req, *res;
+	const struct stream_interface *si_f, *si_b;
+
+	if (!s) {
+		chunk_appendf(buf, "%sstrm=%p%c", pfx, s, eol);
+		return;
+	}
+
+	if (s->obj_type != OBJ_TYPE_STREAM) {
+		chunk_appendf(buf, "%sstrm=%p [invalid type=%d(%s)]%c",
+		              pfx, s, s->obj_type, obj_type_name(&s->obj_type), eol);
+		return;
+	}
+
+	si_f = &s->si[0];
+	si_b = &s->si[1];
+	req = &s->req;
+	res = &s->res;
+
+	csf = objt_cs(si_f->end);
+	cof = cs_conn(csf);
+	acf = objt_appctx(si_f->end);
+	if (cof && addr_to_str(&cof->addr.from, pn, sizeof(pn)) >= 0)
+		src = pn;
+	else if (acf)
+		src = acf->applet->name;
+
+	csb = objt_cs(si_b->end);
+	cob = cs_conn(csb);
+	acb = objt_appctx(si_b->end);
+	srv = objt_server(s->target);
+	if (srv)
+		dst = srv->id;
+	else if (acb)
+		dst = acb->applet->name;
+
+	chunk_appendf(buf,
+	              "%sstrm=%p src=%s fe=%s be=%s dst=%s%c"
+	              "%srqf=%x rqa=%x rpf=%x rpa=%x sif=%s,%x sib=%s,%x%c"
+	              "%saf=%p,%u csf=%p,%x%c"
+	              "%sab=%p,%u csb=%p,%x%c"
+	              "%scof=%p,%x:%s(%p)/%s(%p)/%s(%d)%c"
+	              "%scob=%p,%x:%s(%p)/%s(%p)/%s(%d)%c"
+	              "",
+	              pfx, s, src, s->sess->fe->id, s->be->id, dst, eol,
+	              pfx, req->flags, req->analysers, res->flags, res->analysers,
+	                   si_state_str(si_f->state), si_f->flags,
+	                   si_state_str(si_b->state), si_b->flags, eol,
+	              pfx, acf, acf ? acf->st0   : 0, csf, csf ? csf->flags : 0, eol,
+	              pfx, acb, acb ? acb->st0   : 0, csb, csb ? csb->flags : 0, eol,
+	              pfx, cof, cof ? cof->flags : 0, conn_get_mux_name(cof), cof?cof->ctx:0, conn_get_xprt_name(cof),
+	                   cof ? cof->xprt_ctx : 0, conn_get_ctrl_name(cof), cof ? cof->handle.fd : 0, eol,
+	              pfx, cob, cob ? cob->flags : 0, conn_get_mux_name(cob), cob?cob->ctx:0, conn_get_xprt_name(cob),
+	                   cob ? cob->xprt_ctx : 0, conn_get_ctrl_name(cob), cob ? cob->handle.fd : 0, eol);
+}
+
+/* dumps an error message for type <type> at ptr <ptr> related to stream <s>,
+ * having reached loop rate <rate>, then aborts hoping to retrieve a core.
+ */
+void stream_dump_and_crash(enum obj_type *obj, int rate)
+{
+	const struct stream *s;
+	char *msg = NULL;
+	const void *ptr;
+
+	ptr = s = objt_stream(obj);
+	if (!s) {
+		const struct appctx *appctx = objt_appctx(obj);
+		if (!appctx)
+			return;
+		ptr = appctx;
+		s = si_strm(appctx->owner);
+		if (!s)
+			return;
+	}
+
+	chunk_reset(&trash);
+	stream_dump(&trash, s, "", ' ');
+	memprintf(&msg,
+	          "A bogus %s [%p] is spinning at %d calls per second and refuses to die, "
+	          "aborting now! Please report this error to developers "
+	          "[%s]\n",
+	          obj_type_name(obj), ptr, rate, trash.area);
+
+	ha_alert("%s", msg);
+	send_log(NULL, LOG_EMERG, "%s", msg);
+	abort();
 }
 
 /************************************************************************/
@@ -3047,10 +3191,10 @@ static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct st
 		}
 
 		chunk_appendf(&trash,
-			     "  task=%p (state=0x%02x nice=%d calls=%d exp=%s tmask=0x%lx%s",
+			     "  task=%p (state=0x%02x nice=%d calls=%u rate=%u exp=%s tmask=0x%lx%s",
 			     strm->task,
 			     strm->task->state,
-			     strm->task->nice, strm->task->calls,
+			     strm->task->nice, strm->task->calls, read_freq_ctr(&strm->call_rate),
 			     strm->task->expire ?
 			             tick_is_expired(strm->task->expire, now_ms) ? "<PAST>" :
 			                     human_time(TICKS_TO_MS(strm->task->expire - now_ms),
@@ -3124,14 +3268,14 @@ static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct st
 		}
 		else if ((tmpctx = objt_appctx(strm->si[0].end)) != NULL) {
 			chunk_appendf(&trash,
-			              "  app0=%p st0=%d st1=%d st2=%d applet=%s tmask=0x%lx nice=%d calls=%u cpu=%llu lat=%llu\n",
+			              "  app0=%p st0=%d st1=%d st2=%d applet=%s tmask=0x%lx nice=%d calls=%u rate=%u cpu=%llu lat=%llu\n",
 				      tmpctx,
 				      tmpctx->st0,
 				      tmpctx->st1,
 				      tmpctx->st2,
 			              tmpctx->applet->name,
 			              tmpctx->thread_mask,
-			              tmpctx->t->nice, tmpctx->t->calls,
+			              tmpctx->t->nice, tmpctx->t->calls, read_freq_ctr(&tmpctx->call_rate),
 			              (unsigned long long)tmpctx->t->cpu_time, (unsigned long long)tmpctx->t->lat_time);
 		}
 
@@ -3161,14 +3305,14 @@ static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct st
 		}
 		else if ((tmpctx = objt_appctx(strm->si[1].end)) != NULL) {
 			chunk_appendf(&trash,
-			              "  app1=%p st0=%d st1=%d st2=%d applet=%s tmask=0x%lx, nice=%d, calls=%u, cpu=%llu, lat=%llu\n",
+			              "  app1=%p st0=%d st1=%d st2=%d applet=%s tmask=0x%lx nice=%d calls=%u rate=%u cpu=%llu lat=%llu\n",
 				      tmpctx,
 				      tmpctx->st0,
 				      tmpctx->st1,
 				      tmpctx->st2,
 			              tmpctx->applet->name,
 			              tmpctx->thread_mask,
-			              tmpctx->t->nice, tmpctx->t->calls,
+			              tmpctx->t->nice, tmpctx->t->calls, read_freq_ctr(&tmpctx->call_rate),
 			              (unsigned long long)tmpctx->t->cpu_time, (unsigned long long)tmpctx->t->lat_time);
 		}
 
@@ -3387,10 +3531,10 @@ static int cli_io_handler_dump_sess(struct appctx *appctx)
 			}
 
 			chunk_appendf(&trash,
-				     " ts=%02x age=%s calls=%d cpu=%llu lat=%llu",
+				     " ts=%02x age=%s calls=%u rate=%u cpu=%llu lat=%llu",
 				     curr_strm->task->state,
 				     human_time(now.tv_sec - curr_strm->logs.tv_accept.tv_sec, 1),
-			             curr_strm->task->calls,
+			             curr_strm->task->calls, read_freq_ctr(&curr_strm->call_rate),
 			             (unsigned long long)curr_strm->task->cpu_time, (unsigned long long)curr_strm->task->lat_time);
 
 			chunk_appendf(&trash,

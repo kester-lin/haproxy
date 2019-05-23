@@ -84,6 +84,7 @@
 /* a few exported variables */
 extern unsigned int nb_tasks;     /* total number of tasks */
 extern volatile unsigned long active_tasks_mask; /* Mask of threads with active tasks */
+extern volatile unsigned long global_tasks_mask; /* Mask of threads with tasks in the global runqueue */
 extern unsigned int tasks_run_queue;    /* run queue size */
 extern unsigned int tasks_run_queue_cur;
 extern unsigned int nb_tasks_cur;
@@ -97,16 +98,6 @@ extern struct eb_root timers;      /* sorted timers tree, global */
 extern struct eb_root rqueue;      /* tree constituting the run queue */
 extern int global_rqueue_size; /* Number of element sin the global runqueue */
 #endif
-
-/* force to split per-thread stuff into separate cache lines */
-struct task_per_thread {
-	struct eb_root timers;  /* tree constituting the per-thread wait queue */
-	struct eb_root rqueue;  /* tree constituting the per-thread run queue */
-	struct list task_list;  /* List of tasks to be run, mixing tasks and tasklets */
-	int task_list_size;     /* Number of tasks in the task_list */
-	int rqueue_size;        /* Number of elements in the per-thread run queue */
-	__attribute__((aligned(64))) char end[0];
-};
 
 extern struct task_per_thread task_per_thread[MAX_THREADS];
 
@@ -328,19 +319,30 @@ static inline struct task *task_new(unsigned long thread_mask)
 }
 
 /*
- * Free a task. Its context must have been freed since it will be lost.
- * The task count is decremented.
+ * Free a task. Its context must have been freed since it will be lost. The
+ * task count is decremented. It it is the current task, this one is reset.
  */
 static inline void __task_free(struct task *t)
 {
+	if (t == curr_task) {
+		curr_task = NULL;
+		__ha_barrier_store();
+	}
 	pool_free(pool_head_task, t);
 	if (unlikely(stopping))
 		pool_flush(pool_head_task);
 	_HA_ATOMIC_SUB(&nb_tasks, 1);
 }
 
+/* Destroys a task : it's unlinked from the wait queues and is freed if it's
+ * the current task or not queued otherwise it's marked to be freed by the
+ * scheduler. It does nothing if <t> is NULL.
+ */
 static inline void task_destroy(struct task *t)
 {
+	if (!t)
+		return;
+
 	task_unlink_wq(t);
 	/* We don't have to explicitely remove from the run queue.
 	 * If we are in the runqueue, the test below will set t->process
@@ -365,6 +367,10 @@ static inline void tasklet_free(struct tasklet *tl)
 		_HA_ATOMIC_SUB(&tasks_run_queue, 1);
 	}
 
+	if ((struct task *)tl == curr_task) {
+		curr_task = NULL;
+		__ha_barrier_store();
+	}
 	pool_free(pool_head_tasklet, tl);
 	if (unlikely(stopping))
 		pool_flush(pool_head_tasklet);

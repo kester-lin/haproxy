@@ -27,7 +27,6 @@ void mworker_catch_sigterm(struct sig_handler *sh);
 void mworker_catch_sigchld(struct sig_handler *sh);
 
 void mworker_accept_wrapper(int fd);
-void mworker_pipe_register();
 
 void mworker_cleanlisteners();
 
@@ -35,5 +34,8 @@ int mworker_child_nb();
 
 int mworker_ext_launch_all();
 
+void mworker_kill_max_reloads(int sig);
+
+void mworker_free_child(struct mworker_proc *);
 
 #endif /* PROTO_MWORKER_H_ */

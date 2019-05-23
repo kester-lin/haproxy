@@ -1252,18 +1252,9 @@ int pat_idx_list_reg_cap(struct pattern_expr *expr, struct pattern *pat, int cap
 	/* duplicate pattern */
 	memcpy(&patl->pat, pat, sizeof(*pat));
 
-	/* allocate regex */
-	patl->pat.ptr.reg = calloc(1, sizeof(*patl->pat.ptr.reg));
-	if (!patl->pat.ptr.reg) {
-		free(patl);
-		memprintf(err, "out of memory while indexing pattern");
-		return 0;
-	}
-
 	/* compile regex */
-	if (!regex_comp(pat->ptr.str, patl->pat.ptr.reg,
-	                !(expr->mflags & PAT_MF_IGNORE_CASE), cap, err)) {
-		free(patl->pat.ptr.reg);
+	if (!(patl->pat.ptr.reg = regex_comp(pat->ptr.str, !(expr->mflags & PAT_MF_IGNORE_CASE),
+	                                     cap, err))) {
 		free(patl);
 		return 0;
 	}
@@ -1652,7 +1643,7 @@ int pat_ref_delete_by_id(struct pat_ref *ref, struct pat_ref_elt *refelt)
 				LIST_DEL(&bref->users);
 				LIST_INIT(&bref->users);
 				if (elt->list.n != &ref->head)
-					LIST_ADDQ(&LIST_ELEM(elt->list.n, struct stream *, list)->back_refs, &bref->users);
+					LIST_ADDQ(&LIST_ELEM(elt->list.n, typeof(elt), list)->back_refs, &bref->users);
 				bref->ref = elt->list.n;
 			}
 			list_for_each_entry(expr, &ref->pat, list)
@@ -1692,7 +1683,7 @@ int pat_ref_delete(struct pat_ref *ref, const char *key)
 				LIST_DEL(&bref->users);
 				LIST_INIT(&bref->users);
 				if (elt->list.n != &ref->head)
-					LIST_ADDQ(&LIST_ELEM(elt->list.n, struct stream *, list)->back_refs, &bref->users);
+					LIST_ADDQ(&LIST_ELEM(elt->list.n, typeof(elt), list)->back_refs, &bref->users);
 				bref->ref = elt->list.n;
 			}
 			list_for_each_entry(expr, &ref->pat, list)
@@ -2087,7 +2078,7 @@ void pat_ref_reload(struct pat_ref *ref, struct pat_ref *replace)
 			LIST_DEL(&bref->users);
 			LIST_INIT(&bref->users);
 			if (elt->list.n != &ref->head)
-				LIST_ADDQ(&LIST_ELEM(elt->list.n, struct stream *, list)->back_refs, &bref->users);
+				LIST_ADDQ(&LIST_ELEM(elt->list.n, typeof(elt), list)->back_refs, &bref->users);
 			bref->ref = elt->list.n;
 		}
 		LIST_DEL(&elt->list);
@@ -2176,7 +2167,7 @@ void pat_ref_prune(struct pat_ref *ref)
 			LIST_DEL(&bref->users);
 			LIST_INIT(&bref->users);
 			if (elt->list.n != &ref->head)
-				LIST_ADDQ(&LIST_ELEM(elt->list.n, struct stream *, list)->back_refs, &bref->users);
+				LIST_ADDQ(&LIST_ELEM(elt->list.n, typeof(elt), list)->back_refs, &bref->users);
 			bref->ref = elt->list.n;
 		}
 		LIST_DEL(&elt->list);

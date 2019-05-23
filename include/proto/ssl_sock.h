@@ -21,12 +21,16 @@
 
 #ifndef _PROTO_SSL_SOCK_H
 #define _PROTO_SSL_SOCK_H
-#include <openssl/ssl.h>
+#ifdef USE_OPENSSL
+
+#include <common/openssl-compat.h>
 
 #include <types/connection.h>
 #include <types/listener.h>
 #include <types/proxy.h>
 #include <types/stream_interface.h>
+
+#include <proto/connection.h>
 
 extern int sslconns;
 extern int totalsslconns;
@@ -85,7 +89,7 @@ SSL_CTX *ssl_sock_get_generated_cert(unsigned int key, struct bind_conf *bind_co
 int ssl_sock_set_generated_cert(SSL_CTX *ctx, unsigned int key, struct bind_conf *bind_conf);
 unsigned int ssl_sock_generated_cert_key(const void *data, size_t len);
 
-#if (OPENSSL_VERSION_NUMBER >= 0x1010000fL) && !defined(OPENSSL_NO_ASYNC)
+#if (HA_OPENSSL_VERSION_NUMBER >= 0x1010000fL) && !defined(OPENSSL_NO_ASYNC) && !defined(LIBRESSL_VERSION_NUMBER)
 void ssl_async_fd_handler(int fd);
 void ssl_async_fd_free(int fd);
 #endif
@@ -99,6 +103,7 @@ void ssl_async_fd_free(int fd);
 
 #define sh_ssl_sess_tree_lookup(k)     (struct sh_ssl_sess_hdr *)ebmb_lookup(sh_ssl_sess_tree, \
                                                                     (k), SSL_MAX_SSL_SESSION_ID_LENGTH);
+#endif /* USE_OPENSSL */
 #endif /* _PROTO_SSL_SOCK_H */
 
 /*

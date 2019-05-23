@@ -29,6 +29,8 @@
 #include <types/global.h>
 #include <proto/fd.h>
 
+struct thread_info thread_info[MAX_THREADS] = { };
+THREAD_LOCAL struct thread_info *ti = &thread_info[0];
 
 #ifdef USE_THREAD
 
@@ -52,11 +54,7 @@ void thread_harmless_till_end()
 {
 		_HA_ATOMIC_OR(&threads_harmless_mask, tid_bit);
 		while (threads_want_rdv_mask & all_threads_mask) {
-#if _POSIX_PRIORITY_SCHEDULING
-			sched_yield();
-#else
-			pl_cpu_relax();
-#endif
+			ha_thread_relax();
 		}
 }
 
@@ -81,11 +79,7 @@ void thread_isolate()
 		else if (_HA_ATOMIC_CAS(&threads_harmless_mask, &old, old & ~tid_bit))
 			break;
 
-#if _POSIX_PRIORITY_SCHEDULING
-		sched_yield();
-#else
-		pl_cpu_relax();
-#endif
+		ha_thread_relax();
 	}
 	/* one thread gets released at a time here, with its harmess bit off.
 	 * The loss of this bit makes the other one continue to spin while the
@@ -101,6 +95,29 @@ void thread_release()
 {
 	_HA_ATOMIC_AND(&threads_want_rdv_mask, ~tid_bit);
 	thread_harmless_end();
+}
+
+/* send signal <sig> to thread <thr> */
+void ha_tkill(unsigned int thr, int sig)
+{
+	pthread_kill(thread_info[thr].pthread, sig);
+}
+
+/* send signal <sig> to all threads. The calling thread is signaled last in
+ * order to allow all threads to synchronize in the handler.
+ */
+void ha_tkillall(int sig)
+{
+	unsigned int thr;
+
+	for (thr = 0; thr < global.nbthread; thr++) {
+		if (!(all_threads_mask & (1UL << thr)))
+			continue;
+		if (thr == tid)
+			continue;
+		pthread_kill(thread_info[thr].pthread, sig);
+	}
+	raise(sig);
 }
 
 /* these calls are used as callbacks at init time */

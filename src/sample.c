@@ -1109,7 +1109,8 @@ int smp_resolve_args(struct proxy *p)
 	list_for_each_entry_safe(cur, bak, &p->conf.args.list, list) {
 		struct proxy *px;
 		struct server *srv;
-		char *pname, *sname;
+		struct stktable *t;
+		char *pname, *sname, *stktname;
 		char *err;
 
 		arg = cur->arg;
@@ -1244,38 +1245,48 @@ int smp_resolve_args(struct proxy *p)
 			break;
 
 		case ARGT_TAB:
-			if (arg->data.str.data) {
-				pname = arg->data.str.area;
-				px = proxy_tbl_by_name(pname);
+			if (!arg->data.str.data) {
+				ha_alert("parsing [%s:%d] : missing table name in arg %d of %s%s%s%s '%s' %s proxy '%s'.\n",
+					 cur->file, cur->line,
+					 cur->arg_pos + 1, conv_pre, conv_ctx, conv_pos, ctx, cur->kw, where, p->id);
+				cfgerr++;
+				continue;
 			}
 
-			if (!px) {
+			stktname = arg->data.str.area;
+			t = stktable_find_by_name(stktname);
+			if (!t) {
 				ha_alert("parsing [%s:%d] : unable to find table '%s' referenced in arg %d of %s%s%s%s '%s' %s proxy '%s'.\n",
-					 cur->file, cur->line, pname,
+					 cur->file, cur->line, stktname,
 					 cur->arg_pos + 1, conv_pre, conv_ctx, conv_pos, ctx, cur->kw, where, p->id);
 				cfgerr++;
 				break;
 			}
 
-			if (!px->table.size) {
+			if (!t->size) {
 				ha_alert("parsing [%s:%d] : no table in proxy '%s' referenced in arg %d of %s%s%s%s '%s' %s proxy '%s'.\n",
-					 cur->file, cur->line, pname,
+					 cur->file, cur->line, stktname,
 					 cur->arg_pos + 1, conv_pre, conv_ctx, conv_pos, ctx, cur->kw, where, p->id);
 				cfgerr++;
 				break;
 			}
 
-			if (p->bind_proc & ~px->bind_proc) {
+			if (t->proxy && (p->bind_proc & ~t->proxy->bind_proc)) {
 				ha_alert("parsing [%s:%d] : stick-table '%s' not present on all processes covered by proxy '%s'.\n",
-					 cur->file, cur->line, px->id, p->id);
+					 cur->file, cur->line, t->proxy->id, p->id);
 				cfgerr++;
 				break;
+			}
+
+			if (t->proxies_list != p) {
+				p->next_stkt_ref = t->proxies_list;
+				t->proxies_list = p;
 			}
 
 			free(arg->data.str.area);
 			arg->data.str.area = NULL;
 			arg->unresolved = 0;
-			arg->data.prx = px;
+			arg->data.t = t;
 			break;
 
 		case ARGT_USR:
@@ -1317,20 +1328,11 @@ int smp_resolve_args(struct proxy *p)
 				continue;
 			}
 
-			reg = calloc(1, sizeof(*reg));
-			if (!reg) {
-				ha_alert("parsing [%s:%d] : not enough memory to build regex in arg %d of %s%s%s%s '%s' %s proxy '%s'.\n",
-					 cur->file, cur->line,
-					 cur->arg_pos + 1, conv_pre, conv_ctx, conv_pos, ctx, cur->kw, where, p->id);
-				cfgerr++;
-				continue;
-			}
-
 			rflags = 0;
 			rflags |= (arg->type_flags & ARGF_REG_ICASE) ? REG_ICASE : 0;
 			err = NULL;
 
-			if (!regex_comp(arg->data.str.area, reg, !(rflags & REG_ICASE), 1 /* capture substr */, &err)) {
+			if (!(reg = regex_comp(arg->data.str.area, !(rflags & REG_ICASE), 1 /* capture substr */, &err))) {
 				ha_alert("parsing [%s:%d] : error in regex '%s' in arg %d of %s%s%s%s '%s' %s proxy '%s' : %s.\n",
 					 cur->file, cur->line,
 					 arg->data.str.area,
@@ -1414,11 +1416,8 @@ static void release_sample_arg(struct arg *p)
 			p->unresolved = 0;
 		}
 		else if (p->type == ARGT_REG) {
-			if (p->data.reg) {
-				regex_free(p->data.reg);
-				free(p->data.reg);
-				p->data.reg = NULL;
-			}
+			regex_free(p->data.reg);
+			p->data.reg = NULL;
 		}
 		p++;
 	}

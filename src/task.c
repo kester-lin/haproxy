@@ -20,10 +20,11 @@
 #include <eb32sctree.h>
 #include <eb32tree.h>
 
+#include <proto/fd.h>
+#include <proto/freq_ctr.h>
 #include <proto/proxy.h>
 #include <proto/stream.h>
 #include <proto/task.h>
-#include <proto/fd.h>
 
 DECLARE_POOL(pool_head_task,    "task",    sizeof(struct task));
 DECLARE_POOL(pool_head_tasklet, "tasklet", sizeof(struct tasklet));
@@ -92,7 +93,7 @@ void __task_wakeup(struct task *t, struct eb_root *root)
 		t->rq.key += offset;
 	}
 
-	if (profiling & HA_PROF_TASKS)
+	if (task_profiling_mask & tid_bit)
 		t->call_date = now_mono_time();
 
 	eb32sc_insert(root, &t->rq, t->thread_mask);
@@ -280,6 +281,8 @@ void process_runnable_tasks()
 	struct task *t;
 	int max_processed;
 
+	ti->flags &= ~TI_FL_STUCK; // this thread is still running
+
 	if (!(active_tasks_mask & tid_bit)) {
 		activity[tid].empty_rq++;
 		return;
@@ -344,6 +347,7 @@ void process_runnable_tasks()
 
 		/* And add it to the local task list */
 		task_insert_into_tasklet_list(t);
+		activity[tid].tasksw++;
 	}
 
 	/* release the rqueue lock */
@@ -370,6 +374,8 @@ void process_runnable_tasks()
 		__ha_barrier_atomic_store();
 		__task_remove_from_tasklet_list(t);
 
+		ti->flags &= ~TI_FL_STUCK; // this thread is still running
+		activity[tid].ctxsw++;
 		ctx = t->context;
 		process = t->process;
 		t->calls++;
@@ -382,6 +388,7 @@ void process_runnable_tasks()
 		}
 
 		curr_task = (struct task *)t;
+		__ha_barrier_store();
 		if (likely(process == process_stream))
 			t = process_stream(t, ctx, state);
 		else if (process != NULL)
@@ -389,6 +396,7 @@ void process_runnable_tasks()
 		else {
 			__task_free(t);
 			curr_task = NULL;
+			__ha_barrier_store();
 			/* We don't want max_processed to be decremented if
 			 * we're just freeing a destroyed task, we should only
 			 * do so if we really ran a task.
@@ -396,6 +404,7 @@ void process_runnable_tasks()
 			continue;
 		}
 		curr_task = NULL;
+		__ha_barrier_store();
 		/* If there is a pending state  we have to wake up the task
 		 * immediately, else we defer it into wait queue
 		 */

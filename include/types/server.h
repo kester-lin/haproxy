@@ -25,14 +25,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#ifdef USE_OPENSSL
-#include <openssl/ssl.h>
-#include <types/ssl_sock.h>
-#endif
-
 #include <common/config.h>
 #include <common/mini-clist.h>
 #include <common/hathreads.h>
+#include <common/openssl-compat.h>
 
 #include <eb32tree.h>
 
@@ -43,6 +39,7 @@
 #include <types/obj_type.h>
 #include <types/proxy.h>
 #include <types/queue.h>
+#include <types/ssl_sock.h>
 #include <types/task.h>
 #include <types/checks.h>
 
@@ -143,6 +140,7 @@ enum srv_initaddr {
 #define SRV_F_CHECKPORT    0x0040        /* this server has a check port configured */
 #define SRV_F_AGENTADDR    0x0080        /* this server has a agent addr configured */
 #define SRV_F_COOKIESET    0x0100        /* this server has a cookie configured, so don't generate dynamic cookies */
+#define SRV_F_FASTOPEN     0x0200        /* Use TCP Fast Open to connect to server */
 
 /* configured server options for send-proxy (server->pp_opts) */
 #define SRV_PP_V1               0x0001   /* proxy protocol version 1 */
@@ -295,7 +293,7 @@ struct server {
 			int allocated_size;
 		} * reused_sess;
 		char *ciphers;			/* cipher suite to use if non-null */
-#if (OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
+#if (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 		char *ciphersuites;			/* TLS 1.3 cipher suite to use if non-null */
 #endif
 		int options;			/* ssl options */
