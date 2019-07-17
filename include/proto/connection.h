@@ -132,16 +132,7 @@ static inline void conn_ctrl_init(struct connection *conn)
 	if (!conn_ctrl_ready(conn)) {
 		int fd = conn->handle.fd;
 
-#if ENABLE_CUJU_FT
-		if (conn->cujuipc_idx) {
-			fd_insert(fd, conn, cuju_fd_handler, tid_bit);
-		}
-		else{
-			fd_insert(fd, conn, conn_fd_handler, tid_bit);
-		}
-#else
 		fd_insert(fd, conn, conn_fd_handler, tid_bit);
-#endif
 
 		/* mark the fd as ready so as not to needlessly poll at the beginning */
 		fd_may_recv(fd);

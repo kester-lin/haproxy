@@ -137,9 +137,8 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
 	struct guest_ip_list* guest_info = NULL;
-	unsigned long recv_t;
-	uint32_t epoch_id = 0;
-	uint32_t flush_id = 0;
+	//uint32_t epoch_id = 0;
+	//uint32_t flush_id = 0;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -182,8 +181,8 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 		guest_info = conn->conn_gipl;
 	}
 
-	epoch_id = guest_info->gctl_ipc.epoch_id;
-	flush_id = guest_info->gctl_ipc.flush_id;	
+	//epoch_id = guest_info->gctl_ipc.epoch_id;
+	//flush_id = guest_info->gctl_ipc.flush_id;	
 
 	while (count) {
 		if (count > MAX_SPLICE_AT_ONCE)
@@ -291,7 +290,9 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	static int first_index = 0;
 
 #if ENABLE_CUJU_FT
+#if !ENABLE_LIST_ADD_TAIL 
 	struct pipe *pipe_trace = pipe;
+#endif
 	struct pipe *pipe_buf = NULL;
 	struct pipe *pipe_dup = NULL;
 	struct pipe *pipe_trans = pipe;

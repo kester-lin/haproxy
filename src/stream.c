@@ -2546,10 +2546,12 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 		channel_shutr_now(req);
 
 	/* shutdown(read) pending */
-	if (unlikely((req->flags & (CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTR_NOW)) {
-		if (si_f->flags & SI_FL_NOHALF)
-			si_f->flags |= SI_FL_NOLINGER;
-		si_shutr(si_f);
+	if (!sess->listener->cujuipc_idx) { 
+		if (unlikely((req->flags & (CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTR_NOW)) {
+			if (si_f->flags & SI_FL_NOHALF)
+				si_f->flags |= SI_FL_NOLINGER;
+			si_shutr(si_f);
+		}
 	}
 
 	/* Benchmarks have shown that it's optimal to do a full resync now */

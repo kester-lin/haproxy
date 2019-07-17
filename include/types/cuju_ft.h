@@ -107,7 +107,6 @@ struct ft_fd_list
 unsigned long ft_get_flushcnt();
 unsigned long ft_get_epochcnt();
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
-void cuju_fd_handler(int fd);
 int cuju_process(struct conn_stream *cs);
 int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* total_pipe_cnt ,uint16_t* pipe_cnt);
 int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , uint16_t* pipe_cnt);
