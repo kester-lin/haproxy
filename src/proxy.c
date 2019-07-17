@@ -106,7 +106,6 @@ const struct cfg_opt cfg_opts2[] =
 	{ "socket-stats",                 PR_O2_SOCKSTAT,  PR_CAP_FE, 0, 0 },
 	{ "tcp-smart-accept",             PR_O2_SMARTACC,  PR_CAP_FE, 0, 0 },
 	{ "tcp-smart-connect",            PR_O2_SMARTCON,  PR_CAP_BE, 0, 0 },
-	{ "independant-streams",          PR_O2_INDEPSTR,  PR_CAP_FE|PR_CAP_BE, 0, 0 },
 	{ "independent-streams",          PR_O2_INDEPSTR,  PR_CAP_FE|PR_CAP_BE, 0, 0 },
 	{ "http-use-proxy-header",        PR_O2_USE_PXHDR, PR_CAP_FE, 0, PR_MODE_HTTP },
 	{ "http-pretend-keepalive",       PR_O2_FAKE_KA,   PR_CAP_BE, 0, PR_MODE_HTTP },
@@ -204,7 +203,6 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 	const char *res, *name;
 	int *tv = NULL;
 	int *td = NULL;
-	int warn = 0;
 
 	retval = 0;
 
@@ -213,7 +211,7 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 		args++;
 
 	name = args[0];
-	if (!strcmp(args[0], "client") || (!strcmp(args[0], "clitimeout") && (warn = WARN_CLITO_DEPRECATED))) {
+	if (!strcmp(args[0], "client")) {
 		name = "client";
 		tv = &proxy->timeout.client;
 		td = &defpx->timeout.client;
@@ -230,12 +228,12 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 		tv = &proxy->timeout.httpreq;
 		td = &defpx->timeout.httpreq;
 		cap = PR_CAP_FE | PR_CAP_BE;
-	} else if (!strcmp(args[0], "server") || (!strcmp(args[0], "srvtimeout") && (warn = WARN_SRVTO_DEPRECATED))) {
+	} else if (!strcmp(args[0], "server")) {
 		name = "server";
 		tv = &proxy->timeout.server;
 		td = &defpx->timeout.server;
 		cap = PR_CAP_BE;
-	} else if (!strcmp(args[0], "connect") || (!strcmp(args[0], "contimeout") && (warn = WARN_CONTO_DEPRECATED))) {
+	} else if (!strcmp(args[0], "connect")) {
 		name = "connect";
 		tv = &proxy->timeout.connect;
 		td = &defpx->timeout.connect;
@@ -260,6 +258,15 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 		tv = &proxy->timeout.serverfin;
 		td = &defpx->timeout.serverfin;
 		cap = PR_CAP_BE;
+	} else if (!strcmp(args[0], "clitimeout")) {
+		memprintf(err, "the '%s' directive is not supported anymore since HAProxy 2.1. Use 'timeout client'.", args[0]);
+		return -1;
+	} else if (!strcmp(args[0], "srvtimeout")) {
+		memprintf(err, "the '%s' directive is not supported anymore since HAProxy 2.1. Use 'timeout server'.", args[0]);
+		return -1;
+	} else if (!strcmp(args[0], "contimeout")) {
+		memprintf(err, "the '%s' directive is not supported anymore since HAProxy 2.1. Use 'timeout connect'.", args[0]);
+		return -1;
 	} else {
 		memprintf(err,
 		          "'timeout' supports 'client', 'server', 'connect', 'check', "
@@ -275,7 +282,17 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 	}
 
 	res = parse_time_err(args[1], &timeout, TIME_UNIT_MS);
-	if (res) {
+	if (res == PARSE_TIME_OVER) {
+		memprintf(err, "timer overflow in argument '%s' to 'timeout %s' (maximum value is 2147483647 ms or ~24.8 days)",
+			  args[1], name);
+		return -1;
+	}
+	else if (res == PARSE_TIME_UNDER) {
+		memprintf(err, "timer underflow in argument '%s' to 'timeout %s' (minimum non-null value is 1 ms)",
+			  args[1], name);
+		return -1;
+	}
+	else if (res) {
 		memprintf(err, "unexpected character '%c' in 'timeout %s'", *res, name);
 		return -1;
 	}
@@ -289,13 +306,6 @@ static int proxy_parse_timeout(char **args, int section, struct proxy *proxy,
 	else if (defpx && *tv != *td) {
 		memprintf(err, "overwriting 'timeout %s' which was already specified", name);
 		retval = 1;
-	}
-	else if (warn) {
-		if (!already_warned(warn)) {
-			memprintf(err, "the '%s' directive is now deprecated in favor of 'timeout %s', and will not be supported in future versions.",
-				  args[0], name);
-			retval = 1;
-		}
 	}
 
 	if (*args[2] != 0) {
@@ -1056,7 +1066,17 @@ static int proxy_parse_hard_stop_after(char **args, int section_type, struct pro
 		return -1;
 	}
 	res = parse_time_err(args[1], &global.hard_stop_after, TIME_UNIT_MS);
-	if (res) {
+	if (res == PARSE_TIME_OVER) {
+		memprintf(err, "timer overflow in argument '%s' to '%s' (maximum value is 2147483647 ms or ~24.8 days)",
+			  args[1], args[0]);
+		return -1;
+	}
+	else if (res == PARSE_TIME_UNDER) {
+		memprintf(err, "timer underflow in argument '%s' to '%s' (minimum non-null value is 1 ms)",
+			  args[1], args[0]);
+		return -1;
+	}
+	else if (res) {
 		memprintf(err, "unexpected character '%c' in argument to <%s>.\n", *res, args[0]);
 		return -1;
 	}
@@ -1071,9 +1091,9 @@ struct task *hard_stop(struct task *t, void *context, unsigned short state)
 	if (killed) {
 		ha_warning("Some tasks resisted to hard-stop, exiting now.\n");
 		send_log(NULL, LOG_WARNING, "Some tasks resisted to hard-stop, exiting now.\n");
-		/* Do some cleanup and explicitly quit */
-		deinit();
-		exit(0);
+		killed = 2;
+		t->expire = TICK_ETERNITY;
+		return t;
 	}
 
 	ha_warning("soft-stop running for too long, performing a hard-stop.\n");
@@ -1450,6 +1470,13 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 
 			if (conn && cs) {
 				si_rx_endp_more(&s->si[0]);
+				/* Make sure we're unsubscribed, the the new
+				 * mux will probably want to subscribe to
+				 * the underlying XPRT
+				 */
+				if (s->si[0].wait_event.events)
+					conn->mux->unsubscribe(cs, s->si[0].wait_event.events,
+					    &s->si[0].wait_event);
 				if (conn_upgrade_mux_fe(conn, cs, &s->req.buf, ist(""), PROTO_MODE_HTX)  == -1)
 					return 0;
 				s->flags |= SF_HTX;
@@ -1652,9 +1679,9 @@ void proxy_adjust_all_maxconn()
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "hard-stop-after", proxy_parse_hard_stop_after },
 	{ CFG_LISTEN, "timeout", proxy_parse_timeout },
-	{ CFG_LISTEN, "clitimeout", proxy_parse_timeout },
-	{ CFG_LISTEN, "contimeout", proxy_parse_timeout },
-	{ CFG_LISTEN, "srvtimeout", proxy_parse_timeout },
+	{ CFG_LISTEN, "clitimeout", proxy_parse_timeout }, /* This keyword actually fails to parse, this line remains for better error messages. */
+	{ CFG_LISTEN, "contimeout", proxy_parse_timeout }, /* This keyword actually fails to parse, this line remains for better error messages. */
+	{ CFG_LISTEN, "srvtimeout", proxy_parse_timeout }, /* This keyword actually fails to parse, this line remains for better error messages. */
 	{ CFG_LISTEN, "rate-limit", proxy_parse_rate_limit },
 	{ CFG_LISTEN, "max-keep-alive-queue", proxy_parse_max_ka_queue },
 	{ CFG_LISTEN, "declare", proxy_parse_declare },

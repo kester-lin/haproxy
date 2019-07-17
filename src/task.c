@@ -35,7 +35,6 @@ DECLARE_POOL(pool_head_tasklet, "tasklet", sizeof(struct tasklet));
 DECLARE_POOL(pool_head_notification, "notification", sizeof(struct notification));
 
 unsigned int nb_tasks = 0;
-volatile unsigned long active_tasks_mask = 0; /* Mask of threads with active tasks */
 volatile unsigned long global_tasks_mask = 0; /* Mask of threads with tasks in the global runqueue */
 unsigned int tasks_run_queue = 0;
 unsigned int tasks_run_queue_cur = 0;    /* copy of the run queue size */
@@ -45,7 +44,7 @@ unsigned int niced_tasks = 0;      /* number of niced tasks in the run queue */
 THREAD_LOCAL struct task *curr_task = NULL; /* task currently running or NULL */
 
 __decl_aligned_spinlock(rq_lock); /* spin lock related to run queue */
-__decl_aligned_spinlock(wq_lock); /* spin lock related to wait queue */
+__decl_aligned_rwlock(wq_lock);   /* RW lock related to the wait queue */
 
 #ifdef USE_THREAD
 struct eb_root timers;      /* sorted timers tree, global */
@@ -82,7 +81,6 @@ void __task_wakeup(struct task *t, struct eb_root *root)
 		__ha_barrier_store();
 	}
 #endif
-	_HA_ATOMIC_OR(&active_tasks_mask, t->thread_mask);
 	t->rq.key = _HA_ATOMIC_ADD(&rqueue_ticks, 1);
 
 	if (likely(t->nice)) {
@@ -164,6 +162,7 @@ int wake_expired_tasks()
 	struct task *task;
 	struct eb32_node *eb;
 	int ret = TICK_ETERNITY;
+	__decl_hathreads(int key);
 
 	while (1) {
   lookup_next_local:
@@ -210,8 +209,31 @@ int wake_expired_tasks()
 	}
 
 #ifdef USE_THREAD
+	if (eb_is_empty(&timers))
+		goto leave;
+
+	HA_RWLOCK_RDLOCK(TASK_WQ_LOCK, &wq_lock);
+	eb = eb32_lookup_ge(&timers, now_ms - TIMER_LOOK_BACK);
+	if (!eb) {
+		eb = eb32_first(&timers);
+		if (likely(!eb)) {
+			HA_RWLOCK_RDUNLOCK(TASK_WQ_LOCK, &wq_lock);
+			goto leave;
+		}
+	}
+	key = eb->key;
+	HA_RWLOCK_RDUNLOCK(TASK_WQ_LOCK, &wq_lock);
+
+	if (tick_is_lt(now_ms, key)) {
+		/* timer not expired yet, revisit it later */
+		ret = tick_first(ret, key);
+		goto leave;
+	}
+
+	/* There's really something of interest here, let's visit the queue */
+
 	while (1) {
-		HA_SPIN_LOCK(TASK_WQ_LOCK, &wq_lock);
+		HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
   lookup_next:
 		eb = eb32_lookup_ge(&timers, now_ms - TIMER_LOOK_BACK);
 		if (!eb) {
@@ -253,11 +275,12 @@ int wake_expired_tasks()
 			goto lookup_next;
 		}
 		task_wakeup(task, TASK_WOKEN_TIMER);
-		HA_SPIN_UNLOCK(TASK_WQ_LOCK, &wq_lock);
+		HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	}
 
-	HA_SPIN_UNLOCK(TASK_WQ_LOCK, &wq_lock);
+	HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 #endif
+leave:
 	return ret;
 }
 
@@ -283,7 +306,7 @@ void process_runnable_tasks()
 
 	ti->flags &= ~TI_FL_STUCK; // this thread is still running
 
-	if (!(active_tasks_mask & tid_bit)) {
+	if (!thread_has_tasks()) {
 		activity[tid].empty_rq++;
 		return;
 	}
@@ -346,7 +369,8 @@ void process_runnable_tasks()
 #endif
 
 		/* And add it to the local task list */
-		task_insert_into_tasklet_list(t);
+		tasklet_insert_into_tasklet_list((struct tasklet *)t);
+		task_per_thread[tid].task_list_size++;
 		activity[tid].tasksw++;
 	}
 
@@ -354,13 +378,6 @@ void process_runnable_tasks()
 	if (grq) {
 		HA_SPIN_UNLOCK(TASK_RQ_LOCK, &rq_lock);
 		grq = NULL;
-	}
-
-	if (!(global_tasks_mask & tid_bit) && task_per_thread[tid].rqueue_size == 0) {
-		_HA_ATOMIC_AND(&active_tasks_mask, ~tid_bit);
-		__ha_barrier_atomic_load();
-		if (global_tasks_mask & tid_bit)
-			_HA_ATOMIC_OR(&active_tasks_mask, tid_bit);
 	}
 
 	while (max_processed > 0 && !LIST_ISEMPTY(&task_per_thread[tid].task_list)) {
@@ -372,7 +389,9 @@ void process_runnable_tasks()
 		t = (struct task *)LIST_ELEM(task_per_thread[tid].task_list.n, struct tasklet *, list);
 		state = _HA_ATOMIC_XCHG(&t->state, TASK_RUNNING);
 		__ha_barrier_atomic_store();
-		__task_remove_from_tasklet_list(t);
+		__tasklet_remove_from_tasklet_list((struct tasklet *)t);
+		if (!TASK_IS_TASKLET(t))
+			task_per_thread[tid].task_list_size--;
 
 		ti->flags &= ~TI_FL_STUCK; // this thread is still running
 		activity[tid].ctxsw++;
@@ -424,10 +443,53 @@ void process_runnable_tasks()
 		max_processed--;
 	}
 
-	if (!LIST_ISEMPTY(&task_per_thread[tid].task_list)) {
-		_HA_ATOMIC_OR(&active_tasks_mask, tid_bit);
+	if (!LIST_ISEMPTY(&task_per_thread[tid].task_list))
 		activity[tid].long_rq++;
+}
+
+/* create a work list array for <nbthread> threads, using tasks made of
+ * function <fct>. The context passed to the function will be the pointer to
+ * the thread's work list, which will contain a copy of argument <arg>. The
+ * wake up reason will be TASK_WOKEN_OTHER. The pointer to the work_list array
+ * is returned on success, otherwise NULL on failure.
+ */
+struct work_list *work_list_create(int nbthread,
+                                   struct task *(*fct)(struct task *, void *, unsigned short),
+                                   void *arg)
+{
+	struct work_list *wl;
+	int i;
+
+	wl = calloc(nbthread, sizeof(*wl));
+	if (!wl)
+		goto fail;
+
+	for (i = 0; i < nbthread; i++) {
+		LIST_INIT(&wl[i].head);
+		wl[i].task = task_new(1UL << i);
+		if (!wl[i].task)
+			goto fail;
+		wl[i].task->process = fct;
+		wl[i].task->context = &wl[i];
+		wl[i].arg = arg;
 	}
+	return wl;
+
+ fail:
+	work_list_destroy(wl, nbthread);
+	return NULL;
+}
+
+/* destroy work list <work> */
+void work_list_destroy(struct work_list *work, int nbthread)
+{
+	int t;
+
+	if (!work)
+		return;
+	for (t = 0; t < nbthread; t++)
+		task_destroy(work[t].task);
+	free(work);
 }
 
 /*

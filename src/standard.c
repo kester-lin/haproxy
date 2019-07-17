@@ -928,6 +928,7 @@ struct sockaddr_storage *str2sa_range(const char *str, int *port, int *low, int 
 		ss.ss_family = AF_UNSPEC;
 	}
 	else if (ss.ss_family == AF_UNIX) {
+		struct sockaddr_un *un = (struct sockaddr_un *)&ss;
 		int prefix_path_len;
 		int max_path_len;
 		int adr_len;
@@ -936,7 +937,7 @@ struct sockaddr_storage *str2sa_range(const char *str, int *port, int *low, int 
 		 * <unix_bind_prefix><path>.<pid>.<bak|tmp>
 		 */
 		prefix_path_len = (pfx && !abstract) ? strlen(pfx) : 0;
-		max_path_len = (sizeof(((struct sockaddr_un *)&ss)->sun_path) - 1) -
+		max_path_len = (sizeof(un->sun_path) - 1) -
 			(prefix_path_len ? prefix_path_len + 1 + 5 + 1 + 3 : 0);
 
 		adr_len = strlen(str2);
@@ -946,10 +947,10 @@ struct sockaddr_storage *str2sa_range(const char *str, int *port, int *low, int 
 		}
 
 		/* when abstract==1, we skip the first zero and copy all bytes except the trailing zero */
-		memset(((struct sockaddr_un *)&ss)->sun_path, 0, sizeof(((struct sockaddr_un *)&ss)->sun_path));
+		memset(un->sun_path, 0, sizeof(un->sun_path));
 		if (prefix_path_len)
-			memcpy(((struct sockaddr_un *)&ss)->sun_path, pfx, prefix_path_len);
-		memcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len + abstract, str2, adr_len + 1 - abstract);
+			memcpy(un->sun_path, pfx, prefix_path_len);
+		memcpy(un->sun_path + prefix_path_len + abstract, str2, adr_len + 1 - abstract);
 	}
 	else { /* IPv4 and IPv6 */
 		char *end = str2 + strlen(str2);
@@ -1546,13 +1547,13 @@ int addr_is_local(const struct netns_entry *ns,
  */
 const char hextab[16] = "0123456789ABCDEF";
 char *encode_string(char *start, char *stop,
-		    const char escape, const fd_set *map,
+		    const char escape, const long *map,
 		    const char *string)
 {
 	if (start < stop) {
 		stop--; /* reserve one byte for the final '\0' */
 		while (start < stop && *string != '\0') {
-			if (!FD_ISSET((unsigned char)(*string), map))
+			if (!ha_bit_test((unsigned char)(*string), map))
 				*start++ = *string;
 			else {
 				if (start + 3 >= stop)
@@ -1573,7 +1574,7 @@ char *encode_string(char *start, char *stop,
  * <chunk> instead of a string.
  */
 char *encode_chunk(char *start, char *stop,
-		    const char escape, const fd_set *map,
+		    const char escape, const long *map,
 		    const struct buffer *chunk)
 {
 	char *str = chunk->area;
@@ -1582,7 +1583,7 @@ char *encode_chunk(char *start, char *stop,
 	if (start < stop) {
 		stop--; /* reserve one byte for the final '\0' */
 		while (start < stop && str < end) {
-			if (!FD_ISSET((unsigned char)(*str), map))
+			if (!ha_bit_test((unsigned char)(*str), map))
 				*start++ = *str;
 			else {
 				if (start + 3 >= stop)
@@ -1607,13 +1608,13 @@ char *encode_chunk(char *start, char *stop,
  * completes.
  */
 char *escape_string(char *start, char *stop,
-		    const char escape, const fd_set *map,
+		    const char escape, const long *map,
 		    const char *string)
 {
 	if (start < stop) {
 		stop--; /* reserve one byte for the final '\0' */
 		while (start < stop && *string != '\0') {
-			if (!FD_ISSET((unsigned char)(*string), map))
+			if (!ha_bit_test((unsigned char)(*string), map))
 				*start++ = *string;
 			else {
 				if (start + 2 >= stop)
@@ -1636,7 +1637,7 @@ char *escape_string(char *start, char *stop,
  * <stop>, and will return its position if the conversion completes.
  */
 char *escape_chunk(char *start, char *stop,
-		   const char escape, const fd_set *map,
+		   const char escape, const long *map,
 		   const struct buffer *chunk)
 {
 	char *str = chunk->area;
@@ -1645,7 +1646,7 @@ char *escape_chunk(char *start, char *stop,
 	if (start < stop) {
 		stop--; /* reserve one byte for the final '\0' */
 		while (start < stop && str < end) {
-			if (!FD_ISSET((unsigned char)(*str), map))
+			if (!ha_bit_test((unsigned char)(*str), map))
 				*start++ = *str;
 			else {
 				if (start + 2 >= stop)
@@ -2032,12 +2033,15 @@ int strl2llrc_dotted(const char *text, int len, long long *ret)
  * The value is returned in <ret> if everything is fine, and a NULL is returned
  * by the function. In case of error, a pointer to the error is returned and
  * <ret> is left untouched. Values are automatically rounded up when needed.
+ * Values resulting in values larger than or equal to 2^31 after conversion are
+ * reported as an overflow as value PARSE_TIME_OVER. Non-null values resulting
+ * in an underflow are reported as an underflow as value PARSE_TIME_UNDER.
  */
 const char *parse_time_err(const char *text, unsigned *ret, unsigned unit_flags)
 {
-	unsigned imult, idiv;
-	unsigned omult, odiv;
-	unsigned value;
+	unsigned long long imult, idiv;
+	unsigned long long omult, odiv;
+	unsigned long long value, result;
 
 	omult = odiv = 1;
 
@@ -2100,8 +2104,12 @@ const char *parse_time_err(const char *text, unsigned *ret, unsigned unit_flags)
 	if (imult % odiv == 0) { imult /= odiv; odiv = 1; }
 	if (odiv % imult == 0) { odiv /= imult; imult = 1; }
 
-	value = (value * (imult * omult) + (idiv * odiv - 1)) / (idiv * odiv);
-	*ret = value;
+	result = (value * (imult * omult) + (idiv * odiv - 1)) / (idiv * odiv);
+	if (result >= 0x80000000)
+		return PARSE_TIME_OVER;
+	if (!result && value)
+		return PARSE_TIME_UNDER;
+	*ret = result;
 	return NULL;
 }
 
@@ -4298,7 +4306,9 @@ int parse_dotted_uints(const char *str, unsigned int **nums, size_t *sz)
 }
 
 /* do nothing, just a placeholder for debugging calls, the real one is in trace.c */
+#ifndef USE_OBSOLETE_LINKER
 __attribute__((weak,format(printf, 1, 2)))
+#endif
 void trace(char *msg, ...)
 {
 }

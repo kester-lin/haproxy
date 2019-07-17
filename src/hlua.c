@@ -3944,10 +3944,15 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 	if (IS_HTX_STRM(s)) {
 		/* HTX version */
 		struct htx *htx = htxbuf(&s->req.buf);
-		struct htx_sl *sl = http_find_stline(htx);
+		struct htx_blk *blk;
+		struct htx_sl *sl;
 		struct ist path;
 		unsigned long long len = 0;
 		int32_t pos;
+
+		blk = htx_get_first_blk(htx);
+		BUG_ON(htx_get_blk_type(blk) != HTX_BLK_REQ_SL);
+		sl = htx_get_blk_ptr(htx, blk);
 
 		/* Stores the request method. */
 		lua_pushstring(L, "method");
@@ -3993,11 +3998,11 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 			lua_settable(L, -3);
 		}
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
-			if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+			if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 				break;
 			if (type == HTX_BLK_DATA)
 				len += htx_get_blksz(blk);
@@ -4210,7 +4215,7 @@ __LJMP static int hlua_applet_htx_getline_yield(lua_State *L, int status, lua_KC
 
 	htx = htx_from_buf(&req->buf);
 	count = co_data(req);
-	blk = htx_get_head_blk(htx);
+	blk = htx_get_first_blk(htx);
 
 	while (count && !stop && blk) {
 		enum htx_blk_type type = htx_get_blk_type(blk);
@@ -4246,7 +4251,6 @@ __LJMP static int hlua_applet_htx_getline_yield(lua_State *L, int status, lua_KC
 				luaL_addlstring(&appctx->b, v.ptr, vlen);
 				break;
 
-			case HTX_BLK_EOD:
 			case HTX_BLK_TLR:
 			case HTX_BLK_EOM:
 				stop = 1;
@@ -4396,7 +4400,6 @@ __LJMP static int hlua_applet_htx_recv_yield(lua_State *L, int status, lua_KCont
 				luaL_addlstring(&appctx->b, v.ptr, vlen);
 				break;
 
-			case HTX_BLK_EOD:
 			case HTX_BLK_TLR:
 			case HTX_BLK_EOM:
 				len = 0;
@@ -4552,7 +4555,7 @@ __LJMP static int hlua_applet_htx_send_yield(lua_State *L, int status, lua_KCont
 	int l = MAY_LJMP(luaL_checkinteger(L, 3));
 	int max;
 
-	max = channel_htx_recv_max(res, htx);
+	max = htx_get_max_blksz(htx, channel_htx_recv_max(res, htx));
 	if (!max)
 		goto snd_yield;
 
@@ -4563,8 +4566,7 @@ __LJMP static int hlua_applet_htx_send_yield(lua_State *L, int status, lua_KCont
 		max = len - l;
 
 	/* Copy data. */
-	if (!htx_add_data(htx, ist2(data + l, max)))
-		goto snd_yield;
+	max = htx_add_data(htx, ist2(data + l, max));
 	channel_add_input(res, max);
 
 	/* update counters. */
@@ -5170,6 +5172,8 @@ static int hlua_http_new(lua_State *L, struct hlua_txn *txn)
 
 	htxn->s = txn->s;
 	htxn->p = txn->p;
+	htxn->dir = txn->dir;
+	htxn->flags = txn->flags;
 
 	/* Pop a class stream metatable and affect it to the table. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, class_http_ref);
@@ -5195,7 +5199,7 @@ __LJMP static int hlua_http_get_headers(lua_State *L, struct hlua_txn *htxn, str
 		struct htx *htx = htxbuf(&msg->chn->buf);
 		int32_t pos;
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 			struct ist n, v;
@@ -5371,7 +5375,13 @@ __LJMP static inline int hlua_http_rep_hdr(lua_State *L, struct hlua_txn *htxn,
 	if (!(re = regex_comp(reg, 1, 1, NULL)))
 		WILL_LJMP(luaL_argerror(L, 3, "invalid regex"));
 
-	http_transform_header_str(htxn->s, msg, name, name_len, value, re, action);
+	if (IS_HTX_STRM(htxn->s)) {
+		struct htx *htx = htxbuf(&msg->chn->buf);
+
+		htx_transform_header_str(htxn->s, msg->chn, htx, ist2(name, name_len), value, re, action);
+	}
+	else
+		http_transform_header_str(htxn->s, msg, name, name_len, value, re, action);
 	regex_free(re);
 	return 0;
 }
@@ -6784,7 +6794,7 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 			return ACT_RET_ERR;
 		}
 		if (s->hlua->flags & HLUA_STOP)
-			return ACT_RET_STOP;
+			return ACT_RET_DONE;
 		return ACT_RET_CONT;
 
 	/* yield. */
@@ -7211,7 +7221,7 @@ static void hlua_applet_htx_fct(struct appctx *ctx)
 		 * the Lua.
 		 */
 		req_htx = htx_from_buf(&req->buf);
-		blk = htx_get_head_blk(req_htx);
+		blk = htx_get_first_blk(req_htx);
 		while (count && blk) {
 			enum htx_blk_type type = htx_get_blk_type(blk);
 			uint32_t sz = htx_get_blksz(blk);
@@ -7289,7 +7299,7 @@ static void hlua_applet_htx_fct(struct appctx *ctx)
 		if (!(ctx->ctx.hlua_apphttp.flags & APPLET_HDR_SENT))
 			goto error;
 
-		/* Don't add EOD and TLR because mux-h1 will take care of it */
+		/* Don't add TLR because mux-h1 will take care of it */
 		if (!htx_add_endof(res_htx, HTX_BLK_EOM)) {
 			si_rx_room_blk(si);
 			goto out;
@@ -8069,7 +8079,17 @@ static int hlua_read_timeout(char **args, int section_type, struct proxy *curpx,
 	const char *error;
 
 	error = parse_time_err(args[1], timeout, TIME_UNIT_MS);
-	if (error && *error != '\0') {
+	if (error == PARSE_TIME_OVER) {
+		memprintf(err, "timer overflow in argument <%s> to <%s> (maximum value is 2147483647 ms or ~24.8 days)",
+			  args[1], args[0]);
+		return -1;
+	}
+	else if (error == PARSE_TIME_UNDER) {
+		memprintf(err, "timer underflow in argument <%s> to <%s> (minimum non-null value is 1 ms)",
+			  args[1], args[0]);
+		return -1;
+	}
+	else if (error) {
 		memprintf(err, "%s: invalid timeout", args[0]);
 		return -1;
 	}

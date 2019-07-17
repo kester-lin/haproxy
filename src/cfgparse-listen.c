@@ -1074,7 +1074,19 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				}
 
 				res = parse_time_err(args[cur_arg + 1], &maxidle, TIME_UNIT_S);
-				if (res) {
+				if (res == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s>, maximum value is 2147483647 s (~68 years).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (res == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s>, minimum non-null value is 1 s.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (res) {
 					ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
 						 file, linenum, *res, args[cur_arg]);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -1094,8 +1106,21 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 					goto out;
 				}
 
+
 				res = parse_time_err(args[cur_arg + 1], &maxlife, TIME_UNIT_S);
-				if (res) {
+				if (res == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s>, maximum value is 2147483647 s (~68 years).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (res == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s>, minimum non-null value is 1 s.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (res) {
 					ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
 						 file, linenum, *res, args[cur_arg]);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -1528,33 +1553,11 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		curproxy->server_id_hdr_name = strdup(args[1]);
 		curproxy->server_id_hdr_len  = strlen(curproxy->server_id_hdr_name);
 	}
-	else if (!strcmp(args[0], "block")) {  /* early blocking based on ACLs */
-		struct act_rule *rule;
+	else if (!strcmp(args[0], "block")) {
+		ha_alert("parsing [%s:%d] : The '%s' directive is not supported anymore since HAProxy 2.1. Use 'http-request deny' which uses the exact same syntax.\n", file, linenum, args[0]);
 
-		if (curproxy == &defproxy) {
-			ha_alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
-
-		/* emulate "block" using "http-request block". Since these rules are supposed to
-		 * be processed before all http-request rules, we put them into their own list
-		 * and will insert them at the end.
-		 */
-		rule = parse_http_req_cond((const char **)args, file, linenum, curproxy);
-		if (!rule) {
-			err_code |= ERR_ALERT | ERR_ABORT;
-			goto out;
-		}
-		err_code |= warnif_misplaced_block(curproxy, file, linenum, args[0]);
-		err_code |= warnif_cond_conflicts(rule->cond,
-	                                          (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
-	                                          file, linenum);
-		LIST_ADDQ(&curproxy->block_rules, &rule->list);
-
-		if (!already_warned(WARN_BLOCK_DEPRECATED))
-			ha_warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of 'http-request deny' which uses the exact same syntax. The rules are translated but support might disappear in a future version.\n", file, linenum, args[0]);
-
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
 	}
 	else if (!strcmp(args[0], "redirect")) {
 		struct redirect_rule *rule;
@@ -1939,8 +1942,20 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			unsigned interval;
 
 			err = parse_time_err(args[2], &interval, TIME_UNIT_S);
-			if (err) {
-				ha_alert("parsing [%s:%d] : unexpected character '%c' in stats refresh interval.\n",
+			if (err == PARSE_TIME_OVER) {
+				ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to stats refresh interval, maximum value is 2147483647 s (~68 years).\n",
+					 file, linenum, args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (err == PARSE_TIME_UNDER) {
+				ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to stats refresh interval, minimum non-null value is 1 s.\n",
+					 file, linenum, args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (err) {
+				ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to stats refresh interval.\n",
 					 file, linenum, *err);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
@@ -2814,18 +2829,10 @@ stats_error_parsing:
 			goto out;
 	}
 	else if (!strcmp(args[0], "redispatch") || !strcmp(args[0], "redisp")) {
-		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
-			err_code |= ERR_WARN;
+		ha_alert("parsing [%s:%d] : keyword '%s' directive is not supported anymore since HAProxy 2.1. Use 'option redispatch'.\n", file, linenum, args[0]);
 
-		if (!already_warned(WARN_REDISPATCH_DEPRECATED))
-			ha_warning("parsing [%s:%d]: keyword '%s' is deprecated in favor of 'option redispatch', and will not be supported by future versions.\n",
-				   file, linenum, args[0]);
-		err_code |= ERR_WARN;
-		/* enable reconnections to dispatch */
-		curproxy->options |= PR_O_REDISP;
-
-		if (alertif_too_many_args_idx(1, 0, file, linenum, args, &err_code))
-			goto out;
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
 	}
 	else if (!strcmp(args[0], "http-reuse")) {
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
@@ -3381,7 +3388,19 @@ stats_error_parsing:
 			goto out;
 		}
 		err = parse_time_err(args[1], &val, TIME_UNIT_MS);
-		if (err) {
+		if (err == PARSE_TIME_OVER) {
+			ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to grace time, maximum value is 2147483647 ms (~24.8 days).\n",
+			         file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (err == PARSE_TIME_UNDER) {
+			ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to grace time, minimum non-null value is 1 ms.\n",
+			         file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (err) {
 			ha_alert("parsing [%s:%d] : unexpected character '%c' in grace time.\n",
 				 file, linenum, *err);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -3824,7 +3843,7 @@ stats_error_parsing:
 	}
 	else if (!strcmp(args[0], "cliexp") || !strcmp(args[0], "reqrep")) {  /* replace request header from a regex */
 		if (!already_warned(WARN_REQREP_DEPRECATED))
-			ha_warning("parsing [%s:%d] : The '%s' directive is deprecated in favor of 'http-request replace-header' and will be removed in next version.\n", file, linenum, args[0]);
+			ha_warning("parsing [%s:%d] : The '%s' directive is deprecated in favor of 'http-request replace-uri' and 'http-request replace-header' and will be removed in next version.\n", file, linenum, args[0]);
 
 		if (*(args[2]) == 0) {
 			ha_alert("parsing [%s:%d] : '%s' expects <search> and <replace> as arguments.\n",

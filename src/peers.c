@@ -36,6 +36,7 @@
 #include <proto/applet.h>
 #include <proto/channel.h>
 #include <proto/cli.h>
+#include <proto/dict.h>
 #include <proto/fd.h>
 #include <proto/frontend.h>
 #include <proto/log.h>
@@ -139,6 +140,7 @@ struct peer_prep_params {
 		unsigned int updateid;
 		int use_identifier;
 		int use_timed;
+		struct peer *peer;
 	} updt;
 	struct {
 		struct shared_table *shared_table;
@@ -166,6 +168,42 @@ struct peer_prep_params {
 #define PEER_MSG_STKT_ACK              0x84
 #define PEER_MSG_STKT_UPDATE_TIMED     0x85
 #define PEER_MSG_STKT_INCUPDATE_TIMED  0x86
+/* All the stick-table message identifiers abova have the #7 bit set */
+#define PEER_MSG_STKT_BIT                 7
+#define PEER_MSG_STKT_BIT_MASK         (1 << PEER_MSG_STKT_BIT)
+
+/* The maximum length of an encoded data length. */
+#define PEER_MSG_ENC_LENGTH_MAXLEN    5
+
+/* Minimum 64-bits value encoded with 2 bytes */
+#define PEER_ENC_2BYTES_MIN                                  0xf0 /*               0xf0 (or 240) */
+/* 3 bytes */
+#define PEER_ENC_3BYTES_MIN  ((1ULL << 11) | PEER_ENC_2BYTES_MIN) /*              0x8f0 (or 2288) */
+/* 4 bytes */
+#define PEER_ENC_4BYTES_MIN  ((1ULL << 18) | PEER_ENC_3BYTES_MIN) /*            0x408f0 (or 264432) */
+/* 5 bytes */
+#define PEER_ENC_5BYTES_MIN  ((1ULL << 25) | PEER_ENC_4BYTES_MIN) /*          0x20408f0 (or 33818864) */
+/* 6 bytes */
+#define PEER_ENC_6BYTES_MIN  ((1ULL << 32) | PEER_ENC_5BYTES_MIN) /*        0x1020408f0 (or 4328786160) */
+/* 7 bytes */
+#define PEER_ENC_7BYTES_MIN  ((1ULL << 39) | PEER_ENC_6BYTES_MIN) /*       0x81020408f0 (or 554084600048) */
+/* 8 bytes */
+#define PEER_ENC_8BYTES_MIN  ((1ULL << 46) | PEER_ENC_7BYTES_MIN) /*     0x4081020408f0 (or 70922828777712) */
+/* 9 bytes */
+#define PEER_ENC_9BYTES_MIN  ((1ULL << 53) | PEER_ENC_8BYTES_MIN) /*   0x204081020408f0 (or 9078122083518704) */
+/* 10 bytes */
+#define PEER_ENC_10BYTES_MIN ((1ULL << 60) | PEER_ENC_9BYTES_MIN) /* 0x10204081020408f0 (or 1161999626690365680) */
+
+/* #7 bit used to detect the last byte to be encoded */
+#define PEER_ENC_STOP_BIT         7
+/* The byte minimum value with #7 bit set */
+#define PEER_ENC_STOP_BYTE        (1 << PEER_ENC_STOP_BIT)
+/* The left most number of bits set for PEER_ENC_2BYTES_MIN */
+#define PEER_ENC_2BYTES_MIN_BITS  4
+
+#define PEER_MSG_HEADER_LEN               2
+
+#define PEER_STKT_CACHE_MAX_ENTRIES       128
 
 /**********************************/
 /* Peer Session IO handler states */
@@ -212,6 +250,10 @@ static size_t proto_len = sizeof(PEER_SESSION_PROTO_NAME) - 1;
 struct peers *cfg_peers = NULL;
 static void peer_session_forceshutdown(struct peer *peer);
 
+static struct ebpt_node *dcache_tx_insert(struct dcache *dc,
+                                          struct dcache_tx_entry *i);
+static inline void flush_dcache(struct peer *peer);
+
 static const char *statuscode_str(int statuscode)
 {
 	switch (statuscode) {
@@ -247,17 +289,17 @@ int intencode(uint64_t i, char **str) {
 	unsigned char *msg;
 
 	msg = (unsigned char *)*str;
-	if (i < 240) {
+	if (i < PEER_ENC_2BYTES_MIN) {
 		msg[0] = (unsigned char)i;
 		*str = (char *)&msg[idx+1];
 		return (idx+1);
 	}
 
-	msg[idx] =(unsigned char)i | 240;
-	i = (i - 240) >> 4;
-	while (i >= 128) {
-		msg[++idx] = (unsigned char)i | 128;
-		i = (i - 128) >> 7;
+	msg[idx] =(unsigned char)i | PEER_ENC_2BYTES_MIN;
+	i = (i - PEER_ENC_2BYTES_MIN) >> PEER_ENC_2BYTES_MIN_BITS;
+	while (i >= PEER_ENC_STOP_BYTE) {
+		msg[++idx] = (unsigned char)i | PEER_ENC_STOP_BYTE;
+		i = (i - PEER_ENC_STOP_BYTE) >> PEER_ENC_STOP_BIT;
 	}
 	msg[++idx] = (unsigned char)i;
 	*str = (char *)&msg[idx+1];
@@ -284,14 +326,14 @@ uint64_t intdecode(char **str, char *end)
 		goto fail;
 
 	i = *(msg++);
-	if (i >= 240) {
-		shift = 4;
+	if (i >= PEER_ENC_2BYTES_MIN) {
+		shift = PEER_ENC_2BYTES_MIN_BITS;
 		do {
 			if (msg >= (unsigned char *)end)
 				goto fail;
 			i += (uint64_t)*msg << shift;
-			shift += 7;
-		} while (*(msg++) >= 128);
+			shift += PEER_ENC_STOP_BIT;
+		} while (*(msg++) >= PEER_ENC_STOP_BYTE);
 	}
 	*str = (char *)msg;
 	return i;
@@ -394,14 +436,16 @@ static int peer_prepare_updatemsg(char *msg, size_t size, struct peer_prep_param
 	unsigned int updateid;
 	int use_identifier;
 	int use_timed;
+	struct peer *peer;
 
 	ts = p->updt.stksess;
 	st = p->updt.shared_table;
 	updateid = p->updt.updateid;
 	use_identifier = p->updt.use_identifier;
 	use_timed = p->updt.use_timed;
+	peer = p->updt.peer;
 
-	cursor = datamsg = msg + 1 + 5;
+	cursor = datamsg = msg + PEER_MSG_HEADER_LEN + PEER_MSG_ENC_LENGTH_MAXLEN;
 
 	/* construct message */
 
@@ -478,6 +522,48 @@ static int peer_prepare_updatemsg(char *msg, size_t size, struct peer_prep_param
 					intencode(frqp->prev_ctr, &cursor);
 					break;
 				}
+				case STD_T_DICT: {
+					struct dict_entry *de;
+					struct ebpt_node *cached_de;
+					struct dcache_tx_entry cde = { };
+					char *beg, *end;
+					size_t value_len, data_len;
+					struct dcache *dc;
+
+					de = stktable_data_cast(data_ptr, std_t_dict);
+					if (!de)
+						break;
+
+					dc = peer->dcache;
+					cde.entry.key = de;
+					cached_de = dcache_tx_insert(dc, &cde);
+					if (cached_de == &cde.entry) {
+						if (cde.id + 1 >= PEER_ENC_2BYTES_MIN)
+							break;
+						/* Encode the length of the remaining data -> 1 */
+						intencode(1, &cursor);
+						/* Encode the cache entry ID */
+						intencode(cde.id + 1, &cursor);
+					}
+					else {
+						/* Leave enough room to encode the remaining data length. */
+						end = beg = cursor + PEER_MSG_ENC_LENGTH_MAXLEN;
+						/* Encode the dictionary entry key */
+						intencode(cde.id + 1, &end);
+						/* Encode the length of the dictionary entry data */
+						value_len = de->len;
+						intencode(value_len, &end);
+						/* Copy the data */
+						memcpy(end, de->value.key, value_len);
+						end += value_len;
+						/* Encode the length of the data */
+						data_len = end - beg;
+						intencode(data_len, &cursor);
+						memmove(cursor, beg, data_len);
+						cursor += data_len;
+					}
+					break;
+				}
 			}
 		}
 	}
@@ -516,7 +602,7 @@ static int peer_prepare_switchmsg(char *msg, size_t size, struct peer_prep_param
 	struct shared_table *st;
 
 	st = params->swtch.shared_table;
-	cursor = datamsg = msg + 2 + 5;
+	cursor = datamsg = msg + PEER_MSG_HEADER_LEN + PEER_MSG_ENC_LENGTH_MAXLEN;
 
 	/* Encode data */
 
@@ -545,6 +631,7 @@ static int peer_prepare_switchmsg(char *msg, size_t size, struct peer_prep_param
 				case STD_T_SINT:
 				case STD_T_UINT:
 				case STD_T_ULL:
+				case STD_T_DICT:
 					data |= 1 << data_type;
 					break;
 				case STD_T_FRQP:
@@ -596,7 +683,7 @@ static int peer_prepare_ackmsg(char *msg, size_t size, struct peer_prep_params *
 	uint32_t netinteger;
 	struct shared_table *st;
 
-	cursor = datamsg = msg + 2 + 5;
+	cursor = datamsg = msg + PEER_MSG_HEADER_LEN + PEER_MSG_ENC_LENGTH_MAXLEN;
 
 	st = p->ack.shared_table;
 	intencode(st->remote_id, &cursor);
@@ -648,6 +735,8 @@ void __peer_session_deinit(struct peer *peer)
 		HA_ATOMIC_SUB(&connected_peers, 1);
 
 	HA_ATOMIC_SUB(&active_peers, 1);
+
+	flush_dcache(peer);
 
 	/* Re-init current table pointers to force announcement on re-connect */
 	peer->remote_table = peer->last_local_table = NULL;
@@ -872,6 +961,7 @@ static inline int peer_send_updatemsg(struct shared_table *st, struct appctx *ap
 		.updt.updateid = updateid,
 		.updt.use_identifier = use_identifier,
 		.updt.use_timed = use_timed,
+		.updt.peer = appctx->ctx.peers.ptr,
 	};
 
 	return peer_send_msg(appctx, peer_prepare_updatemsg, &p);
@@ -1349,6 +1439,55 @@ static int peer_treat_updatemsg(struct appctx *appctx, struct peer *p, int updt,
 				stktable_data_cast(data_ptr, std_t_frqp) = data;
 			break;
 		}
+		case STD_T_DICT: {
+			struct buffer *chunk;
+			size_t data_len, value_len;
+			unsigned int id;
+			struct dict_entry *de;
+			struct dcache *dc;
+			char *end;
+
+			data_len = decoded_int;
+			if (*msg_cur + data_len > msg_end)
+				goto malformed_unlock;
+
+			/* Compute the end of the current data, <msg_end> being at the end of
+			 * the entire message.
+			 */
+			end = *msg_cur + data_len;
+			id = intdecode(msg_cur, end);
+			if (!*msg_cur || !id)
+				goto malformed_unlock;
+
+			dc = p->dcache;
+			if (*msg_cur == end) {
+				/* Dictionary entry key without value. */
+				if (id > dc->max_entries)
+					break;
+				/* IDs sent over the network are numbered from 1. */
+				de = dc->rx[id - 1].de;
+			}
+			else {
+				chunk = get_trash_chunk();
+				value_len = intdecode(msg_cur, end);
+				if (!*msg_cur || *msg_cur + value_len > end ||
+					unlikely(value_len + 1 >= chunk->size))
+					goto malformed_unlock;
+
+				chunk_memcpy(chunk, *msg_cur, value_len);
+				chunk->area[chunk->data] = '\0';
+				*msg_cur += value_len;
+
+				de = dict_insert(&server_name_dict, chunk->area);
+				dc->rx[id - 1].de = de;
+			}
+			if (de) {
+				data_ptr = stktable_data_ptr(st->table, ts, data_type);
+				if (data_ptr)
+					stktable_data_cast(data_ptr, std_t_dict) = de;
+			}
+			break;
+		}
 		}
 	}
 	/* Force new expiration */
@@ -1544,7 +1683,7 @@ static inline int peer_recv_msg(struct appctx *appctx, char *msg_head, size_t ms
 
 	*totl += reql;
 
-	if ((unsigned int)msg_head[1] < 128)
+	if (!(msg_head[1] & PEER_MSG_STKT_BIT_MASK))
 		return 1;
 
 	/* Read and Decode message length */
@@ -1554,7 +1693,7 @@ static inline int peer_recv_msg(struct appctx *appctx, char *msg_head, size_t ms
 
 	*totl += reql;
 
-	if ((unsigned int)msg_head[2] < 240) {
+	if ((unsigned int)msg_head[2] < PEER_ENC_2BYTES_MIN) {
 		*msg_len = msg_head[2];
 	}
 	else {
@@ -1569,7 +1708,7 @@ static inline int peer_recv_msg(struct appctx *appctx, char *msg_head, size_t ms
 
 			*totl += reql;
 
-			if (!(msg_head[i] & 0x80))
+			if (!(msg_head[i] & PEER_MSG_STKT_BIT_MASK))
 				break;
 		}
 
@@ -2696,7 +2835,167 @@ int peers_init_sync(struct peers *peers)
 	return 1;
 }
 
+/*
+ * Allocate a cache a dictionary entries used upon transmission.
+ */
+static struct dcache_tx *new_dcache_tx(size_t max_entries)
+{
+	struct dcache_tx *d;
+	struct ebpt_node *entries;
 
+	d = malloc(sizeof *d);
+	entries = calloc(max_entries, sizeof *entries);
+	if (!d || !entries)
+		goto err;
+
+	d->lru_key = 0;
+	d->prev_lookup = NULL;
+	d->cached_entries = EB_ROOT_UNIQUE;
+	d->entries = entries;
+
+	return d;
+
+ err:
+	free(d);
+	free(entries);
+	return NULL;
+}
+
+static void free_dcache_tx(struct dcache_tx *dc)
+{
+	free(dc->entries);
+	dc->entries = NULL;
+	free(dc);
+}
+
+/*
+ * Allocate a cache of dictionary entries with <name> as name and <max_entries>
+ * as maximum of entries.
+ * Return the dictionay cache if succeeded, NULL if not.
+ * Must be deallocated calling free_dcache().
+ */
+static struct dcache *new_dcache(size_t max_entries)
+{
+	struct dcache_tx *dc_tx;
+	struct dcache *dc;
+	struct dcache_rx *dc_rx;
+
+	dc = calloc(1, sizeof *dc);
+	dc_tx = new_dcache_tx(max_entries);
+	dc_rx = calloc(max_entries, sizeof *dc_rx);
+	if (!dc || !dc_tx || !dc_rx)
+		goto err;
+
+	dc->tx = dc_tx;
+	dc->rx = dc_rx;
+	dc->max_entries = max_entries;
+
+	return dc;
+
+ err:
+	free(dc);
+	free(dc_tx);
+	free(dc_rx);
+	return NULL;
+}
+
+/*
+ * Deallocate a cache of dictionary entries.
+ */
+static inline void free_dcache(struct dcache *dc)
+{
+	free_dcache_tx(dc->tx);
+	dc->tx = NULL;
+	free(dc->rx); dc->rx = NULL;
+	free(dc);
+}
+
+
+/*
+ * Look for the dictionary entry with the value of <i> in <d> cache of dictionary
+ * entries used upon transmission.
+ * Return the entry if found, NULL if not.
+ */
+static struct ebpt_node *dcache_tx_lookup_value(struct dcache_tx *d,
+                                                struct dcache_tx_entry *i)
+{
+	return ebpt_lookup(&d->cached_entries, i->entry.key);
+}
+
+/*
+ * Flush <dc> cache.
+ * Always succeeds.
+ */
+static inline void flush_dcache(struct peer *peer)
+{
+	int i;
+	struct dcache *dc = peer->dcache;
+
+	for (i = 0; i < dc->max_entries; i++)
+		ebpt_delete(&dc->tx->entries[i]);
+
+	memset(dc->rx, 0, dc->max_entries * sizeof *dc->rx);
+}
+
+/*
+ * Insert a dictionary entry in <dc> cache part used upon transmission (->tx)
+ * with information provided by <i> dictionary cache entry (especially the value
+ * to be inserted if not already). Return <i> if already present in the cache
+ * or something different of <i> if not.
+ */
+static struct ebpt_node *dcache_tx_insert(struct dcache *dc, struct dcache_tx_entry *i)
+{
+	struct dcache_tx *dc_tx;
+	struct ebpt_node *o;
+
+	dc_tx = dc->tx;
+
+	if (dc_tx->prev_lookup && dc_tx->prev_lookup->key == i->entry.key) {
+		o = dc_tx->prev_lookup;
+	} else {
+		o = dcache_tx_lookup_value(dc_tx, i);
+		if (o) {
+			/* Save it */
+			dc_tx->prev_lookup = o;
+		}
+	}
+
+	if (o) {
+		/* Copy the ID. */
+		i->id = o - dc->tx->entries;
+		return &i->entry;
+	}
+
+	/* The new entry to put in cache */
+	dc_tx->prev_lookup = o = &dc_tx->entries[dc_tx->lru_key];
+
+	ebpt_delete(o);
+	o->key = i->entry.key;
+	ebpt_insert(&dc_tx->cached_entries, o);
+	i->id = dc_tx->lru_key;
+
+	/* Update the index for the next entry to put in cache */
+	dc_tx->lru_key = (dc_tx->lru_key + 1) & (dc->max_entries - 1);
+
+	return o;
+}
+
+/*
+ * Allocate a dictionary cache for each peer of <peers> section.
+ * Return 1 if succeeded, 0 if not.
+ */
+int peers_alloc_dcache(struct peers *peers)
+{
+	struct peer *p;
+
+	for (p = peers->remote; p; p = p->next) {
+		p->dcache = new_dcache(PEER_STKT_CACHE_MAX_ENTRIES);
+		if (!p->dcache)
+			return 0;
+	}
+
+	return 1;
+}
 
 /*
  * Function used to register a table for sync on a group of peers
@@ -2870,8 +3169,13 @@ static int peers_dump_peer(struct buffer *msg, struct stream_interface *si, stru
 	if (peer->tables) {
 		chunk_appendf(&trash, "\n        shared tables:");
 		for (st = peer->tables; st; st = st->next) {
+			int i, count;
 			struct stktable *t;
+			struct dcache *dcache;
+
 			t = st->table;
+			dcache = peer->dcache;
+
 			chunk_appendf(&trash, "\n          %p local_id=%d remote_id=%d "
 			              "flags=0x%x remote_data=0x%llx",
 			              st, st->local_id, st->remote_id,
@@ -2883,6 +3187,32 @@ static int peers_dump_peer(struct buffer *msg, struct stream_interface *si, stru
 			chunk_appendf(&trash, "\n              table:%p id=%s update=%u localupdate=%u"
 			              " commitupdate=%u syncing=%u",
 			              t, t->id, t->update, t->localupdate, t->commitupdate, t->syncing);
+			chunk_appendf(&trash, "\n        TX dictionary cache:");
+			count = 0;
+			for (i = 0; i < dcache->max_entries; i++) {
+				struct ebpt_node *node;
+				struct dict_entry *de;
+
+				node = &dcache->tx->entries[i];
+				if (!node->key)
+					break;
+
+				if (!count++)
+					chunk_appendf(&trash, "\n        ");
+				de = node->key;
+				chunk_appendf(&trash, "  %3u -> %s", i, (char *)de->value.key);
+				count &= 0x3;
+			}
+			chunk_appendf(&trash, "\n        RX dictionary cache:");
+			count = 0;
+			for (i = 0; i < dcache->max_entries; i++) {
+				if (!count++)
+					chunk_appendf(&trash, "\n        ");
+				chunk_appendf(&trash, "  %3u -> %s", i,
+				              dcache->rx[i].de ?
+				                  (char *)dcache->rx[i].de->value.key : "-");
+				count &= 0x3;
+			}
 		}
 	}
 

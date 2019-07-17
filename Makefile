@@ -1,7 +1,11 @@
 # This GNU Makefile supports different OS and CPU combinations.
 #
 # You should use it this way :
-#   [g]make TARGET=os ARCH=arch CPU=cpu USE_xxx=1 ...
+#   [g]make TARGET=os [ARCH=arch] [CPU=cpu] USE_xxx=1 ...
+#
+# When in doubt, invoke help, possibly with a known target :
+#   [g]make help
+#   [g]make help TARGET=linux-glibc
 #
 # By default the detailed commands are hidden for a cleaner output, but you may
 # see them by appending "V=1" to the make command.
@@ -54,7 +58,8 @@
 #   USE_THREAD_DUMP      : use the more advanced thread state dump system. Automatic.
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
-# "USE_xxx=" (empty string).
+# "USE_xxx=" (empty string). The list of enabled and disabled options for a
+# given TARGET is enumerated at the end of "make help".
 #
 # Variables useful for packagers :
 #   CC is set to "gcc" by default and is used for compilation only.
@@ -102,8 +107,7 @@
 #   VERSION        : force haproxy version reporting.
 #   SUBVERS        : add a sub-version (eg: platform, model, ...).
 #   VERDATE        : force haproxy's release date.
-#
-#   VTEST_PROGRAM : location of the vtest program to run reg-tests.
+#   VTEST_PROGRAM  : location of the vtest program to run reg-tests.
 
 # verbosity: pass V=1 for verbose shell invocation
 V = 0
@@ -137,8 +141,8 @@ DOCDIR = $(PREFIX)/doc/haproxy
 #### TARGET system
 # Use TARGET=<target_name> to optimize for a specifc target OS among the
 # following list (use the default "generic" if uncertain) :
-#    generic, linux22, linux24, linux24e, linux26, solaris,
-#    freebsd, openbsd, netbsd, cygwin, haiku, custom, aix51, aix52
+#    linux-glibc, solaris, freebsd, openbsd, netbsd, cygwin,
+#    haiku, aix51, aix52, osx, generic, custom
 TARGET =
 
 #### TARGET CPU
@@ -315,38 +319,13 @@ ifeq ($(TARGET),haiku)
   set_target_defaults = $(call default_opts,USE_POLL USE_TPROXY)
 endif
 
-# Linux 2.2
-ifeq ($(TARGET),linux22)
-  set_target_defaults = $(call default_opts, \
-    USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT)
-endif
-
-# Standard Linux 2.4 with netfilter but without epoll()
-ifeq ($(TARGET),linux24)
-  set_target_defaults = $(call default_opts, \
-    USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT USE_CRYPT_H USE_NETFILTER)
-endif
-
-# Enhanced Linux 2.4 with netfilter and epoll() patch > 0.21
-ifeq ($(TARGET),linux24e)
-  set_target_defaults = $(call default_opts, \
-    USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT USE_CRYPT_H USE_NETFILTER  \
-    USE_EPOLL USE_MY_EPOLL)
-endif
-
-# Standard Linux 2.6 with netfilter and standard epoll()
-ifeq ($(TARGET),linux26)
-  set_target_defaults = $(call default_opts, \
-    USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT USE_CRYPT_H USE_NETFILTER  \
-    USE_EPOLL USE_FUTEX USE_PRCTL)
-endif
-
-# Standard Linux >= 2.6.28 with netfilter, epoll, tproxy and splice
-ifeq ($(TARGET),linux2628)
+# For linux >= 2.6.28 and glibc
+ifeq ($(TARGET),linux-glibc)
   set_target_defaults = $(call default_opts, \
     USE_POLL USE_TPROXY USE_LIBCRYPT USE_DL USE_RT USE_CRYPT_H USE_NETFILTER  \
     USE_CPU_AFFINITY USE_THREAD USE_EPOLL USE_FUTEX USE_LINUX_TPROXY          \
-    USE_ACCEPT4 USE_LINUX_SPLICE USE_PRCTL USE_THREAD_DUMP)
+    USE_ACCEPT4 USE_LINUX_SPLICE USE_PRCTL USE_THREAD_DUMP USE_NS USE_TFO     \
+    USE_GETADDRINFO)
 endif
 
 # Solaris 8 and above
@@ -354,7 +333,7 @@ ifeq ($(TARGET),solaris)
   # We also enable getaddrinfo() which works since solaris 8.
   set_target_defaults = $(call default_opts, \
     USE_POLL USE_TPROXY USE_LIBCRYPT USE_CRYPT_H USE_GETADDRINFO USE_THREAD \
-    USE_OBSOLETE_LINKER USE_EVPORTS)
+    USE_RT USE_OBSOLETE_LINKER USE_EVPORTS)
   TARGET_CFLAGS  = -DFD_SETSIZE=65536 -D_REENTRANT -D_XOPEN_SOURCE=500 -D__EXTENSIONS__
   TARGET_LDFLAGS = -lnsl -lsocket
 endif
@@ -418,10 +397,10 @@ $(set_target_defaults)
 # holding the same names in the current directory.
 
 ifeq ($(IGNOREGIT),)
-VERSION := $(shell [ -d .git/. ] && ref=`(git describe --tags --match 'v*' --abbrev=0) 2>/dev/null` && ref=$${ref%-g*} && echo "$${ref\#v}")
+VERSION := $(shell [ -d .git/. ] && (git describe --tags --match 'v*' --abbrev=0 | cut -c 2-) 2>/dev/null)
 ifneq ($(VERSION),)
 # OK git is there and works.
-SUBVERS := $(shell comms=`git log --format=oneline --no-merges v$(VERSION).. 2>/dev/null | wc -l | tr -dc '0-9'`; commit=`(git log -1 --pretty=%h --abbrev=6) 2>/dev/null`; [ $$comms -gt 0 ] && echo "-$$commit-$$comms")
+SUBVERS := $(shell comms=`git log --format=oneline --no-merges v$(VERSION).. 2>/dev/null | wc -l | tr -d '[:space:]'`; commit=`(git log -1 --pretty=%h --abbrev=6) 2>/dev/null`; [ $$comms -gt 0 ] && echo "-$$commit-$$comms")
 VERDATE := $(shell git log -1 --pretty=format:%ci | cut -f1 -d' ' | tr '-' '/')
 endif
 endif
@@ -755,9 +734,8 @@ all:
 	@echo
 	@echo "Please choose the target among the following supported list :"
 	@echo
-	@echo "   linux2628, linux26, linux24, linux24e, linux22, solaris,"
-	@echo "   freebsd, netbsd, osx, openbsd, aix51, aix52, cygwin, haiku,"
-	@echo "   generic, custom"
+	@echo "   linux-glibc, solaris, freebsd, openbsd, netbsd, cygwin,"
+	@echo "   haiku, aix51, aix52, osx, generic, custom"
 	@echo
 	@echo "Use \"generic\" if you don't want any optimization, \"custom\" if you"
 	@echo "want to precisely tweak every option, or choose the target which"
@@ -766,7 +744,17 @@ all:
 	@echo
 	@exit 1
 else
+ifneq ($(filter $(TARGET), linux linux22 linux24 linux24e linux26 linux2628),)
+all:
+	@echo
+	@echo "Target '$(TARGET)' was removed from HAProxy 2.0 due to being irrelevant and"
+	@echo "often wrong. Please use 'linux-glibc' instead or define your custom target"
+	@echo "by checking available options using 'make help TARGET=<your-target>'."
+	@echo
+	@exit 1
+else
 all: haproxy $(EXTRA)
+endif
 endif
 
 OBJS = src/proto_http.o src/cfgparse-listen.o src/proto_htx.o src/stream.o    \
@@ -789,7 +777,8 @@ OBJS = src/proto_http.o src/cfgparse-listen.o src/proto_htx.o src/stream.o    \
        src/xxhash.o src/hpack-enc.o src/h2.o src/freq_ctr.o src/lru.o         \
        src/protocol.o src/arg.o src/hpack-huff.o src/hdr_idx.o src/base64.o   \
        src/hash.o src/mailers.o src/activity.o src/http_msg.o src/version.o   \
-       src/mworker.o src/mworker-prog.o src/debug.o src/wdt.o src/cuju_ft.o
+       src/mworker.o src/mworker-prog.o src/debug.o src/wdt.o src/dict.o      \
+       src/xprt_handshake.o src/cuju_ft.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o $(EBTREE_DIR)/eb32sctree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -812,7 +801,23 @@ INCLUDES = $(wildcard include/*/*.h ebtree/*.h)
 DEP = $(INCLUDES) .build_opts
 
 help:
-	$(Q)sed -ne "/^[^#]*$$/q;s/^#\(.*\)/\1/p" Makefile
+	$(Q)sed -ne "/^[^#]*$$/q;s/^# \{0,1\}\(.*\)/\1/;p" Makefile
+	$(Q)echo; \
+	   if [ -n "$(TARGET)" ]; then \
+	     if [ -n "$(set_target_defaults)" ]; then \
+	        echo "Current TARGET: $(TARGET)"; \
+	     else \
+	        echo "Current TARGET: $(TARGET) (custom target)"; \
+	     fi; \
+	   else \
+	     echo "TARGET not set, you may pass 'TARGET=xxx' to set one among :";\
+	     echo "  linux-glibc, solaris, freebsd, netbsd, osx, openbsd,"; \
+	     echo "  aix51, aix52, cygwin, haiku, generic, custom"; \
+	   fi
+	$(Q)echo;echo "Enabled features for TARGET '$(TARGET)' (disable with 'USE_xxx=') :"
+	$(Q)set -- $(foreach opt,$(patsubst USE_%,%,$(use_opts)),$(if $(USE_$(opt)),$(opt),)); echo "  $$*" | (fmt || cat) 2>/dev/null
+	$(Q)echo;echo "Disabled features for TARGET '$(TARGET)' (enable with 'USE_xxx=1') :"
+	$(Q)set -- $(foreach opt,$(patsubst USE_%,%,$(use_opts)),$(if $(USE_$(opt)),,$(opt))); echo "  $$*" | (fmt || cat) 2>/dev/null
 
 # Used only to force a rebuild if some build options change
 build_opts = $(shell rm -f .build_opts.new; echo \'$(TARGET) $(BUILD_OPTIONS) $(VERBOSE_CFLAGS)\' > .build_opts.new; if cmp -s .build_opts .build_opts.new; then rm -f .build_opts.new; else mv -f .build_opts.new .build_opts; fi)

@@ -527,7 +527,7 @@ static void usage(char *name)
 		"        -dV disables SSL verify on servers side\n"
 		"        -sf/-st [pid ]* finishes/terminates old pids.\n"
 		"        -x <unix_socket> get listening sockets from a unix socket\n"
-		"        -S <unix_socket>[,<bind options>...] new stats socket for the master\n"
+		"        -S <bind>[,<bind options>...] new master CLI\n"
 		"\n",
 		name, cfg_maxpconn);
 	exit(1);
@@ -634,11 +634,14 @@ void mworker_reload()
 
 	/* close the listeners FD */
 	mworker_cli_proxy_stop();
-	/* close the poller FD and the thread waker pipe FD */
-	list_for_each_entry(ptdf, &per_thread_deinit_list, list)
-		ptdf->fct();
-	if (fdtab)
-		deinit_pollers();
+
+	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
+		/* close the poller FD and the thread waker pipe FD */
+		list_for_each_entry(ptdf, &per_thread_deinit_list, list)
+			ptdf->fct();
+		if (fdtab)
+			deinit_pollers();
+	}
 #if defined(USE_OPENSSL) && (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L)
 	if (global.ssl_used_frontend || global.ssl_used_backend)
 		/* close random device FDs */
@@ -2368,10 +2371,10 @@ void deinit(void)
 			task_destroy(s->check.task);
 			task_destroy(s->agent.task);
 
-			if (s->check.wait_list.task)
-				tasklet_free(s->check.wait_list.task);
-			if (s->agent.wait_list.task)
-				tasklet_free(s->agent.wait_list.task);
+			if (s->check.wait_list.tasklet)
+				tasklet_free(s->check.wait_list.tasklet);
+			if (s->agent.wait_list.tasklet)
+				tasklet_free(s->agent.wait_list.tasklet);
 
 			task_destroy(s->warmup);
 
@@ -2512,7 +2515,7 @@ void deinit(void)
 /* Runs the polling loop */
 static void run_poll_loop()
 {
-	int next, exp;
+	int next, wake;
 
 	tv_update_date(0,1);
 	while (1) {
@@ -2531,26 +2534,30 @@ static void run_poll_loop()
 		if ((jobs - unstoppable_jobs) == 0)
 			break;
 
+		/* also stop  if we failed to cleanly stop all tasks */
+		if (killed > 1)
+			break;
+
 		/* expire immediately if events are pending */
-		exp = now_ms;
+		wake = 1;
 		if (fd_cache_mask & tid_bit)
 			activity[tid].wake_cache++;
-		else if (active_tasks_mask & tid_bit)
+		else if (thread_has_tasks())
 			activity[tid].wake_tasks++;
 		else if (signal_queue_len && tid == 0)
 			activity[tid].wake_signal++;
 		else {
 			_HA_ATOMIC_OR(&sleeping_thread_mask, tid_bit);
 			__ha_barrier_atomic_store();
-			if (active_tasks_mask & tid_bit) {
+			if (global_tasks_mask & tid_bit) {
 				activity[tid].wake_tasks++;
 				_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
 			} else
-				exp = next;
+				wake = 0;
 		}
 
 		/* The poller will ensure it returns around <next> */
-		cur_poller.poll(&cur_poller, exp);
+		cur_poller.poll(&cur_poller, next, wake);
 		if (sleeping_thread_mask & tid_bit)
 			_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
 		fd_process_cached_events();
@@ -2565,6 +2572,9 @@ static void *run_thread_poll_loop(void *data)
 	struct per_thread_init_fct   *ptif;
 	struct per_thread_deinit_fct *ptdf;
 	struct per_thread_free_fct   *ptff;
+	static int init_left = 0;
+	__decl_hathreads(static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER);
+	__decl_hathreads(static pthread_cond_t  init_cond  = PTHREAD_COND_INITIALIZER);
 
 	ha_set_tid((unsigned long)data);
 
@@ -2575,6 +2585,18 @@ static void *run_thread_poll_loop(void *data)
 	ti->clock_id = CLOCK_THREAD_CPUTIME_ID;
 #endif
 #endif
+	/* Now, initialize one thread init at a time. This is better since
+	 * some init code is a bit tricky and may release global resources
+	 * after reallocating them locally. This will also ensure there is
+	 * no race on file descriptors allocation.
+	 */
+#ifdef USE_THREAD
+	pthread_mutex_lock(&init_mutex);
+#endif
+	/* The first thread must set the number of threads left */
+	if (!init_left)
+		init_left = global.nbthread;
+	init_left--;
 
 	tv_update_date(-1,-1);
 
@@ -2601,12 +2623,24 @@ static void *run_thread_poll_loop(void *data)
 		}
 	}
 
-	/* broadcast that we are ready and wait for other threads to finish
-	 * their initialization.
+	/* enabling protocols will result in fd_insert() calls to be performed,
+	 * we want all threads to have already allocated their local fd tables
+	 * before doing so, thus only the last thread does it.
 	 */
-	thread_release();
+	if (init_left == 0)
+		protocol_enable_all();
 
-	protocol_enable_all();
+#ifdef USE_THREAD
+	pthread_cond_broadcast(&init_cond);
+	pthread_mutex_unlock(&init_mutex);
+
+	/* now wait for other threads to finish starting */
+	pthread_mutex_lock(&init_mutex);
+	while (init_left)
+		pthread_cond_wait(&init_cond, &init_mutex);
+	pthread_mutex_unlock(&init_mutex);
+#endif
+
 	run_poll_loop();
 
 	list_for_each_entry(ptdf, &per_thread_deinit_list, list)
@@ -2982,7 +3016,7 @@ int main(int argc, char **argv)
 		/* if in master-worker mode, write the PID of the father */
 		if (global.mode & MODE_MWORKER) {
 			char pidstr[100];
-			snprintf(pidstr, sizeof(pidstr), "%d\n", getpid());
+			snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
 			if (pidfd >= 0)
 				shut_your_big_mouth_gcc(write(pidfd, pidstr, strlen(pidstr)));
 		}
@@ -3015,6 +3049,7 @@ int main(int argc, char **argv)
 						    child->reloads == 0 && child->options & PROC_O_TYPE_WORKER) {
 							child->timestamp = now.tv_sec;
 							child->pid = ret;
+							child->version = strdup(haproxy_version);
 							break;
 						}
 					}
@@ -3243,12 +3278,6 @@ int main(int argc, char **argv)
 		sigdelset(&blocked_sig, SIGSEGV);
 		pthread_sigmask(SIG_SETMASK, &blocked_sig, &old_sig);
 
-		/* mark the fact that threads must wait for each other
-		 * during startup. Once initialized, they just have to
-		 * call thread_release().
-		 */
-		threads_want_rdv_mask = all_threads_mask;
-
 		/* Create nbthread-1 thread. The first thread is the current process */
 		thread_info[0].pthread = pthread_self();
 		for (i = 1; i < global.nbthread; i++)
@@ -3256,6 +3285,9 @@ int main(int argc, char **argv)
 
 #ifdef USE_CPU_AFFINITY
 		/* Now the CPU affinity for all threads */
+		if (global.cpu_map.proc_t1[relative_pid-1])
+			global.cpu_map.thread[0] &= global.cpu_map.proc_t1[relative_pid-1];
+
 		for (i = 0; i < global.nbthread; i++) {
 			if (global.cpu_map.proc[relative_pid-1])
 				global.cpu_map.thread[i] &= global.cpu_map.proc[relative_pid-1];

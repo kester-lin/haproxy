@@ -203,13 +203,13 @@ struct htx *smp_prefetch_htx(struct sample *smp, struct channel *chn, int vol)
 
 		if (msg->msg_state < HTTP_MSG_BODY) {
 			/* Analyse not yet started */
-			if (htx_is_empty(htx) || htx_get_tail_type(htx) < HTX_BLK_EOH) {
+			if (htx_is_empty(htx) || htx->first == -1) {
 				/* Parsing is done by the mux, just wait */
 				smp->flags |= SMP_F_MAY_CHANGE;
 				return NULL;
 			}
 		}
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		if (vol && !sl) {
 			/* The start-line was already forwarded, it is too late to fetch anything */
 			return NULL;
@@ -218,7 +218,7 @@ struct htx *smp_prefetch_htx(struct sample *smp, struct channel *chn, int vol)
 	else { /* RAW mode */
 		struct buffer *buf;
 		struct h1m h1m;
-		struct http_hdr hdrs[MAX_HTTP_HDR];
+		struct http_hdr hdrs[global.tune.max_http_hdr];
 		union h1_sl h1sl;
 		unsigned int flags = HTX_FL_NONE;
 		int ret;
@@ -434,7 +434,7 @@ static int smp_fetch_meth(const struct arg *args, struct sample *smp, const char
 				/* ensure the indexes are not affected */
 				return 0;
 			}
-			sl = http_find_stline(htx);
+			sl = http_get_stline(htx);
 			smp->flags |= SMP_F_CONST;
 			smp->data.u.meth.str.area = HTX_SL_REQ_MPTR(sl);
 			smp->data.u.meth.str.data = HTX_SL_REQ_MLEN(sl);
@@ -478,7 +478,7 @@ static int smp_fetch_rqver(const struct arg *args, struct sample *smp, const cha
 		if (!htx)
 			return 0;
 
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		len = HTX_SL_REQ_VLEN(sl);
 		ptr = HTX_SL_REQ_VPTR(sl);
 	}
@@ -518,7 +518,7 @@ static int smp_fetch_stver(const struct arg *args, struct sample *smp, const cha
 		if (!htx)
 			return 0;
 
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		len = HTX_SL_RES_VLEN(sl);
 		ptr = HTX_SL_RES_VPTR(sl);
 	}
@@ -559,7 +559,7 @@ static int smp_fetch_stcode(const struct arg *args, struct sample *smp, const ch
 		if (!htx)
 			return 0;
 
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		len = HTX_SL_RES_CLEN(sl);
 		ptr = HTX_SL_RES_CPTR(sl);
 	}
@@ -615,7 +615,7 @@ static int smp_fetch_hdrs(const struct arg *args, struct sample *smp, const char
 		if (!htx)
 			return 0;
 		temp = get_trash_chunk();
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
@@ -687,7 +687,7 @@ static int smp_fetch_hdrs_bin(const struct arg *args, struct sample *smp, const 
 		temp = get_trash_chunk();
 		p = temp->area;
 		end = temp->area + temp->size;
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 			struct ist n, v;
@@ -844,11 +844,11 @@ static int smp_fetch_body(const struct arg *args, struct sample *smp, const char
 			return 0;
 
 		temp = get_trash_chunk();
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
-			if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+			if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 				break;
 			if (type == HTX_BLK_DATA) {
 				if (!htx_data_to_h1(htx_get_blk_value(htx, blk), temp, 0))
@@ -915,11 +915,11 @@ static int smp_fetch_body_len(const struct arg *args, struct sample *smp, const 
 		if (!htx)
 			return 0;
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
-			if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+			if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 				break;
 			if (type == HTX_BLK_DATA)
 				len += htx_get_blksz(blk);
@@ -963,11 +963,11 @@ static int smp_fetch_body_size(const struct arg *args, struct sample *smp, const
 		if (!htx)
 			return 0;
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
-			if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+			if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 				break;
 			if (type == HTX_BLK_DATA)
 				len += htx_get_blksz(blk);
@@ -1009,7 +1009,7 @@ static int smp_fetch_url(const struct arg *args, struct sample *smp, const char 
 
 		if (!htx)
 			return 0;
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		smp->data.type = SMP_T_STR;
 		smp->data.u.str.area = HTX_SL_REQ_UPTR(sl);
 		smp->data.u.str.data = HTX_SL_REQ_ULEN(sl);
@@ -1041,7 +1041,7 @@ static int smp_fetch_url_ip(const struct arg *args, struct sample *smp, const ch
 
 		if (!htx)
 			return 0;
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		url2sa(HTX_SL_REQ_UPTR(sl), HTX_SL_REQ_ULEN(sl), &addr, NULL);
 	}
 	else {
@@ -1074,7 +1074,7 @@ static int smp_fetch_url_port(const struct arg *args, struct sample *smp, const 
 
 		if (!htx)
 			return 0;
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		url2sa(HTX_SL_REQ_UPTR(sl), HTX_SL_REQ_ULEN(sl), &addr, NULL);
 	}
 	else {
@@ -1281,7 +1281,7 @@ static int smp_fetch_hdr_names(const struct arg *args, struct sample *smp, const
 			del = *args[0].data.str.area;
 
 		temp = get_trash_chunk();
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 			struct ist n;
@@ -1573,7 +1573,7 @@ static int smp_fetch_path(const struct arg *args, struct sample *smp, const char
 		if (!htx)
 			return 0;
 
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		path = http_get_path(htx_sl_req_uri(sl));
 		if (!path.ptr)
 			return 0;
@@ -1643,7 +1643,7 @@ static int smp_fetch_base(const struct arg *args, struct sample *smp, const char
 		chunk_memcat(temp, ctx.value.ptr, ctx.value.len);
 
 		/* now retrieve the path */
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		path = http_get_path(htx_sl_req_uri(sl));
 		if (path.ptr) {
 			size_t len;
@@ -1728,7 +1728,7 @@ static int smp_fetch_base32(const struct arg *args, struct sample *smp, const ch
 		}
 
 		/* now retrieve the path */
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		path = http_get_path(htx_sl_req_uri(sl));
 		if (path.ptr) {
 			size_t len;
@@ -1844,7 +1844,7 @@ static int smp_fetch_query(const struct arg *args, struct sample *smp, const cha
 		if (!htx)
 			return 0;
 
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		ptr = HTX_SL_REQ_UPTR(sl);
 		end = HTX_SL_REQ_UPTR(sl) + HTX_SL_REQ_ULEN(sl);
 	}
@@ -2523,7 +2523,7 @@ static int smp_fetch_url_param(const struct arg *args, struct sample *smp, const
 			if (!htx)
 				return 0;
 
-			sl = http_find_stline(htx);
+			sl = http_get_stline(htx);
 			smp->ctx.a[0] = http_find_param_list(HTX_SL_REQ_UPTR(sl), HTX_SL_REQ_ULEN(sl), delim);
 			if (!smp->ctx.a[0])
 				return 0;
@@ -2590,11 +2590,11 @@ static int smp_fetch_body_param(const struct arg *args, struct sample *smp, cons
 				return 0;
 
 			temp   = get_trash_chunk();
-			for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+			for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 				struct htx_blk   *blk  = htx_get_blk(htx, pos);
 				enum htx_blk_type type = htx_get_blk_type(blk);
 
-				if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+				if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 					break;
 				if (type == HTX_BLK_DATA) {
 					if (!htx_data_to_h1(htx_get_blk_value(htx, blk), temp, 0))
@@ -2701,7 +2701,7 @@ static int smp_fetch_url32(const struct arg *args, struct sample *smp, const cha
 		}
 
 		/* now retrieve the path */
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		path = http_get_path(htx_sl_req_uri(sl));
 		while (path.len > 0 && *(path.ptr) != '?') {
 			path.ptr++;

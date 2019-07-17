@@ -716,10 +716,11 @@ static struct task *event_srv_chk_io(struct task *t, void *ctx, unsigned short s
 	struct check *check = ctx;
 	struct conn_stream *cs = check->cs;
 	struct email_alertq *q = container_of(check, typeof(*q), check);
+	int ret = 0;
 
 	if (!(check->wait_list.events & SUB_RETRY_SEND))
-		wake_srv_chk(cs);
-	if (!(check->wait_list.events & SUB_RETRY_RECV)) {
+		ret = wake_srv_chk(cs);
+	if (ret == 0 && !(check->wait_list.events & SUB_RETRY_RECV)) {
 		if (check->server)
 			HA_SPIN_LOCK(SERVER_LOCK, &check->server->lock);
 		else
@@ -1382,6 +1383,11 @@ static void __event_srv_chk_r(struct conn_stream *cs)
 	 * range quickly.  To avoid sending RSTs all the time, we first try to
 	 * drain pending data.
 	 */
+	/* Call cs_shutr() first, to add the CO_FL_SOCK_RD_SH flag on the
+	 * connection, to make sure cs_shutw() will not lead to a shutdown()
+	 * that would provoke TIME_WAITs.
+	 */
+	cs_shutr(cs, CS_SHR_DRAIN);
 	cs_shutw(cs, CS_SHW_NORMAL);
 
 	/* OK, let's not stay here forever */
@@ -1448,6 +1454,11 @@ static int wake_srv_chk(struct conn_stream *cs)
 		conn_sock_drain(conn);
 		cs_close(cs);
 		ret = -1;
+		/* We may have been scheduled to run, and the
+		 * I/O handler expects to have a cs, so remove
+		 * the tasklet
+		 */
+		tasklet_remove_from_tasklet_list(check->wait_list.tasklet);
 		task_wakeup(check->task, TASK_WOKEN_IO);
 	}
 
@@ -1612,6 +1623,11 @@ static int connect_conn_chk(struct task *t)
 		conn->addr.to = s->addr;
 	}
 
+	if (s->check.via_socks4 &&  (s->flags & SRV_F_SOCKS4_PROXY)) {
+		conn->send_proxy_ofs = 1;
+		conn->flags |= CO_FL_SOCKS4;
+	}
+
 	proto = protocol_by_family(conn->addr.to.ss_family);
 	conn->target = &s->obj_type;
 
@@ -1657,6 +1673,8 @@ static int connect_conn_chk(struct task *t)
 	if (s->check.send_proxy && !(check->state & CHK_ST_AGENT)) {
 		conn->send_proxy_ofs = 1;
 		conn->flags |= CO_FL_SEND_PROXY;
+		if (xprt_add_hs(conn) < 0)
+			ret = SF_ERR_RESOURCE;
 	}
 
 	return ret;
@@ -1990,6 +2008,7 @@ static int connect_proc_chk(struct task *t)
 
 		environ = check->envp;
 		extchk_setenv(check, EXTCHK_HAPROXY_SERVER_CURCONN, ultoa_r(s->cur_sess, buf, sizeof(buf)));
+		haproxy_unblock_signals();
 		execvp(px->check_command, check->argv);
 		ha_alert("Failed to exec process for external health check: %s. Aborting.\n",
 			 strerror(errno));
@@ -2238,6 +2257,16 @@ static struct task *process_chk_conn(struct task *t, void *context, unsigned sho
 
 		/* here, we have seen a synchronous error, no fd was allocated */
 		if (cs) {
+			if (check->wait_list.events)
+				cs->conn->xprt->unsubscribe(cs->conn,
+				                            cs->conn->xprt_ctx,
+							    check->wait_list.events,
+							    &check->wait_list);
+			/* We may have been scheduled to run, and the
+			 * I/O handler expects to have a cs, so remove
+			 * the tasklet
+			 */
+			tasklet_remove_from_tasklet_list(check->wait_list.tasklet);
 			cs_destroy(cs);
 			cs = check->cs = NULL;
 			conn = NULL;
@@ -2292,6 +2321,16 @@ static struct task *process_chk_conn(struct task *t, void *context, unsigned sho
 		}
 
 		if (cs) {
+			if (check->wait_list.events)
+				cs->conn->xprt->unsubscribe(cs->conn,
+				    cs->conn->xprt_ctx,
+				    check->wait_list.events,
+				    &check->wait_list);
+			/* We may have been scheduled to run, and the
+			 * I/O handler expects to have a cs, so remove
+			 * the tasklet
+			 */
+			tasklet_remove_from_tasklet_list(check->wait_list.tasklet);
 			cs_destroy(cs);
 			cs = check->cs = NULL;
 			conn = NULL;
@@ -2798,8 +2837,19 @@ static int tcpcheck_main(struct check *check)
 				goto out;
 			}
 
-			if (check->cs)
+			if (check->cs) {
+				if (check->wait_list.events)
+					cs->conn->xprt->unsubscribe(cs->conn,
+					                            cs->conn->xprt_ctx,
+								    check->wait_list.events,
+								    &check->wait_list);
+				/* We may have been scheduled to run, and the
+				 * I/O handler expects to have a cs, so remove
+				 * the tasklet
+				 */
+				tasklet_remove_from_tasklet_list(check->wait_list.tasklet);
 				cs_destroy(check->cs);
+			}
 
 			check->cs = cs;
 			conn = cs->conn;
@@ -2847,6 +2897,8 @@ static int tcpcheck_main(struct check *check)
 			if (check->current_step->conn_opts & TCPCHK_OPT_SEND_PROXY) {
 				conn->send_proxy_ofs = 1;
 				conn->flags |= CO_FL_SEND_PROXY;
+				if (xprt_add_hs(conn) < 0)
+					ret = SF_ERR_RESOURCE;
 			}
 
 			/* It can return one of :
@@ -2906,6 +2958,10 @@ static int tcpcheck_main(struct check *check)
 				check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
 
 			if (&check->current_step->list == head)
+				break;
+
+			/* don't do anything until the connection is established */
+			if (!(conn->flags & CO_FL_CONNECTED))
 				break;
 
 		} /* end 'connect' */
@@ -3158,12 +3214,12 @@ const char *init_check(struct check *check, int type)
 	if (!check->bi.area || !check->bo.area)
 		return "out of memory while allocating check buffer";
 
-	check->wait_list.task = tasklet_new();
-	if (!check->wait_list.task)
+	check->wait_list.tasklet = tasklet_new();
+	if (!check->wait_list.tasklet)
 		return "out of memroy while allocating check tasklet";
 	check->wait_list.events = 0;
-	check->wait_list.task->process = event_srv_chk_io;
-	check->wait_list.task->context = check;
+	check->wait_list.tasklet->process = event_srv_chk_io;
+	check->wait_list.tasklet->context = check;
 	return NULL;
 }
 

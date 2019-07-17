@@ -25,7 +25,7 @@
  * It relies on timer_create() and timer_settime() which are only available in
  * this case.
  */
-#if defined(USE_THREAD) && (_POSIX_TIMERS > 0) && defined(_POSIX_THREAD_CPUTIME)
+#if defined(USE_THREAD) && defined(USE_RT) && (_POSIX_TIMERS > 0) && defined(_POSIX_THREAD_CPUTIME)
 
 /* We'll deliver SIGALRM when we've run out of CPU as it's not intercepted by
  * gdb by default.
@@ -60,7 +60,7 @@ void wdt_handler(int sig, siginfo_t *si, void *arg)
 		 * the thread number from there. Note: this thread might
 		 * continue to execute in parallel.
 		 */
-		thr = si->si_int;
+		thr = si->si_value.sival_int;
 
 		/* cannot happen unless an unknown timer tries to play with our
 		 * nerves. Let's die for now if this happens.

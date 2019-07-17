@@ -152,6 +152,8 @@ const char *info_field_names[INF_TOTAL_FIELDS] = {
 	[INF_DROPPED_LOGS]                   = "DroppedLogs",
 	[INF_BUSY_POLLING]                   = "BusyPolling",
 	[INF_FAILED_RESOLUTIONS]             = "FailedResolutions",
+	[INF_TOTAL_BYTES_OUT]                = "TotalBytesOut",
+	[INF_BYTES_OUT_RATE]                 = "BytesOutRate",
 };
 
 const char *stat_field_names[ST_F_TOTAL_FIELDS] = {
@@ -256,7 +258,7 @@ static int stats_putchk(struct channel *chn, struct htx *htx, struct buffer *chk
 	if (htx) {
 		if (chk->data >= channel_htx_recv_max(chn, htx))
 			return 0;
-		if (!htx_add_data(htx, ist2(chk->area, chk->data)))
+		if (!htx_add_data_atonce(htx, ist2(chk->area, chk->data)))
 			return 0;
 		channel_add_input(chn, chk->data);
 		chk->data = 0;
@@ -275,8 +277,13 @@ static const char *stats_scope_ptr(struct appctx *appctx, struct stream_interfac
 	if (IS_HTX_STRM(si_strm(si))) {
 		struct channel *req = si_oc(si);
 		struct htx *htx = htxbuf(&req->buf);
-		struct ist uri = htx_sl_req_uri(http_find_stline(htx));
+		struct htx_blk *blk;
+		struct ist uri;
 
+		blk = htx_get_head_blk(htx);
+		BUG_ON(htx_get_blk_type(blk) != HTX_BLK_REQ_SL);
+		ALREADY_CHECKED(blk);
+		uri = htx_sl_req_uri(htx_get_blk_ptr(htx, blk));
 		p = uri.ptr;
 	}
 	else
@@ -2379,6 +2386,18 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	unsigned int up = (now.tv_sec - start_date.tv_sec);
 	char scope_txt[STAT_SCOPE_TXT_MAXLEN + sizeof STAT_SCOPE_PATTERN];
 	const char *scope_ptr = stats_scope_ptr(appctx, si);
+	unsigned long long bps = (unsigned long long)read_freq_ctr(&global.out_32bps) * 32;
+
+	/* Turn the bytes per second to bits per second and take care of the
+	 * usual ethernet overhead in order to help figure how far we are from
+	 * interface saturation since it's the only case which usually matters.
+	 * For this we count the total size of an Ethernet frame on the wire
+	 * including preamble and IFG (1538) for the largest TCP segment it
+	 * transports (1448 with TCP timestamps). This is not valid for smaller
+	 * packets (under-estimated), but it gives a reasonably accurate
+	 * estimation of how far we are from uplink saturation.
+	 */
+	bps = bps * 8 * 1538 / 1448;
 
 	/* WARNING! this has to fit the first packet too.
 	 * We are around 3.5 kB, add adding entries will
@@ -2395,7 +2414,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	              "<b>uptime = </b> %dd %dh%02dm%02ds<br>\n"
 	              "<b>system limits:</b> memmax = %s%s; ulimit-n = %d<br>\n"
 	              "<b>maxsock = </b> %d; <b>maxconn = </b> %d; <b>maxpipes = </b> %d<br>\n"
-	              "current conns = %d; current pipes = %d/%d; conn rate = %d/sec<br>\n"
+	              "current conns = %d; current pipes = %d/%d; conn rate = %d/sec; bit rate = %.3f %cbps<br>\n"
 	              "Running tasks: %d/%d; idle = %d %%<br>\n"
 	              "</td><td align=\"center\" nowrap>\n"
 	              "<table class=\"lgd\"><tr>\n"
@@ -2433,6 +2452,8 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	              global.rlimit_nofile,
 	              global.maxsock, global.maxconn, global.maxpipes,
 	              actconn, pipes_used, pipes_used+pipes_free, read_freq_ctr(&global.conn_per_sec),
+		      bps >= 1000000000UL ? (bps / 1000000000.0) : bps >= 1000000UL ? (bps / 1000000.0) : (bps / 1000.0),
+		      bps >= 1000000000UL ? 'G' : bps >= 1000000UL ? 'M' : 'k',
 	              tasks_run_queue_cur, nb_tasks_cur, ti->idle_pct
 	              );
 
@@ -2776,7 +2797,7 @@ static int stats_process_http_post(struct stream_interface *si)
 		while (blk) {
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
-			if (type == HTX_BLK_EOM || type == HTX_BLK_EOD)
+			if (type == HTX_BLK_EOM || type == HTX_BLK_TLR || type == HTX_BLK_EOT)
 				break;
 			if (type == HTX_BLK_DATA) {
 				struct ist v = htx_get_blk_value(htx, blk);
@@ -3339,7 +3360,7 @@ static void htx_stats_io_handler(struct appctx *appctx)
 	}
 
 	if (appctx->st0 == STAT_HTTP_DONE) {
-		/* Don't add EOD and TLR because mux-h1 will take care of it */
+		/* Don't add TLR because mux-h1 will take care of it */
 		if (!htx_add_endof(res_htx, HTX_BLK_EOM)) {
 			si_rx_room_blk(si);
 			goto out;
@@ -3656,6 +3677,8 @@ int stats_fill_info(struct field *info, int len)
 	info[INF_DROPPED_LOGS]                   = mkf_u32(0, dropped_logs);
 	info[INF_BUSY_POLLING]                   = mkf_u32(0, !!(global.tune.options & GTUNE_BUSY_POLLING));
 	info[INF_FAILED_RESOLUTIONS]             = mkf_u32(0, dns_failed_resolutions);
+	info[INF_TOTAL_BYTES_OUT]                = mkf_u64(0, global.out_bytes);
+	info[INF_BYTES_OUT_RATE]                 = mkf_u64(FN_RATE, (unsigned long long)read_freq_ctr(&global.out_32bps) * 32);
 
 	return 1;
 }

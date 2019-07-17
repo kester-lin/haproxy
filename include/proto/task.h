@@ -83,7 +83,6 @@
 
 /* a few exported variables */
 extern unsigned int nb_tasks;     /* total number of tasks */
-extern volatile unsigned long active_tasks_mask; /* Mask of threads with active tasks */
 extern volatile unsigned long global_tasks_mask; /* Mask of threads with tasks in the global runqueue */
 extern unsigned int tasks_run_queue;    /* run queue size */
 extern unsigned int tasks_run_queue_cur;
@@ -102,10 +101,8 @@ extern int global_rqueue_size; /* Number of element sin the global runqueue */
 extern struct task_per_thread task_per_thread[MAX_THREADS];
 
 __decl_hathreads(extern HA_SPINLOCK_T rq_lock);  /* spin lock related to run queue */
-__decl_hathreads(extern HA_SPINLOCK_T wq_lock);  /* spin lock related to wait queue */
+__decl_hathreads(extern HA_RWLOCK_T wq_lock);    /* RW lock related to the wait queue */
 
-
-static inline void task_insert_into_tasklet_list(struct task *t);
 
 /* return 0 if task is in run queue, otherwise non-zero */
 static inline int task_in_rq(struct task *t)
@@ -180,10 +177,10 @@ static inline struct task *task_unlink_wq(struct task *t)
 	if (likely(task_in_wq(t))) {
 		locked = atleast2(t->thread_mask);
 		if (locked)
-			HA_SPIN_LOCK(TASK_WQ_LOCK, &wq_lock);
+			HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
 		__task_unlink_wq(t);
 		if (locked)
-			HA_SPIN_UNLOCK(TASK_WQ_LOCK, &wq_lock);
+			HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	}
 	return t;
 }
@@ -232,36 +229,33 @@ static inline void tasklet_wakeup(struct tasklet *tl)
 	if (!LIST_ISEMPTY(&tl->list))
 		return;
 	LIST_ADDQ(&task_per_thread[tid].task_list, &tl->list);
-	task_per_thread[tid].task_list_size++;
-	_HA_ATOMIC_OR(&active_tasks_mask, tid_bit);
 	_HA_ATOMIC_ADD(&tasks_run_queue, 1);
 
 }
 
-static inline void task_insert_into_tasklet_list(struct task *t)
+/* Insert a tasklet into the tasklet list. If used with a plain task instead,
+ * the caller must update the task_list_size.
+ */
+static inline void tasklet_insert_into_tasklet_list(struct tasklet *tl)
 {
-	struct tasklet *tl;
-
 	_HA_ATOMIC_ADD(&tasks_run_queue, 1);
-	task_per_thread[tid].task_list_size++;
-	tl = (struct tasklet *)t;
 	LIST_ADDQ(&task_per_thread[tid].task_list, &tl->list);
 }
 
-/* remove the task from the tasklet list. The task MUST already be there. If
- * unsure, use task_remove_from_task_list() instead.
+/* Remove the tasklet from the tasklet list. The tasklet MUST already be there.
+ * If unsure, use tasklet_remove_from_tasklet_list() instead. If used with a
+ * plain task, the caller must update the task_list_size.
  */
-static inline void __task_remove_from_tasklet_list(struct task *t)
+static inline void __tasklet_remove_from_tasklet_list(struct tasklet *t)
 {
-	LIST_DEL_INIT(&((struct tasklet *)t)->list);
-	task_per_thread[tid].task_list_size--;
+	LIST_DEL_INIT(&t->list);
 	_HA_ATOMIC_SUB(&tasks_run_queue, 1);
 }
 
-static inline void task_remove_from_tasklet_list(struct task *t)
+static inline void tasklet_remove_from_tasklet_list(struct tasklet *t)
 {
-	if (likely(!LIST_ISEMPTY(&((struct tasklet *)t)->list)))
-		__task_remove_from_tasklet_list(t);
+	if (likely(!LIST_ISEMPTY(&t->list)))
+		__tasklet_remove_from_tasklet_list(t);
 }
 
 /*
@@ -363,7 +357,6 @@ static inline void tasklet_free(struct tasklet *tl)
 {
 	if (!LIST_ISEMPTY(&tl->list)) {
 		LIST_DEL(&tl->list);
-		task_per_thread[tid].task_list_size--;
 		_HA_ATOMIC_SUB(&tasks_run_queue, 1);
 	}
 
@@ -400,10 +393,10 @@ static inline void task_queue(struct task *task)
 
 #ifdef USE_THREAD
 	if (atleast2(task->thread_mask)) {
-		HA_SPIN_LOCK(TASK_WQ_LOCK, &wq_lock);
+		HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
 		if (!task_in_wq(task) || tick_is_lt(task->expire, task->wq.key))
 			__task_queue(task, &timers);
-		HA_SPIN_UNLOCK(TASK_WQ_LOCK, &wq_lock);
+		HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	} else
 #endif
 	{
@@ -424,14 +417,15 @@ static inline void task_schedule(struct task *task, int when)
 
 #ifdef USE_THREAD
 	if (atleast2(task->thread_mask)) {
-		HA_SPIN_LOCK(TASK_WQ_LOCK, &wq_lock);
+		/* FIXME: is it really needed to lock the WQ during the check ? */
+		HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
 		if (task_in_wq(task))
 			when = tick_first(when, task->expire);
 
 		task->expire = when;
 		if (!task_in_wq(task) || tick_is_lt(task->expire, task->wq.key))
 			__task_queue(task, &timers);
-		HA_SPIN_UNLOCK(TASK_WQ_LOCK, &wq_lock);
+		HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	} else
 #endif
 	{
@@ -539,6 +533,26 @@ static inline int notification_registered(struct list *wake)
 {
 	return !LIST_ISEMPTY(wake);
 }
+
+static inline int thread_has_tasks(void)
+{
+	return (!!(global_tasks_mask & tid_bit) |
+	        (task_per_thread[tid].rqueue_size > 0) |
+	        !LIST_ISEMPTY(&task_per_thread[tid].task_list));
+}
+
+/* adds list item <item> to work list <work> and wake up the associated task */
+static inline void work_list_add(struct work_list *work, struct list *item)
+{
+	LIST_ADDQ_LOCKED(&work->head, item);
+	task_wakeup(work->task, TASK_WOKEN_OTHER);
+}
+
+struct work_list *work_list_create(int nbthread,
+                                   struct task *(*fct)(struct task *, void *, unsigned short),
+                                   void *arg);
+
+void work_list_destroy(struct work_list *work, int nbthread);
 
 /*
  * This does 3 things :

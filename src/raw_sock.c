@@ -258,8 +258,15 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && retval)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
-leave:
-	conn_cond_update_sock_polling(conn);
+ leave:
+	if (retval > 0) {
+		/* we count the total bytes sent, and the send rate for 32-byte
+		 * blocks. The reason for the latter is that freq_ctr are
+		 * limited to 4GB and that it's not enough per second.
+		 */
+		_HA_ATOMIC_ADD(&global.out_bytes, retval);
+		update_freq_ctr(&global.out_32bps, (retval + 16) / 32);
+	}
 	return retval;
 
 out_read0:
@@ -812,7 +819,6 @@ after_send:
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
-	conn_cond_update_sock_polling(conn);
 
 #if ENABLE_CUJU_FT
 	if (pipe->pipe_nxt == NULL) {
@@ -925,8 +931,7 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
-leave:
-	conn_cond_update_sock_polling(conn);
+ leave:
 	return done;
 
 read0:
@@ -1008,7 +1013,14 @@ static size_t raw_sock_from_buf(struct connection *conn, void *xprt_ctx, const s
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
-	conn_cond_update_sock_polling(conn);
+	if (done > 0) {
+		/* we count the total bytes sent, and the send rate for 32-byte
+		 * blocks. The reason for the latter is that freq_ctr are
+		 * limited to 4GB and that it's not enough per second.
+		 */
+		_HA_ATOMIC_ADD(&global.out_bytes, done);
+		update_freq_ctr(&global.out_32bps, (done + 16) / 32);
+	}
 	return done;
 }
 
@@ -1022,12 +1034,23 @@ static int raw_sock_unsubscribe(struct connection *conn, void *xprt_ctx, int eve
 	return conn_unsubscribe(conn, xprt_ctx, event_type, param);
 }
 
+/* We can't have an underlying XPRT, so just return -1 to signify failure */
+static int raw_sock_remove_xprt(struct connection *conn, void *xprt_ctx, void *toremove_ctx, const struct xprt_ops *newops, void *newctx)
+{
+	/* This is the lowest xprt we can have, so if we get there we didn't
+	 * find the xprt we wanted to remove, that's a bug
+	 */
+	BUG_ON(1);
+	return -1;
+}
+
 /* transport-layer operations for RAW sockets */
 static struct xprt_ops raw_sock = {
 	.snd_buf  = raw_sock_from_buf,
 	.rcv_buf  = raw_sock_to_buf,
 	.subscribe = raw_sock_subscribe,
 	.unsubscribe = raw_sock_unsubscribe,
+	.remove_xprt = raw_sock_remove_xprt,
 #if defined(USE_LINUX_SPLICE)
 	.rcv_pipe = raw_sock_to_pipe,
 	.snd_pipe = raw_sock_from_pipe,

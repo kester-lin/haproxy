@@ -47,6 +47,15 @@ struct server;
 struct session;
 struct pipe;
 
+/* socks4 upstream proxy definitions */
+struct socks4_request {
+	uint8_t version;	/* SOCKS version number, 1 byte, must be 0x04 for this version */
+	uint8_t command;	/* 0x01 = establish a TCP/IP stream connection */
+	uint16_t port;		/* port number, 2 bytes (in network byte order) */
+	uint32_t ip;		/* IP address, 4 bytes (in network byte order) */
+	char user_id[8];	/* the user ID string, variable length, terminated with a null (0x00); Using "HAProxy\0" */
+};
+
 /* Note: subscribing to these events is only valid after the caller has really
  * attempted to perform the operation, and failed to proceed or complete.
  */
@@ -56,7 +65,7 @@ enum sub_event_type {
 };
 
 struct wait_event {
-	struct tasklet *task;
+	struct tasklet *tasklet;
 	int events;             /* set of enum sub_event_type above */
 };
 
@@ -84,7 +93,7 @@ enum {
 	CS_FL_WANT_ROOM     = 0x00000400,  /* More bytes to transfert, but not enough room */
 	CS_FL_ERR_PENDING   = 0x00000800,  /* An error is pending, but there's still data to be read */
 	CS_FL_EOS           = 0x00001000,  /* End of stream delivered to data layer */
-	CS_FL_REOS          = 0x00002000,  /* End of stream received (buffer not empty) */
+	/* unused: 0x00002000 */
 	CS_FL_EOI           = 0x00004000,  /* end-of-input reached */
 	/* unused: 0x00008000 */
 	CS_FL_WAIT_FOR_HS   = 0x00010000,  /* This stream is waiting for handhskae */
@@ -127,12 +136,12 @@ enum {
 	CO_FL_NONE          = 0x00000000,  /* Just for initialization purposes */
 
 	/* Do not change these values without updating conn_*_poll_changes() ! */
-	CO_FL_SOCK_RD_ENA   = 0x00000001,  /* receiving handshakes is allowed */
+	/* unusued : 0x00000001 */
 	CO_FL_XPRT_RD_ENA   = 0x00000002,  /* receiving data is allowed */
 	CO_FL_CURR_RD_ENA   = 0x00000004,  /* receiving is currently allowed */
 	/* unused : 0x00000008 */
 
-	CO_FL_SOCK_WR_ENA   = 0x00000010,  /* sending handshakes is desired */
+	/* unused : 0x00000010 */
 	CO_FL_XPRT_WR_ENA   = 0x00000020,  /* sending data is desired */
 	CO_FL_CURR_WR_ENA   = 0x00000040,  /* sending is currently desired */
 	/* unused : 0x00000080 */
@@ -155,8 +164,8 @@ enum {
 
 	CO_FL_EARLY_SSL_HS  = 0x00004000,  /* We have early data pending, don't start SSL handshake yet */
 	CO_FL_EARLY_DATA    = 0x00008000,  /* At least some of the data are early data */
-	/* unused : 0x00010000 */
-	/* unused : 0x00020000 */
+	CO_FL_SOCKS4_SEND   = 0x00010000,  /* handshaking with upstream SOCKS4 proxy, going to send the handshake */
+	CO_FL_SOCKS4_RECV   = 0x00020000,  /* handshaking with upstream SOCKS4 proxy, going to check if handshake succeed */
 
 	/* flags used to remember what shutdown have been performed/reported */
 	CO_FL_SOCK_RD_SH    = 0x00040000,  /* SOCK layer was notified about shutr/read0 */
@@ -182,15 +191,9 @@ enum {
 	CO_FL_ACCEPT_CIP    = 0x08000000,  /* receive a valid NetScaler Client IP header */
 
 	/* below we have all handshake flags grouped into one */
-	CO_FL_HANDSHAKE     = CO_FL_SEND_PROXY | CO_FL_SSL_WAIT_HS | CO_FL_ACCEPT_PROXY | CO_FL_ACCEPT_CIP,
-	/* CO_FL_HANDSHAKE is  0x0F00 0000 */
-	/* when any of these flags is set, polling is defined by socket-layer
-	 * operations, as opposed to data-layer. Transport is explicitly not
-	 * mentionned here to avoid any confusion, since it can be the same
-	 * as DATA or SOCK on some implementations.
-	 */
-	CO_FL_POLL_SOCK     = CO_FL_HANDSHAKE | CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN,
-	/* CO_FL_POLL_SOCK is 0x0FC0 0000  */
+	CO_FL_HANDSHAKE     = CO_FL_SEND_PROXY | CO_FL_SSL_WAIT_HS | CO_FL_ACCEPT_PROXY | CO_FL_ACCEPT_CIP | CO_FL_SOCKS4_SEND | CO_FL_SOCKS4_RECV,
+	CO_FL_HANDSHAKE_NOSSL = CO_FL_SEND_PROXY | CO_FL_ACCEPT_PROXY | CO_FL_ACCEPT_CIP | CO_FL_SOCKS4_SEND | CO_FL_SOCKS4_RECV,
+
 	/* This connection may not be shared between clients */
 	CO_FL_PRIVATE       = 0x10000000,
 
@@ -205,8 +208,10 @@ enum {
 	 * must be done after clearing this flag.
 	 */
 	CO_FL_XPRT_TRACKED  = 0x80000000,
-};
 
+	/* below we have all SOCKS handshake flags grouped into one */
+	CO_FL_SOCKS4        = CO_FL_SOCKS4_SEND | CO_FL_SOCKS4_RECV,
+};
 
 /* possible connection error codes */
 enum {
@@ -254,6 +259,11 @@ enum {
 	CO_ER_SSL_KILLED_HB,    /* Stopped a TLSv1 heartbeat attack (CVE-2014-0160) */
 	CO_ER_SSL_NO_TARGET,    /* unknown target (not client nor server) */
 	CO_ER_SSL_EARLY_FAILED, /* Server refused early data */
+
+	CO_ER_SOCKS4_SEND,       /* SOCKS4 Proxy write error during handshake */
+	CO_ER_SOCKS4_RECV,       /* SOCKS4 Proxy read error during handshake */
+	CO_ER_SOCKS4_DENY,       /* SOCKS4 Proxy deny the request */
+	CO_ER_SOCKS4_ABORT,      /* SOCKS4 Proxy handshake aborted by server */
 };
 
 /* source address settings for outgoing connections */
@@ -272,7 +282,6 @@ enum {
 enum {
 	CO_RFL_BUF_WET     = 0x0001,    /* Buffer still has some output data present */
 	CO_RFL_BUF_FLUSH   = 0x0002,    /* Flush mux's buffers but don't read more data */
-	CO_RFL_KEEP_RSV    = 0x0004,    /* Don't fill the reserved space */
 };
 
 /* flags that can be passed to xprt->snd_buf() and mux->snd_buf() */
@@ -285,6 +294,7 @@ enum {
 enum {
 	XPRT_RAW = 0,
 	XPRT_SSL = 1,
+	XPRT_HANDSHAKE = 2,
 	XPRT_ENTRIES /* must be last one */
 };
 
@@ -317,6 +327,8 @@ struct xprt_ops {
 	char name[8];                               /* transport layer name, zero-terminated */
 	int (*subscribe)(struct connection *conn, void *xprt_ctx, int event_type, void *param); /* Subscribe to events, such as "being able to send" */
 	int (*unsubscribe)(struct connection *conn, void *xprt_ctx, int event_type, void *param); /* Unsubscribe to events */
+	int (*remove_xprt)(struct connection *conn, void *xprt_ctx, void *toremove_ctx, const struct xprt_ops *newops, void *newctx); /* Remove an xprt from the connection, used by temporary xprt such as the handshake one */
+	int (*add_xprt)(struct connection *conn, void *xprt_ctx, void *toadd_ctx, const struct xprt_ops *toadd_ops, void **oldxprt_ctx, const struct xprt_ops **oldxprt_ops); /* Add a new XPRT as the new xprt, and return the old one */
 };
 
 /* mux_ops describes the mux operations, which are to be performed at the
@@ -426,7 +438,7 @@ struct connection {
 	/* first cache line */
 	enum obj_type obj_type;       /* differentiates connection from applet context */
 	unsigned char err_code;       /* CO_ER_* */
-	signed short send_proxy_ofs;  /* <0 = offset to (re)send from the end, >0 = send all */
+	signed short send_proxy_ofs;  /* <0 = offset to (re)send from the end, >0 = send all (reused for SOCKS4) */
 	unsigned int flags;           /* CO_FL_* */
 	const struct protocol *ctrl;  /* operations at the socket layer */
 	const struct xprt_ops *xprt;  /* operations at the transport layer */
@@ -596,6 +608,8 @@ struct tlv_ssl {
  */
 /* Max number of file descriptors we send in one sendmsg() */
 #define MAX_SEND_FD 253
+
+#define SOCKS4_HS_RSP_LEN 8
 
 #endif /* _TYPES_CONNECTION_H */
 

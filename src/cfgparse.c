@@ -478,7 +478,7 @@ void init_default_instance()
 	defproxy.defsrv.maxconn = 0;
 	defproxy.defsrv.max_reuse = -1;
 	defproxy.defsrv.max_idle_conns = -1;
-	defproxy.defsrv.pool_purge_delay = 1000;
+	defproxy.defsrv.pool_purge_delay = 5000;
 	defproxy.defsrv.slowstart = 0;
 	defproxy.defsrv.onerror = DEF_HANA_ONERR;
 	defproxy.defsrv.consecutive_errors_limit = DEF_HANA_ERRLIMIT;
@@ -1203,7 +1203,19 @@ resolv_out:
 			goto out;
 		}
 		res = parse_time_err(args[2], &time, TIME_UNIT_MS);
-		if (res) {
+		if (res == PARSE_TIME_OVER) {
+			ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s>, maximum value is 2147483647 ms (~24.8 days).\n",
+			         file, linenum, args[1], args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (res == PARSE_TIME_UNDER) {
+			ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s>, minimum non-null value is 1 ms.\n",
+			         file, linenum, args[1], args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (res) {
 			ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
 				 file, linenum, *res, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1283,7 +1295,19 @@ resolv_out:
 				goto out;
 			}
 			res = parse_time_err(args[2], &tout, TIME_UNIT_MS);
-			if (res) {
+			if (res == PARSE_TIME_OVER) {
+				ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s %s>, maximum value is 2147483647 ms (~24.8 days).\n",
+					 file, linenum, args[2], args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (res == PARSE_TIME_UNDER) {
+				ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s %s>, minimum non-null value is 1 ms.\n",
+					 file, linenum, args[2], args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (res) {
 				ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s %s>.\n",
 					 file, linenum, *res, args[0], args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -1459,14 +1483,21 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 				goto out;
 			}
 			res = parse_time_err(args[2], &timeout_mail, TIME_UNIT_MS);
-			if (res) {
-				ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
-					 file, linenum, *res, args[0]);
+			if (res == PARSE_TIME_OVER) {
+				ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s %s>, maximum value is 2147483647 ms (~24.8 days).\n",
+					 file, linenum, args[2], args[0], args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
-			if (timeout_mail <= 0) {
-				ha_alert("parsing [%s:%d] : '%s %s' expects a positive <time> argument.\n", file, linenum, args[0], args[1]);
+			else if (res == PARSE_TIME_UNDER) {
+				ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s %s>, minimum non-null value is 1 ms.\n",
+					 file, linenum, args[2], args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (res) {
+				ha_alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s %s>.\n",
+					 file, linenum, *res, args[0], args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -2715,6 +2746,7 @@ int check_config_validity()
 				free((void *)mrule->table.name);
 				mrule->table.t = target;
 				stktable_alloc_data_type(target, STKTABLE_DT_SERVER_ID, NULL);
+				stktable_alloc_data_type(target, STKTABLE_DT_SERVER_NAME, NULL);
 			}
 		}
 
@@ -2748,6 +2780,7 @@ int check_config_validity()
 				free((void *)mrule->table.name);
 				mrule->table.t = target;
 				stktable_alloc_data_type(target, STKTABLE_DT_SERVER_ID, NULL);
+				stktable_alloc_data_type(target, STKTABLE_DT_SERVER_NAME, NULL);
 			}
 		}
 
@@ -3120,10 +3153,11 @@ out_uri_auth_compat:
 
 			for (other_srv = curproxy->srv; other_srv && other_srv != newsrv; other_srv = other_srv->next) {
 				if (!other_srv->puid && strcmp(other_srv->id, newsrv->id) == 0) {
-					ha_warning("parsing [%s:%d] : %s '%s', another server named '%s' was defined without an explicit ID at line %d, this is not recommended.\n",
+					ha_alert("parsing [%s:%d] : %s '%s', another server named '%s' was already defined at line %d, please use distinct names.\n",
 						   newsrv->conf.file, newsrv->conf.line,
 						   proxy_type_str(curproxy), curproxy->id,
 						   newsrv->id, other_srv->conf.line);
+					cfgerr++;
 					break;
 				}
 			}
@@ -3140,6 +3174,8 @@ out_uri_auth_compat:
 				next_id = get_next_id(&curproxy->conf.used_server_id, next_id);
 				newsrv->conf.id.key = newsrv->puid = next_id;
 				eb32_insert(&curproxy->conf.used_server_id, &newsrv->conf.id);
+				newsrv->conf.name.key = newsrv->id;
+				ebis_insert(&curproxy->conf.used_server_name, &newsrv->conf.name);
 			}
 			next_id++;
 			newsrv = newsrv->next;
@@ -3955,7 +3991,7 @@ out_uri_auth_compat:
 						bind_conf->xprt->prepare_bind_conf(bind_conf) < 0)
 						cfgerr++;
 				}
-				if (!peers_init_sync(curpeers)) {
+				if (!peers_init_sync(curpeers) || !peers_alloc_dcache(curpeers)) {
 					ha_alert("Peers section '%s': out of memory, giving up on peers.\n",
 						 curpeers->id);
 					cfgerr++;

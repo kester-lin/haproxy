@@ -347,7 +347,7 @@ static struct server *get_server_ph_post(struct stream *s, const struct server *
 
 		p = params = NULL;
 		len = 0;
-		for (blk = htx_get_head_blk(htx); blk; blk = htx_get_next_blk(htx, blk)) {
+		for (blk = htx_get_first_blk(htx); blk; blk = htx_get_next_blk(htx, blk)) {
 			enum htx_blk_type type = htx_get_blk_type(blk);
 			struct ist v;
 
@@ -647,14 +647,14 @@ int assign_server(struct stream *s)
 	s->target = NULL;
 
 	if ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI &&
-	    ((s->txn && s->txn->flags & TX_PREFER_LAST) ||
+	    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
 	     (s->be->options & PR_O_PREF_LAST))) {
 		struct sess_srv_list *srv_list;
 		list_for_each_entry(srv_list, &s->sess->srv_list, srv_list) {
 			struct server *tmpsrv = objt_server(srv_list->target);
 
 			if (tmpsrv && tmpsrv->proxy == s->be &&
-			    ((s->txn && s->txn->flags & TX_PREFER_LAST) ||
+			    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
 			     (!s->be->max_ka_queue ||
 			      server_has_room(tmpsrv) || (
 			      tmpsrv->nbpend + 1 < s->be->max_ka_queue))) &&
@@ -743,7 +743,7 @@ int assign_server(struct stream *s)
 				else {
 					struct ist uri;
 
-					uri = htx_sl_req_uri(http_find_stline(htxbuf(&s->req.buf)));
+					uri = htx_sl_req_uri(http_get_stline(htxbuf(&s->req.buf)));
 					srv = get_server_uh(s->be, uri.ptr, uri.len, prev_srv);
 				}
 				break;
@@ -760,7 +760,7 @@ int assign_server(struct stream *s)
 				else {
 					struct ist uri;
 
-					uri = htx_sl_req_uri(http_find_stline(htxbuf(&s->req.buf)));
+					uri = htx_sl_req_uri(http_get_stline(htxbuf(&s->req.buf)));
 					srv = get_server_ph(s->be, uri.ptr, uri.len, prev_srv);
 				}
 
@@ -1230,11 +1230,12 @@ int connect_server(struct stream *s)
 		if (!srv_conn->target || srv_conn->target == s->target) {
 			srv_conn->flags &= ~(CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH);
 			if (srv_cs)
-				srv_cs->flags &= ~(CS_FL_ERROR | CS_FL_EOS | CS_FL_REOS);
+				srv_cs->flags &= ~(CS_FL_ERROR | CS_FL_EOS);
 			reuse = 1;
 			old_conn = srv_conn;
 		} else {
 			srv_conn = NULL;
+			srv_cs = NULL;
 			si_release_endpoint(&s->si[1]);
 		}
 	}
@@ -1335,8 +1336,8 @@ int connect_server(struct stream *s)
 				reuse = 0;
 		}
 	}
-	if ((!reuse || (srv_conn && !(srv_conn->flags & CO_FL_CONNECTED)))
-	    && ha_used_fds > global.tune.pool_high_count) {
+	if (((!reuse || (srv_conn && !(srv_conn->flags & CO_FL_CONNECTED)))
+	    && ha_used_fds > global.tune.pool_high_count) && srv->idle_orphan_conns) {
 		struct connection *tokill_conn;
 
 		/* We can't reuse a connection, and e have more FDs than deemd
@@ -1354,6 +1355,13 @@ int connect_server(struct stream *s)
 			for (i = 0; i < global.nbthread; i++) {
 				if (i == tid)
 					continue;
+
+				// just silence stupid gcc which reports an absurd
+				// out-of-bounds warning for <i> which is always
+				// exactly zero without threads, but it seems to
+				// see it possibly larger.
+				ALREADY_CHECKED(i);
+
 				tokill_conn = LIST_POP_LOCKED(&srv->idle_orphan_conns[i],
 				    struct connection *, list);
 				if (tokill_conn) {
@@ -1492,7 +1500,7 @@ int connect_server(struct stream *s)
 #if defined(USE_OPENSSL) && defined(TLSEXT_TYPE_application_layer_protocol_negotiation)
 		if (!srv ||
 		    ((!(srv->ssl_ctx.alpn_str) && !(srv->ssl_ctx.npn_str)) ||
-		    srv->mux_proto))
+		    srv->mux_proto || s->be->mode != PR_MODE_HTTP))
 #endif
 		{
 			srv_cs = objt_cs(s->si[1].end);
@@ -1526,12 +1534,18 @@ int connect_server(struct stream *s)
 
 		if (srv && srv->pp_opts) {
 			srv_conn->flags |= CO_FL_PRIVATE;
+			srv_conn->flags |= CO_FL_SEND_PROXY;
 			srv_conn->send_proxy_ofs = 1; /* must compute size */
 			if (cli_conn)
 				conn_get_to_addr(cli_conn);
 		}
 
 		assign_tproxy_address(s);
+
+		if (srv && (srv->flags & SRV_F_SOCKS4_PROXY)) {
+			srv_conn->send_proxy_ofs = 1;
+			srv_conn->flags |= CO_FL_SOCKS4;
+		}
 	}
 	else if (!conn_xprt_ready(srv_conn)) {
 		if (srv_conn->mux->reset)
@@ -1577,11 +1591,20 @@ int connect_server(struct stream *s)
 		    srv_conn->mux->avail_streams(srv_conn) > 0)
 			LIST_ADD(&srv->idle_conns[tid], &srv_conn->list);
 	}
+	/* The CO_FL_SEND_PROXY flag may have been set by the connect method,
+	 * if so, add our handshake pseudo-XPRT now.
+	 */
+	if ((srv_conn->flags & CO_FL_HANDSHAKE_NOSSL)) {
+		if (xprt_add_hs(srv_conn) < 0) {
+			conn_full_close(srv_conn);
+			return SF_ERR_INTERNAL;
+		}
+	}
 
 
 #if USE_OPENSSL && (defined(OPENSSL_IS_BORINGSSL) || (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L))
 
-	if (!reuse && cli_conn && srv &&
+	if (!reuse && cli_conn && srv && srv_conn->mux &&
 	    (srv->ssl_ctx.options & SRV_SSL_O_EARLY_DATA) &&
 	    /* Only attempt to use early data if either the client sent
 	     * early data, so that we know it can handle a 425, or if

@@ -1,7 +1,7 @@
                              ------------------------
                              HAProxy Management Guide
                              ------------------------
-                                   version 2.0
+                                   version 2.1
 
 
 This document describes how to start, stop, manage, and troubleshoot HAProxy,
@@ -1099,6 +1099,8 @@ S (Servers).
  81: dcon [LF..]: requests denied by "tcp-request connection" rules
  82: dses [LF..]: requests denied by "tcp-request session" rules
  83: wrew [LFBS]: cumulative number of failed header rewriting warnings
+ 84: connect [..BS]: cumulative number of connection establishment attempts
+ 85: reuse [..BS]: cumulative number of connection reuses
 
 
 9.2) Typed output format
@@ -1705,7 +1707,7 @@ set rate-limit ssl-sessions global <value>
 
 set server <backend>/<server> addr <ip4 or ip6 address> [port <port>]
   Replace the current IP address of a server by the one provided.
-  Optionnaly, the port can be changed using the 'port' parameter.
+  Optionally, the port can be changed using the 'port' parameter.
   Note that changing the port also support switching from/to port mapping
   (notation with +X or -Y), only if a port is configured for the health check.
 
@@ -2099,7 +2101,7 @@ show peers [<peers section>]
   <peers section> is specified, only the information about the peers belonging
   to this "peers" section are dumped.
 
-  Here are two examples of ouputs where hostA, hostB and hostC peers belong to
+  Here are two examples of outputs where hostA, hostB and hostC peers belong to
   "sharedlb" peers sections. Only hostA and hostB are connected. Only hostA has
   sent data to hostB.
 
@@ -2612,13 +2614,13 @@ processes:
 Example:
 
   $ echo 'show proc' | socat /var/run/haproxy-master.sock -
-  #<PID>          <type>          <relative PID>  <reloads>       <uptime>
-  1162            master          0               5               0d 00h02m07s
+  #<PID>          <type>          <relative PID>  <reloads>       <uptime>        <version>
+  1162            master          0               5               0d00h02m07s     2.0-dev7-0124c9-7
   # workers
-  1271            worker          1               0               0d 00h00m00s
-  1272            worker          2               0               0d 00h00m00s
+  1271            worker          1               0               0d00h00m00s     2.0-dev7-0124c9-7
+  1272            worker          2               0               0d00h00m00s     2.0-dev7-0124c9-7
   # old workers
-  1233            worker          [was: 1]        3               0d 00h00m43s
+  1233            worker          [was: 1]        3               0d00h00m43s     2.0-dev3-6019f6-289
 
 
 In this example, the master has been reloaded 5 times but one of the old

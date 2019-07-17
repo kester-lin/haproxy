@@ -254,6 +254,7 @@ static int da_haproxy(const struct arg *args, struct sample *smp, da_deviceinfo_
 
 	smp->data.u.str.area = tmp->area;
 	smp->data.u.str.data = tmp->data;
+	smp->data.type = SMP_T_STR;
 
 	return 1;
 }
@@ -307,7 +308,7 @@ static int da_haproxy_fetch(const struct arg *args, struct sample *smp, const ch
 		}
 
 		i = 0;
-		for (blk = htx_get_head_blk(htx); nbh < DA_MAX_HEADERS && blk; blk = htx_get_next_blk(htx, blk)) {
+		for (blk = htx_get_first_blk(htx); nbh < DA_MAX_HEADERS && blk; blk = htx_get_next_blk(htx, blk)) {
 			size_t vlen;
 			char *pval;
 			da_evidence_id_t evid;

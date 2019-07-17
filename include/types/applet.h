@@ -50,6 +50,7 @@ struct applet {
 
 #define APPCTX_CLI_ST1_PROMPT  (1 << 0)
 #define APPCTX_CLI_ST1_PAYLOAD (1 << 1)
+#define APPCTX_CLI_ST1_NOLF    (1 << 2)
 
 /* Context of a running applet. */
 struct appctx {
@@ -111,6 +112,7 @@ struct appctx {
 			struct cache_entry *entry;  /* Entry to be sent from cache. */
 			unsigned int sent;          /* The number of bytes already sent for this cache entry. */
 			unsigned int offset;        /* start offset of remaining data relative to beginning of the next block */
+			unsigned int rem_data;      /* Remaing bytes for the last data block (HTX only, 0 means process next block) */
 			struct shared_block *next;  /* The next block of data to be sent for this cache entry. */
 		} cache;
 		/* all entries below are used by various CLI commands, please

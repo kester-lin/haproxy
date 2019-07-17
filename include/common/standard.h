@@ -466,14 +466,14 @@ int addr_is_local(const struct netns_entry *ns,
  */
 extern const char hextab[];
 char *encode_string(char *start, char *stop,
-		    const char escape, const fd_set *map,
+		    const char escape, const long *map,
 		    const char *string);
 
 /*
  * Same behavior, except that it encodes chunk <chunk> instead of a string.
  */
 char *encode_chunk(char *start, char *stop,
-                   const char escape, const fd_set *map,
+                   const char escape, const long *map,
                    const struct buffer *chunk);
 
 /*
@@ -485,7 +485,7 @@ char *encode_chunk(char *start, char *stop,
  * completes.
  */
 char *escape_string(char *start, char *stop,
-		    const char escape, const fd_set *map,
+		    const char escape, const long *map,
 		    const char *string);
 
 /*
@@ -496,7 +496,7 @@ char *escape_string(char *start, char *stop,
  * <stop>, and will return its position if the conversion completes.
  */
 char *escape_chunk(char *start, char *stop,
-                   const char escape, const fd_set *map,
+                   const char escape, const long *map,
                    const struct buffer *chunk);
 
 
@@ -737,6 +737,10 @@ extern time_t my_timegm(const struct tm *tm);
 extern const char *parse_time_err(const char *text, unsigned *ret, unsigned unit_flags);
 extern const char *parse_size_err(const char *text, unsigned *ret);
 
+/* special return values for the time parser */
+#define PARSE_TIME_UNDER ((char *)1)
+#define PARSE_TIME_OVER  ((char *)2)
+
 /* unit flags to pass to parse_time_err */
 #define TIME_UNIT_US   0x0000
 #define TIME_UNIT_MS   0x0001
@@ -889,6 +893,30 @@ static inline unsigned long nbits(int bits)
 		return 0;
 	else
 		return (2UL << bits) - 1;
+}
+
+/* sets bit <bit> into map <map>, which must be long-aligned */
+static inline void ha_bit_set(unsigned long bit, long *map)
+{
+	map[bit / (8 * sizeof(*map))] |= 1UL << (bit & (8 * sizeof(*map) - 1));
+}
+
+/* clears bit <bit> from map <map>, which must be long-aligned */
+static inline void ha_bit_clr(unsigned long bit, long *map)
+{
+	map[bit / (8 * sizeof(*map))] &= ~(1UL << (bit & (8 * sizeof(*map) - 1)));
+}
+
+/* flips bit <bit> from map <map>, which must be long-aligned */
+static inline void ha_bit_flip(unsigned long bit, long *map)
+{
+	map[bit / (8 * sizeof(*map))] ^= 1UL << (bit & (8 * sizeof(*map) - 1));
+}
+
+/* returns non-zero if bit <bit> from map <map> is set, otherwise 0 */
+static inline int ha_bit_test(unsigned long bit, const long *map)
+{
+	return !!(map[bit / (8 * sizeof(*map))] & 1UL << (bit & (8 * sizeof(*map) - 1)));
 }
 
 /*

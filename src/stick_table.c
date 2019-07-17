@@ -769,15 +769,21 @@ int parse_stick_table(const char *file, int linenum, char **args,
 				goto out;
 			}
 			err = parse_time_err(args[idx], &val, TIME_UNIT_MS);
-			if (err) {
-				ha_alert("parsing [%s:%d] : %s: unexpected character '%c' in argument of '%s'.\n",
-					 file, linenum, args[0], *err, args[idx-1]);
+			if (err == PARSE_TIME_OVER) {
+				ha_alert("parsing [%s:%d]: %s: timer overflow in argument <%s> to <%s>, maximum value is 2147483647 ms (~24.8 days).\n",
+					 file, linenum, args[0], args[idx], args[idx-1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
-			if (val > INT_MAX) {
-				ha_alert("parsing [%s:%d] : Expire value [%u]ms exceeds maxmimum value of 24.85 days.\n",
-					 file, linenum, val);
+			else if (err == PARSE_TIME_UNDER) {
+				ha_alert("parsing [%s:%d]: %s: timer underflow in argument <%s> to <%s>, minimum non-null value is 1 ms.\n",
+					 file, linenum, args[0], args[idx], args[idx-1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			else if (err) {
+				ha_alert("parsing [%s:%d] : %s: unexpected character '%c' in argument of '%s'.\n",
+					 file, linenum, args[0], *err, args[idx-1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -1036,6 +1042,7 @@ struct stktable_data_type stktable_data_types[STKTABLE_DATA_TYPES] = {
 	[STKTABLE_DT_BYTES_OUT_RATE]= { .name = "bytes_out_rate", .std_type = STD_T_FRQP, .arg_type = ARG_T_DELAY },
 	[STKTABLE_DT_GPC1]          = { .name = "gpc1",           .std_type = STD_T_UINT  },
 	[STKTABLE_DT_GPC1_RATE]     = { .name = "gpc1_rate",      .std_type = STD_T_FRQP, .arg_type = ARG_T_DELAY  },
+	[STKTABLE_DT_SERVER_NAME]   = { .name = "server_name",    .std_type = STD_T_DICT  },
 };
 
 /* Registers stick-table extra data type with index <idx>, name <name>, type
@@ -3346,6 +3353,12 @@ static int table_dump_entry_to_buffer(struct buffer *msg,
 				     read_freq_ctr_period(&stktable_data_cast(ptr, std_t_frqp),
 							  t->data_arg[dt].u));
 			break;
+		case STD_T_DICT: {
+			struct dict_entry *de;
+			de = stktable_data_cast(ptr, std_t_dict);
+			chunk_appendf(msg, "%s", de ? (char *)de->value.key : "-");
+			break;
+		}
 		}
 	}
 	chunk_appendf(msg, "\n");

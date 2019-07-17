@@ -47,7 +47,7 @@ void ha_thread_dump(struct buffer *buf, int thr, int calling_tid)
 	              "%c%cThread %-2u: act=%d glob=%d wq=%d rq=%d tl=%d tlsz=%d rqsz=%d\n"
 	              "             stuck=%d fdcache=%d prof=%d",
 	              (thr == calling_tid) ? '*' : ' ', stuck ? '>' : ' ', thr + 1,
-	              !!(active_tasks_mask & thr_bit),
+		      thread_has_tasks(),
 	              !!(global_tasks_mask & thr_bit),
 	              !eb_is_empty(&task_per_thread[thr].timers),
 	              !eb_is_empty(&task_per_thread[thr].rqueue),
@@ -159,7 +159,7 @@ void ha_panic()
 	chunk_reset(&trash);
 	chunk_appendf(&trash, "Thread %u is about to kill the process.\n", tid + 1);
 	ha_thread_dump_all_to_trash();
-	write(2, trash.area, trash.data);
+	shut_your_big_mouth_gcc(write(2, trash.area, trash.data));
 	for (;;)
 		abort();
 }

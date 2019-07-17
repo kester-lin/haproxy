@@ -141,6 +141,7 @@ enum srv_initaddr {
 #define SRV_F_AGENTADDR    0x0080        /* this server has a agent addr configured */
 #define SRV_F_COOKIESET    0x0100        /* this server has a cookie configured, so don't generate dynamic cookies */
 #define SRV_F_FASTOPEN     0x0200        /* Use TCP Fast Open to connect to server */
+#define SRV_F_SOCKS4_PROXY 0x0400        /* this server uses SOCKS4 proxy */
 
 /* configured server options for send-proxy (server->pp_opts) */
 #define SRV_PP_V1               0x0001   /* proxy protocol version 1 */
@@ -173,6 +174,9 @@ enum srv_initaddr {
 #define SRV_SSL_O_NO_REUSE     0x200  /* disable session reuse */
 #define SRV_SSL_O_EARLY_DATA   0x400  /* Allow using early data */
 #endif
+
+/* The server names dictionary */
+extern struct dict server_name_dict;
 
 struct pid_list {
 	struct list list;
@@ -319,6 +323,7 @@ struct server {
 	struct {
 		const char *file;		/* file where the section appears */
 		struct eb32_node id;		/* place in the tree of used IDs */
+		struct ebpt_node name;		/* place in the tree of used names */
 		int line;			/* line where the section appears */
 	} conf;					/* config information */
 	/* Template information used only for server objects which
@@ -336,7 +341,20 @@ struct server {
 		char reason[128];
 	} op_st_chg;				/* operational status change's reason */
 	char adm_st_chg_cause[48];		/* administrative status change's cause */
+
+	struct sockaddr_storage socks4_addr;	/* the address of the SOCKS4 Proxy, including the port */
 };
+
+
+/* Storage structure to load server-state lines from a flat file into
+ * an ebtree, for faster processing
+ */
+struct state_line {
+	char *line;
+	struct ebmb_node name_name;
+	/* WARNING don't put anything after name_name, it's used by the key */
+};
+
 
 /* Descriptor for a "server" keyword. The ->parse() function returns 0 in case of
  * success, or a combination of ERR_* flags if an error is encountered. The

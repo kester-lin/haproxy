@@ -1214,7 +1214,7 @@ static int promex_dump_global_metrics(struct appctx *appctx, struct htx *htx)
 	struct field metric;
 	struct channel *chn = si_ic(appctx->owner);
 	struct ist out = ist2(trash.area, 0);
-	size_t max = channel_htx_recv_max(chn, htx);
+	size_t max = htx_get_max_blksz(htx, channel_htx_recv_max(chn, htx));
 	int ret = 1;
 
 #ifdef USE_OPENSSL
@@ -1227,7 +1227,6 @@ static int promex_dump_global_metrics(struct appctx *appctx, struct htx *htx)
 		ssl_reuse = 100 - (100 * ssl_key_rate + (ssl_sess_rate - 1) / 2) / ssl_sess_rate;
 	}
 #endif
-
 	while (appctx->st2 && appctx->st2 < INF_TOTAL_FIELDS) {
 		switch (appctx->st2) {
 			case INF_NBTHREAD:
@@ -1369,7 +1368,7 @@ static int promex_dump_global_metrics(struct appctx *appctx, struct htx *htx)
 				metric = mkf_u32(0, tasks_run_queue_cur);
 				break;
 			case INF_IDLE_PCT:
-				metric = mkf_u32(FN_AVG, idle_pct);
+				metric = mkf_u32(FN_AVG, ti->idle_pct);
 				break;
 			case INF_STOPPING:
 				metric = mkf_u32(0, stopping);
@@ -1409,9 +1408,11 @@ static int promex_dump_global_metrics(struct appctx *appctx, struct htx *htx)
 	}
 
   end:
-	if (!htx_add_data(htx, out))
-		return -1; /* Unexpected and unrecoverable error */
-	channel_add_input(chn, out.len);
+	if (out.len) {
+		if (!htx_add_data_atonce(htx, out))
+			return -1; /* Unexpected and unrecoverable error */
+		channel_add_input(chn, out.len);
+	}
 	return ret;
   full:
 	ret = 0;
@@ -1427,7 +1428,7 @@ static int promex_dump_front_metrics(struct appctx *appctx, struct htx *htx)
 	struct field metric;
 	struct channel *chn = si_ic(appctx->owner);
 	struct ist out = ist2(trash.area, 0);
-	size_t max = channel_htx_recv_max(chn, htx);
+	size_t max = htx_get_max_blksz(htx, channel_htx_recv_max(chn, htx));
 	int ret = 1;
 
 	while (appctx->st2 && appctx->st2 < ST_F_TOTAL_FIELDS) {
@@ -1587,9 +1588,11 @@ static int promex_dump_front_metrics(struct appctx *appctx, struct htx *htx)
 	}
 
   end:
-	if (!htx_add_data(htx, out))
-		return -1; /* Unexpected and unrecoverable error */
-	channel_add_input(chn, out.len);
+	if (out.len) {
+		if (!htx_add_data_atonce(htx, out))
+			return -1; /* Unexpected and unrecoverable error */
+		channel_add_input(chn, out.len);
+	}
 	return ret;
   full:
 	ret = 0;
@@ -1605,7 +1608,7 @@ static int promex_dump_back_metrics(struct appctx *appctx, struct htx *htx)
 	struct field metric;
 	struct channel *chn = si_ic(appctx->owner);
 	struct ist out = ist2(trash.area, 0);
-	size_t max = channel_htx_recv_max(chn, htx);
+	size_t max = htx_get_max_blksz(htx, channel_htx_recv_max(chn, htx));
 	int ret = 1;
 	uint32_t weight;
 
@@ -1805,9 +1808,11 @@ static int promex_dump_back_metrics(struct appctx *appctx, struct htx *htx)
 	}
 
   end:
-	if (!htx_add_data(htx, out))
-		return -1; /* Unexpected and unrecoverable error */
-	channel_add_input(chn, out.len);
+	if (out.len) {
+		if (!htx_add_data_atonce(htx, out))
+			return -1; /* Unexpected and unrecoverable error */
+		channel_add_input(chn, out.len);
+	}
 	return ret;
   full:
 	ret = 0;
@@ -1824,7 +1829,7 @@ static int promex_dump_srv_metrics(struct appctx *appctx, struct htx *htx)
 	struct field metric;
 	struct channel *chn = si_ic(appctx->owner);
 	struct ist out = ist2(trash.area, 0);
-	size_t max = channel_htx_recv_max(chn, htx);
+	size_t max = htx_get_max_blksz(htx, channel_htx_recv_max(chn, htx));
 	int ret = 1;
 	uint32_t weight;
 
@@ -1999,9 +2004,11 @@ static int promex_dump_srv_metrics(struct appctx *appctx, struct htx *htx)
 
 
   end:
-	if (!htx_add_data(htx, out))
-		return -1; /* Unexpected and unrecoverable error */
-	channel_add_input(chn, out.len);
+	if (out.len) {
+		if (!htx_add_data_atonce(htx, out))
+			return -1; /* Unexpected and unrecoverable error */
+		channel_add_input(chn, out.len);
+	}
 	return ret;
   full:
 	ret = 0;
@@ -2153,7 +2160,6 @@ static void promex_appctx_handle_io(struct appctx *appctx)
 	int ret;
 
 	res_htx = htx_from_buf(&res->buf);
-
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
 
@@ -2186,7 +2192,7 @@ static void promex_appctx_handle_io(struct appctx *appctx)
 			/* fall through */
 
 		case PROMEX_ST_DONE:
-			/* Don't add EOD and TLR because mux-h1 will take care of it */
+			/* Don't add TLR because mux-h1 will take care of it */
 			if (!htx_add_endof(res_htx, HTX_BLK_EOM)) {
 				si_rx_room_blk(si);
 				goto out;

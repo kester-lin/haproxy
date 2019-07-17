@@ -202,17 +202,17 @@ comp_http_payload(struct stream *s, struct filter *filter, struct http_msg *msg,
 	struct comp_state *st = filter->ctx;
 	struct htx *htx = htxbuf(&msg->chn->buf);
 	struct htx_blk *blk;
-	struct htx_ret htx_ret;
 	int ret, consumed = 0, to_forward = 0;
 
-	htx_ret = htx_find_blk(htx, offset);
-	blk = htx_ret.blk;
-	offset = htx_ret.ret;
-
-	while (blk && len) {
+	for (blk = htx_get_first_blk(htx); blk && len; blk = htx_get_next_blk(htx, blk)) {
 		enum htx_blk_type type = htx_get_blk_type(blk);
 		uint32_t sz = htx_get_blksz(blk);
 		struct ist v;
+
+		if (offset >= sz) {
+			offset -= sz;
+			continue;
+		}
 
 		switch (type) {
 			case HTX_BLK_UNUSED:
@@ -245,8 +245,8 @@ comp_http_payload(struct stream *s, struct filter *filter, struct http_msg *msg,
 				blk = htx_replace_blk_value(htx, blk, v, ist2(b_head(&trash), b_data(&trash)));
 				break;
 
-			case HTX_BLK_EOD:
 			case HTX_BLK_TLR:
+			case HTX_BLK_EOT:
 			case HTX_BLK_EOM:
 				if (msg->flags & HTTP_MSGF_COMPRESSING) {
 					if (htx_compression_buffer_init(htx, &trash) < 0) {
@@ -256,7 +256,10 @@ comp_http_payload(struct stream *s, struct filter *filter, struct http_msg *msg,
 					if (htx_compression_buffer_end(st, &trash, 1) < 0)
 						goto error;
 					if (b_data(&trash)) {
-						blk = htx_add_data_before(htx, blk, ist2(b_head(&trash), b_data(&trash)));
+						struct htx_blk *last = htx_add_last_data(htx, ist2(b_head(&trash), b_data(&trash)));
+						if (!last)
+							goto error;
+						blk = htx_get_next_blk(htx, last);
 						if (!blk)
 							goto error;
 						to_forward += b_data(&trash);
@@ -277,7 +280,6 @@ comp_http_payload(struct stream *s, struct filter *filter, struct http_msg *msg,
 		}
 
 		offset = 0;
-		blk  = htx_get_next_blk(htx, blk);
 	}
 
   end:
@@ -521,6 +523,9 @@ http_set_comp_reshdr(struct comp_state *st, struct stream *s, struct http_msg *m
 		}
 	}
 
+	if (http_header_add_tail2(msg, &txn->hdr_idx, "Vary: Accept-Encoding", 21) < 0)
+		goto error;
+
 	return 1;
 
   error:
@@ -574,6 +579,9 @@ htx_set_comp_reshdr(struct comp_state *st, struct stream *s, struct http_msg *ms
 				goto error;
 		}
 	}
+
+	if (!http_add_header(htx, ist("Vary"), ist("Accept-Encoding")))
+		goto error;
 
 	return 1;
 

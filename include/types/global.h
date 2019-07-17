@@ -125,6 +125,8 @@ struct global {
 	struct freq_ctr ssl_be_keys_per_sec;
 	struct freq_ctr comp_bps_in;	/* bytes per second, before http compression */
 	struct freq_ctr comp_bps_out;	/* bytes per second, after http compression */
+	struct freq_ctr out_32bps;      /* #of 32-byte blocks emitted per second */
+	unsigned long long out_bytes;   /* total #of bytes emitted */
 	int cps_lim, cps_max;
 	int sps_lim, sps_max;
 	int ssl_lim, ssl_max;
@@ -192,7 +194,8 @@ struct global {
 #ifdef USE_CPU_AFFINITY
 	struct {
 		unsigned long proc[MAX_PROCS];      /* list of CPU masks for the 32/64 first processes */
-		unsigned long thread[MAX_THREADS];  /* list of CPU masks for the 32/64 first threads */
+		unsigned long proc_t1[MAX_PROCS];   /* list of CPU masks for the 1st thread of each process */
+		unsigned long thread[MAX_THREADS];  /* list of CPU masks for the 32/64 first threads of the 1st process */
 	} cpu_map;
 #endif
 };
@@ -216,12 +219,15 @@ struct mworker_proc {
 	char *id;
 	char **command;
 	char *path;
+	char *version;
 	int ipc_fd[2]; /* 0 is master side, 1 is worker side */
 	int relative_pid;
 	int reloads;
 	int timestamp;
 	struct server *srv; /* the server entry in the master proxy */
 	struct list list;
+	int uid;
+	int gid;
 };
 
 extern struct global global;
@@ -241,7 +247,7 @@ extern const int zero;
 extern const int one;
 extern const struct linger nolinger;
 extern int stopping;	/* non zero means stopping in progress */
-extern int killed;	/* non zero means a hard-stop is triggered */
+extern int killed;	/* >0 means a hard-stop is triggered, >1 means hard-stop immediately */
 extern char hostname[MAX_HOSTNAME_LEN];
 extern char localpeer[MAX_HOSTNAME_LEN];
 extern struct list global_listener_queue; /* list of the temporarily limited listeners */
@@ -256,12 +262,12 @@ extern unsigned int rlim_fd_max_at_boot;
 extern int atexit_flag;
 
 /* bit values to go with "warned" above */
-#define WARN_BLOCK_DEPRECATED       0x00000001
+/* unassigned : 0x00000001 (previously: WARN_BLOCK_DEPRECATED) */
 /* unassigned : 0x00000002 */
-#define WARN_REDISPATCH_DEPRECATED  0x00000004
-#define WARN_CLITO_DEPRECATED       0x00000008
-#define WARN_SRVTO_DEPRECATED       0x00000010
-#define WARN_CONTO_DEPRECATED       0x00000020
+/* unassigned : 0x00000004 (previously: WARN_REDISPATCH_DEPRECATED) */
+/* unassigned : 0x00000008 (previously: WARN_CLITO_DEPRECATED) */
+/* unassigned : 0x00000010 (previously: WARN_SRVTO_DEPRECATED) */
+/* unassigned : 0x00000020 (previously: WARN_CONTO_DEPRECATED) */
 #define WARN_FORCECLOSE_DEPRECATED  0x00000040
 
 #define WARN_REQREP_DEPRECATED      0x00000080

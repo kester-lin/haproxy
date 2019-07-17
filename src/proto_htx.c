@@ -132,19 +132,7 @@ int htx_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 	 * a timeout or connection reset is not counted as an error. However
 	 * a bad request is.
 	 */
-	if (unlikely(htx_is_empty(htx) || htx_get_tail_type(htx) < HTX_BLK_EOH)) {
-		/*
-		 * First catch invalid request because only part of headers have
-		 * been transfered. Multiplexers have the responsibility to emit
-		 * all headers at once.
-		 */
-		if (htx_is_not_empty(htx) || (s->si[0].flags & SI_FL_RXBLK_ROOM)) {
-			stream_inc_http_req_ctr(s);
-			stream_inc_http_err_ctr(s);
-			proxy_inc_fe_req_ctr(sess->fe);
-			goto return_bad_req;
-		}
-
+	if (unlikely(htx_is_empty(htx) || htx->first == -1)) {
 		if (htx->flags & HTX_FL_UPGRADE)
 			goto failed_keep_alive;
 
@@ -291,7 +279,8 @@ int htx_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 	txn->flags &= ~TX_WAIT_NEXT_RQ;
 	req->analyse_exp = TICK_ETERNITY;
 
-	sl = http_find_stline(htx);
+	BUG_ON(htx_get_first_type(htx) != HTX_BLK_REQ_SL);
+	sl = http_get_stline(htx);
 
 	/* 0: we might have to print this header in debug mode */
 	if (unlikely((global.mode & MODE_DEBUG) &&
@@ -300,7 +289,7 @@ int htx_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 
 		htx_debug_stline("clireq", s, sl);
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
@@ -551,7 +540,7 @@ int htx_process_req_common(struct stream *s, struct channel *req, int an_bit, st
 	 * by a possible reqrep, while they are processed *after* so that a
 	 * reqdeny can still block them. This clearly needs to change in 1.6!
 	 */
-	if (htx_stats_check_uri(s, txn, px)) {
+	if (!s->target && htx_stats_check_uri(s, txn, px)) {
 		s->target = &http_stats_applet.obj_type;
 		if (unlikely(!si_register_handler(&s->si[1], objt_applet(s->target)))) {
 			txn->status = 500;
@@ -801,7 +790,7 @@ int htx_process_request(struct stream *s, struct channel *req, int an_bit)
 
 			return 0;
 		}
-		sl = http_find_stline(htx);
+		sl = http_get_stline(htx);
 		uri = htx_sl_req_uri(sl);
 		path = http_get_path(uri);
 		if (url2sa(uri.ptr, uri.len - path.len, &conn->addr.to, NULL) == -1)
@@ -1083,7 +1072,7 @@ int htx_wait_for_request_body(struct stream *s, struct channel *req, int an_bit)
 	/* Now we're in HTTP_MSG_DATA. We just need to know if all data have
 	 * been received or if the buffer is full.
 	 */
-	if (htx_get_tail_type(htx) >= HTX_BLK_EOD ||
+	if (htx_get_tail_type(htx) > HTX_BLK_DATA ||
 	    channel_htx_full(req, htx, global.tune.maxrewrite))
 		goto http_end;
 
@@ -1174,6 +1163,12 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 		/* Output closed while we were sending data. We must abort and
 		 * wake the other side up.
 		 */
+		/* Don't abort yet if we had L7 retries activated and it
+		 * was a write error, we may recover.
+		 */
+		if (!(req->flags & (CF_READ_ERROR | CF_READ_TIMEOUT)) &&
+		    (s->si[1].flags & SI_FL_L7_RETRY))
+			return 0;
 		msg->err_state = msg->msg_state;
 		msg->msg_state = HTTP_MSG_ERROR;
 		htx_end_request(s);
@@ -1232,8 +1227,6 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 		if (ret < 0)
 			goto return_bad_req;
 		c_adv(req, ret);
-		if (htx->data != co_data(req) || htx->extra)
-			goto missing_data_or_waiting;
 	}
 	else {
 		c_adv(req, htx->data - co_data(req));
@@ -1246,12 +1239,17 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 		goto done;
 	}
 
+
 	/* Check if the end-of-message is reached and if so, switch the message
-	 * in HTTP_MSG_DONE state.
+	 * in HTTP_MSG_ENDING state. Then if all data was marked to be
+	 * forwarded, set the state to HTTP_MSG_DONE.
 	 */
 	if (htx_get_tail_type(htx) != HTX_BLK_EOM)
 		goto missing_data_or_waiting;
 
+	msg->msg_state = HTTP_MSG_ENDING;
+	if (htx->data != co_data(req))
+		goto missing_data_or_waiting;
 	msg->msg_state = HTTP_MSG_DONE;
 	req->to_forward = 0;
 
@@ -1306,7 +1304,7 @@ int htx_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 
  missing_data_or_waiting:
 	/* stop waiting for data if the input is closed before the end */
-	if (msg->msg_state < HTTP_MSG_DONE && req->flags & CF_SHUTR)
+	if (msg->msg_state < HTTP_MSG_ENDING && req->flags & CF_SHUTR)
 		goto return_cli_abort;
 
  waiting:
@@ -1408,13 +1406,13 @@ static __inline int do_l7_retry(struct stream *s, struct stream_interface *si)
 	res->flags &= ~(CF_READ_ERROR | CF_READ_TIMEOUT | CF_SHUTR | CF_EOI | CF_READ_NULL | CF_SHUTR_NOW);
 	res->analysers = 0;
 	si->flags &= ~(SI_FL_ERR | SI_FL_EXP | SI_FL_RXBLK_SHUT);
-	si->state = SI_ST_REQ;
+	stream_choose_redispatch(s);
 	si->exp = TICK_ETERNITY;
 	res->rex = TICK_ETERNITY;
 	res->to_forward = 0;
 	res->analyse_exp = TICK_ETERNITY;
 	res->total = 0;
-	s->flags &= ~(SF_ASSIGNED | SF_ADDR_SET | SF_ERR_SRVTO | SF_ERR_SRVCL);
+	s->flags &= ~(SF_ERR_SRVTO | SF_ERR_SRVCL);
 	si_release_endpoint(&s->si[1]);
 	b_free(&req->buf);
 	/* Swap the L7 buffer with the channel buffer */
@@ -1481,17 +1479,8 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	 * we should only check for HTTP status there, and check I/O
 	 * errors somewhere else.
 	 */
-	if (unlikely(co_data(rep) || htx_is_empty(htx) || htx_get_tail_type(htx) < HTX_BLK_EOH)) {
-		/*
-		 * First catch invalid response because of a parsing error or
-		 * because only part of headers have been transfered.
-		 * Multiplexers have the responsibility to emit all headers at
-		 * once. We must be sure to have forwarded all outgoing data
-		 * first.
-		 */
-		if (!co_data(rep) && (htx_is_not_empty(htx) || (s->si[1].flags & SI_FL_RXBLK_ROOM)))
-			goto return_bad_res;
-
+  next_one:
+	if (unlikely(htx_is_empty(htx) || htx->first == -1)) {
 		/* 1: have we encountered a read error ? */
 		if (rep->flags & CF_READ_ERROR) {
 			struct connection *conn = NULL;
@@ -1646,7 +1635,8 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	 */
 
 	msg->msg_state = HTTP_MSG_BODY;
-	sl = http_find_stline(htx);
+	BUG_ON(htx_get_first_type(htx) != HTX_BLK_RES_SL);
+	sl = http_get_stline(htx);
 
 	/* 0: we might have to print this header in debug mode */
 	if (unlikely((global.mode & MODE_DEBUG) &&
@@ -1655,7 +1645,7 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		htx_debug_stline("srvrep", s, sl);
 
-		for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 			struct htx_blk *blk = htx_get_blk(htx, pos);
 			enum htx_blk_type type = htx_get_blk_type(blk);
 
@@ -1717,11 +1707,11 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	if (txn->status < 200 &&
 	    (txn->status == 100 || txn->status >= 102)) {
 		FLT_STRM_CB(s, flt_http_reset(s, msg));
-		c_adv(rep, htx->data);
+		htx->first = channel_htx_fwd_headers(rep, htx);
 		msg->msg_state = HTTP_MSG_RPBEFORE;
 		txn->status = 0;
 		s->logs.t_data = -1; /* was not a response yet */
-		return 0;
+		goto next_one;
 	}
 
 	/*
@@ -1796,8 +1786,10 @@ int htx_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		ctx.blk = NULL;
 		while (http_find_header(htx, hdr, &ctx, 0)) {
 			if ((ctx.value.len >= 9 && word_match(ctx.value.ptr, ctx.value.len, "Negotiate", 9)) ||
-			    (ctx.value.len >= 4 && word_match(ctx.value.ptr, ctx.value.len, "NTLM", 4)))
+			    (ctx.value.len >= 4 && word_match(ctx.value.ptr, ctx.value.len, "NTLM", 4))) {
+				sess->flags |= SESS_FL_PREFER_LAST;
 				srv_conn->flags |= CO_FL_PRIVATE;
+			}
 		}
 	}
 
@@ -2237,8 +2229,6 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 		if (ret < 0)
 			goto return_bad_res;
 		c_adv(res, ret);
-		if (htx->data != co_data(res) || htx->extra)
-			goto missing_data_or_waiting;
 	}
 	else {
 		c_adv(res, htx->data - co_data(res));
@@ -2253,11 +2243,15 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	}
 
 	/* Check if the end-of-message is reached and if so, switch the message
-	 * in HTTP_MSG_DONE state.
+	 * in HTTP_MSG_ENDING state. Then if all data was marked to be
+	 * forwarded, set the state to HTTP_MSG_DONE.
 	 */
 	if (htx_get_tail_type(htx) != HTX_BLK_EOM)
 		goto missing_data_or_waiting;
 
+	msg->msg_state = HTTP_MSG_ENDING;
+	if (htx->data != co_data(res))
+		goto missing_data_or_waiting;
 	msg->msg_state = HTTP_MSG_DONE;
 	res->to_forward = 0;
 
@@ -2301,7 +2295,7 @@ int htx_response_forward_body(struct stream *s, struct channel *res, int an_bit)
 	 * so we don't want to count this as a server abort. Otherwise it's a
 	 * server abort.
 	 */
-	if (msg->msg_state < HTTP_MSG_DONE && res->flags & CF_SHUTR) {
+	if (msg->msg_state < HTTP_MSG_ENDING && res->flags & CF_SHUTR) {
 		if ((s->req.flags & (CF_SHUTR|CF_SHUTW)) == (CF_SHUTR|CF_SHUTW))
 			goto return_cli_abort;
 		/* If we have some pending data, we continue the processing */
@@ -2385,6 +2379,7 @@ int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct
 	struct ist status, reason, location;
 	unsigned int flags;
 	size_t data;
+	int close = 0; /* Try to keep the connection alive byt default */
 
 	chunk = alloc_trash_chunk();
 	if (!chunk)
@@ -2404,7 +2399,7 @@ int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct
 			if (http_find_header(htx, ist("Host"), &ctx, 0))
 				host = ctx.value;
 
-			sl = http_find_stline(htx);
+			sl = http_get_stline(htx);
 			path = http_get_path(htx_sl_req_uri(sl));
 			/* build message using path */
 			if (path.ptr) {
@@ -2452,7 +2447,7 @@ int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct
 		case REDIRECT_TYPE_PREFIX: {
 			struct ist path;
 
-			sl = http_find_stline(htx);
+			sl = http_get_stline(htx);
 			path = http_get_path(htx_sl_req_uri(sl));
 			/* build message using path */
 			if (path.ptr) {
@@ -2544,6 +2539,9 @@ int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct
 			break;
 	}
 
+	if (!(txn->req.flags & HTTP_MSGF_BODYLESS) && txn->req.msg_state != HTTP_MSG_DONE)
+		close = 1;
+
 	htx = htx_from_buf(&res->buf);
 	flags = (HTX_SL_F_IS_RESP|HTX_SL_F_VER_11|HTX_SL_F_XFER_LEN|HTX_SL_F_BODYLESS);
 	sl = htx_add_stline(htx, HTX_BLK_RES_SL, flags, ist("HTTP/1.1"), status, reason);
@@ -2552,8 +2550,10 @@ int htx_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct
 	sl->info.res.status = rule->code;
 	s->txn->status = rule->code;
 
-	if (!htx_add_header(htx, ist("Connection"), ist("close")) ||
-	    !htx_add_header(htx, ist("Content-length"), ist("0")) ||
+	if (close && !htx_add_header(htx, ist("Connection"), ist("close")))
+		goto fail;
+
+	if (!htx_add_header(htx, ist("Content-length"), ist("0")) ||
 	    !htx_add_header(htx, ist("Location"), location))
 		goto fail;
 
@@ -2656,7 +2656,7 @@ static int htx_reply_103_early_hints(struct channel *res)
 	struct htx *htx = htx_from_buf(&res->buf);
 	size_t data;
 
-	if (!htx_add_endof(htx, HTX_BLK_EOH) || !htx_add_endof(htx, HTX_BLK_EOM)) {
+	if (!htx_add_endof(htx, HTX_BLK_EOH)) {
 		/* If an error occurred during an Early-hint rule,
 		 * remove the incomplete HTTP 103 response from the
 		 * buffer */
@@ -3092,6 +3092,9 @@ static enum rule_result htx_req_get_intercept_rule(struct proxy *px, struct list
 					case ACT_RET_CONT:
 						break;
 					case ACT_RET_STOP:
+						rule_ret = HTTP_RULE_RES_STOP;
+						goto end;
+					case ACT_RET_DONE:
 						rule_ret = HTTP_RULE_RES_DONE;
 						goto end;
 					case ACT_RET_YIELD:
@@ -3484,6 +3487,9 @@ resume_execution:
 					case ACT_RET_STOP:
 						rule_ret = HTTP_RULE_RES_STOP;
 						goto end;
+					case ACT_RET_DONE:
+						rule_ret = HTTP_RULE_RES_DONE;
+						goto end;
 					case ACT_RET_YIELD:
 						s->current_rule = rule;
 						rule_ret = HTTP_RULE_RES_YIELD;
@@ -3516,7 +3522,7 @@ static int htx_apply_filter_to_req_headers(struct stream *s, struct channel *req
 
 	htx = htxbuf(&req->buf);
 
-	for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 		struct htx_blk *blk = htx_get_blk(htx, pos);
 		enum htx_blk_type type;
 		struct ist n, v;
@@ -3624,11 +3630,11 @@ static int htx_apply_filter_to_req_line(struct stream *s, struct channel *req, s
 
 	done = 0;
 
-	reqline->data = htx_fmt_req_line(http_find_stline(htx), reqline->area, reqline->size);
+	reqline->data = htx_fmt_req_line(http_get_stline(htx), reqline->area, reqline->size);
 
 	/* Now we have the request line between cur_ptr and cur_end */
 	if (regex_exec_match2(exp->preg, reqline->area, reqline->data, MAX_MATCH, pmatch, 0)) {
-		struct htx_sl *sl = http_find_stline(htx);
+		struct htx_sl *sl = http_get_stline(htx);
 		struct ist meth, uri, vsn;
 		int len;
 
@@ -3734,7 +3740,7 @@ static int htx_apply_filter_to_resp_headers(struct stream *s, struct channel *re
 
 	htx = htxbuf(&res->buf);
 
-	for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 		struct htx_blk *blk = htx_get_blk(htx, pos);
 		enum htx_blk_type type;
 		struct ist n, v;
@@ -3835,11 +3841,11 @@ static int htx_apply_filter_to_sts_line(struct stream *s, struct channel *res, s
 		return 0;
 
 	done = 0;
-	resline->data = htx_fmt_res_line(http_find_stline(htx), resline->area, resline->size);
+	resline->data = htx_fmt_res_line(http_get_stline(htx), resline->area, resline->size);
 
 	/* Now we have the status line between cur_ptr and cur_end */
 	if (regex_exec_match2(exp->preg, resline->area, resline->data, MAX_MATCH, pmatch, 0)) {
-		struct htx_sl *sl = http_find_stline(htx);
+		struct htx_sl *sl = http_get_stline(htx);
 		struct ist vsn, code, reason;
 		int len;
 
@@ -4320,10 +4326,8 @@ static void htx_manage_client_side_cookies(struct stream *s, struct channel *req
 			hdr_end = (preserve_hdr ? del_from : hdr_beg);
 		}
 		if ((hdr_end - hdr_beg) != ctx.value.len) {
-			if (hdr_beg != hdr_end) {
-				htx_set_blk_value_len(ctx.blk, hdr_end - hdr_beg);
-				htx->data -= ctx.value.len - (hdr_end - hdr_beg);
-			}
+			if (hdr_beg != hdr_end)
+				htx_change_blk_value_len(htx, ctx.blk, hdr_end - hdr_beg);
 			else
 				http_remove_header(htx, &ctx);
 		}
@@ -4501,8 +4505,7 @@ static void htx_manage_server_side_cookies(struct stream *s, struct channel *res
 				next         += stripped_before;
 				hdr_end      += stripped_before;
 
-				htx_set_blk_value_len(ctx.blk, hdr_end - hdr_beg);
-				htx->data -= ctx.value.len - (hdr_end - hdr_beg);
+				htx_change_blk_value_len(htx, ctx.blk, hdr_end - hdr_beg);
 				ctx.value.len = hdr_end - hdr_beg;
 			}
 
@@ -4628,7 +4631,7 @@ void htx_check_request_for_cacheability(struct stream *s, struct channel *req)
 
 	htx = htxbuf(&req->buf);
 	pragma_found = cc_found = 0;
-	for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
                 struct htx_blk *blk = htx_get_blk(htx, pos);
                 enum htx_blk_type type = htx_get_blk_type(blk);
 		struct ist n, v;
@@ -4716,7 +4719,7 @@ void htx_check_response_for_cacheability(struct stream *s, struct channel *res)
 	}
 
 	htx = htxbuf(&res->buf);
-	for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
                 struct htx_blk *blk  = htx_get_blk(htx, pos);
                 enum htx_blk_type type = htx_get_blk_type(blk);
 		struct ist n, v;
@@ -4832,7 +4835,7 @@ static int htx_stats_check_uri(struct stream *s, struct http_txn *txn, struct pr
 		return 0;
 
 	htx = htxbuf(&s->req.buf);
-	sl = http_find_stline(htx);
+	sl = http_get_stline(htx);
 	uri = htx_sl_req_uri(sl);
 
 	/* check URI size */
@@ -4875,7 +4878,7 @@ static int htx_handle_stats(struct stream *s, struct channel *req)
 		appctx->ctx.stats.flags |= STAT_CHUNKED;
 
 	htx = htxbuf(&req->buf);
-	sl = http_find_stline(htx);
+	sl = http_get_stline(htx);
 	lookup = HTX_SL_REQ_UPTR(sl) + uri_auth->uri_len;
 	end = HTX_SL_REQ_UPTR(sl) + HTX_SL_REQ_ULEN(sl);
 
@@ -5028,7 +5031,7 @@ void htx_perform_server_redirect(struct stream *s, struct stream_interface *si)
 
 	/* 2: add the request Path */
 	htx = htxbuf(&req->buf);
-	sl = http_find_stline(htx);
+	sl = http_get_stline(htx);
 	path = http_get_path(htx_sl_req_uri(sl));
 	if (!path.ptr)
 		return;
@@ -5452,7 +5455,7 @@ static int htx_reply_100_continue(struct stream *s)
 		goto fail;
 	sl->info.res.status = 100;
 
-	if (!htx_add_endof(htx, HTX_BLK_EOH) || !htx_add_endof(htx, HTX_BLK_EOM))
+	if (!htx_add_endof(htx, HTX_BLK_EOH))
 		goto fail;
 
 	data = htx->data - co_data(res);
@@ -5507,7 +5510,8 @@ static int htx_reply_40x_unauthorized(struct stream *s, const char *auth_realm)
 	if (chunk_printf(&trash, "Basic realm=\"%s\"", auth_realm) == -1)
 		goto fail;
 
-        if (!htx_add_header(htx, ist("Cache-Control"), ist("no-cache")) ||
+        if (!htx_add_header(htx, ist("Content-length"), ist("112")) ||
+	    !htx_add_header(htx, ist("Cache-Control"), ist("no-cache")) ||
 	    !htx_add_header(htx, ist("Connection"), ist("close")) ||
 	    !htx_add_header(htx, ist("Content-Type"), ist("text/html")))
 		goto fail;
@@ -5515,7 +5519,18 @@ static int htx_reply_40x_unauthorized(struct stream *s, const char *auth_realm)
 		goto fail;
 	if (status == 407 && !htx_add_header(htx, ist("Proxy-Authenticate"), ist2(trash.area, trash.data)))
 		goto fail;
-	if (!htx_add_endof(htx, HTX_BLK_EOH) || !htx_add_data(htx, body) || !htx_add_endof(htx, HTX_BLK_EOM))
+	if (!htx_add_endof(htx, HTX_BLK_EOH))
+		goto fail;
+
+	while (body.len) {
+		size_t sent = htx_add_data(htx, body);
+		if (!sent)
+			goto fail;
+		body.ptr += sent;
+		body.len -= sent;
+	}
+
+	if (!htx_add_endof(htx, HTX_BLK_EOM))
 		goto fail;
 
 	data = htx->data - co_data(res);
@@ -5549,7 +5564,7 @@ static void htx_capture_headers(struct htx *htx, char **cap, struct cap_hdr *cap
 	struct cap_hdr *h;
 	int32_t pos;
 
-	for (pos = htx_get_head(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
 		struct htx_blk *blk = htx_get_blk(htx, pos);
 		enum htx_blk_type type = htx_get_blk_type(blk);
 		struct ist n, v;

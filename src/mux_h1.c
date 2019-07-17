@@ -58,7 +58,7 @@
 #define H1S_F_ERROR          0x00000001 /* An error occurred on the H1 stream */
 #define H1S_F_REQ_ERROR      0x00000002 /* An error occurred during the request parsing/xfer */
 #define H1S_F_RES_ERROR      0x00000004 /* An error occurred during the response parsing/xfer */
-/* 0x00000008 unused */
+#define H1S_F_REOS           0x00000008 /* End of input stream seen even if not delivered yet */
 #define H1S_F_WANT_KAL       0x00000010
 #define H1S_F_WANT_TUN       0x00000020
 #define H1S_F_WANT_CLO       0x00000040
@@ -66,10 +66,9 @@
 #define H1S_F_NOT_FIRST      0x00000080 /* The H1 stream is not the first one */
 #define H1S_F_BUF_FLUSH      0x00000100 /* Flush input buffer and don't read more data */
 #define H1S_F_SPLICED_DATA   0x00000200 /* Set when the kernel splicing is in used */
-#define H1S_F_HAVE_I_EOD     0x00000400 /* Set during input process to know the last empty chunk was processed */
 #define H1S_F_HAVE_I_TLR     0x00000800 /* Set during input process to know the trailers were processed */
-#define H1S_F_HAVE_O_EOD     0x00001000 /* Set during output process to know the last empty chunk was processed */
-#define H1S_F_HAVE_O_TLR     0x00002000 /* Set during output process to know the trailers were processed */
+/* 0x00001000 .. 0x00002000 unused */
+#define H1S_F_HAVE_O_CONN    0x00004000 /* Set during output process to know connection mode was processed */
 
 /* H1 connection descriptor */
 struct h1c {
@@ -166,13 +165,13 @@ static int h1_buf_available(void *target)
 	if ((h1c->flags & H1C_F_IN_ALLOC) && b_alloc_margin(&h1c->ibuf, 0)) {
 		h1c->flags &= ~H1C_F_IN_ALLOC;
 		if (h1_recv_allowed(h1c))
-			tasklet_wakeup(h1c->wait_event.task);
+			tasklet_wakeup(h1c->wait_event.tasklet);
 		return 1;
 	}
 
 	if ((h1c->flags & H1C_F_OUT_ALLOC) && b_alloc_margin(&h1c->obuf, 0)) {
 		h1c->flags &= ~H1C_F_OUT_ALLOC;
-		tasklet_wakeup(h1c->wait_event.task);
+		tasklet_wakeup(h1c->wait_event.tasklet);
 		return 1;
 	}
 
@@ -231,6 +230,19 @@ static int h1_avail_streams(struct connection *conn)
 /*****************************************************************/
 /* functions below are dedicated to the mux setup and management */
 /*****************************************************************/
+
+/* returns non-zero if there are input data pending for stream h1s. */
+static inline size_t h1s_data_pending(const struct h1s *h1s)
+{
+	const struct h1m *h1m;
+
+	h1m = conn_is_back(h1s->h1c->conn) ? &h1s->res : &h1s->req;
+	if (h1m->state == H1_MSG_DONE)
+		return 0; // data not for this stream (e.g. pipelining)
+
+	return b_data(&h1s->h1c->ibuf);
+}
+
 static struct conn_stream *h1s_new_cs(struct h1s *h1s)
 {
 	struct conn_stream *cs;
@@ -294,10 +306,20 @@ static struct h1s *h1s_create(struct h1c *h1c, struct conn_stream *cs, struct se
 		if (!sess)
 			sess = h1c->conn->owner;
 
-		h1s->csinfo.create_date = sess->accept_date;
-		h1s->csinfo.tv_create   = sess->tv_accept;
-		h1s->csinfo.t_handshake = sess->t_handshake;
-		h1s->csinfo.t_idle      = -1;
+		/* Timers for subsequent sessions on the same HTTP 1.x connection
+		 * measure from `now`, not from the connection accept time */
+		if (h1s->flags & H1S_F_NOT_FIRST) {
+			h1s->csinfo.create_date = date;
+			h1s->csinfo.tv_create   = now;
+			h1s->csinfo.t_handshake = 0;
+			h1s->csinfo.t_idle      = -1;
+		}
+		else {
+			h1s->csinfo.create_date = sess->accept_date;
+			h1s->csinfo.tv_create   = sess->tv_accept;
+			h1s->csinfo.t_handshake = sess->t_handshake;
+			h1s->csinfo.t_idle      = -1;
+		}
 	}
 	else {
 		if (h1c->px->options2 & PR_O2_RSPBUG_OK)
@@ -384,11 +406,11 @@ static int h1_init(struct connection *conn, struct proxy *proxy, struct session 
 	h1c->task  = NULL;
 
 	LIST_INIT(&h1c->buf_wait.list);
-	h1c->wait_event.task = tasklet_new();
-	if (!h1c->wait_event.task)
+	h1c->wait_event.tasklet = tasklet_new();
+	if (!h1c->wait_event.tasklet)
 		goto fail;
-	h1c->wait_event.task->process = h1_io_cb;
-	h1c->wait_event.task->context = h1c;
+	h1c->wait_event.tasklet->process = h1_io_cb;
+	h1c->wait_event.tasklet->context = h1c;
 	h1c->wait_event.events   = 0;
 
 	if (conn_is_back(conn)) {
@@ -411,7 +433,7 @@ static int h1_init(struct connection *conn, struct proxy *proxy, struct session 
 		t->expire = tick_add(now_ms, h1c->timeout);
 	}
 
-	if (!(conn->flags & CO_FL_CONNECTED))
+	if (!(conn->flags & CO_FL_CONNECTED) || (conn->flags & CO_FL_HANDSHAKE))
 		h1c->flags |= H1C_F_CS_WAIT_CONN;
 
 	/* Always Create a new H1S */
@@ -425,15 +447,15 @@ static int h1_init(struct connection *conn, struct proxy *proxy, struct session 
 		task_queue(t);
 
 	/* Try to read, if nothing is available yet we'll just subscribe */
-	tasklet_wakeup(h1c->wait_event.task);
+	tasklet_wakeup(h1c->wait_event.tasklet);
 
 	/* mux->wake will be called soon to complete the operation */
 	return 0;
 
   fail:
 	task_destroy(t);
-	if (h1c->wait_event.task)
-		tasklet_free(h1c->wait_event.task);
+	if (h1c->wait_event.tasklet)
+		tasklet_free(h1c->wait_event.tasklet);
 	pool_free(pool_head_h1c, h1c);
  fail_h1c:
 	return -1;
@@ -453,6 +475,10 @@ static void h1_release(struct h1c *h1c)
 
 		if (conn && h1c->flags & H1C_F_UPG_H2C) {
 			h1c->flags &= ~H1C_F_UPG_H2C;
+			/* Make sure we're no longer subscribed to anything */
+			if (h1c->wait_event.events)
+				conn->xprt->unsubscribe(conn, conn->xprt_ctx,
+				    h1c->wait_event.events, &h1c->wait_event);
 			if (conn_upgrade_mux_fe(conn, NULL, &h1c->ibuf, ist("h2"), PROTO_MODE_HTX) != -1) {
 				/* connection successfully upgraded to H2, this
 				 * mux was already released */
@@ -478,8 +504,8 @@ static void h1_release(struct h1c *h1c)
 			h1c->task = NULL;
 		}
 
-		if (h1c->wait_event.task)
-			tasklet_free(h1c->wait_event.task);
+		if (h1c->wait_event.tasklet)
+			tasklet_free(h1c->wait_event.tasklet);
 
 		h1s_destroy(h1c->h1s);
 		if (conn && h1c->wait_event.events != 0)
@@ -881,24 +907,59 @@ static void h1_set_res_tunnel_mode(struct h1s *h1s)
 		h1s->req.state = H1_MSG_TUNNEL;
 		if (h1s->h1c->flags & H1C_F_IN_BUSY) {
 			h1s->h1c->flags &= ~H1C_F_IN_BUSY;
-			tasklet_wakeup(h1s->h1c->wait_event.task);
+			tasklet_wakeup(h1s->h1c->wait_event.tasklet);
 		}
 	}
 }
 
-/*
- * Handle 100-Continue responses or any other informational 1xx responses which
- * is non-final. In such case, this function reset the response parser. It is
- * the caller responsibility to call this function when appropriate.
- */
-static void h1_handle_1xx_response(struct h1s *h1s, struct h1m *h1m)
+/* Estimate the size of the HTX headers after the parsing, including the EOH. */
+static size_t h1_eval_htx_hdrs_size(struct http_hdr *hdrs)
 {
-	if ((h1m->flags & H1_MF_RESP) && h1m->state == H1_MSG_DONE &&
-	    h1s->status < 200 && (h1s->status == 100 || h1s->status >= 102)) {
-		h1m_init_res(&h1s->res);
-		h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
-		h1s->h1c->flags &= ~H1C_F_IN_BUSY;
-	}
+	size_t sz = 0;
+	int i;
+
+	for (i = 0; hdrs[i].n.len; i++)
+		sz += sizeof(struct htx_blk) + hdrs[i].n.len + hdrs[i].v.len;
+	sz += sizeof(struct htx_blk) + 1;
+	return sz;
+}
+
+/* Estimate the size of the HTX request after the parsing. */
+static size_t h1_eval_htx_req_size(struct h1m *h1m, union h1_sl *h1sl, struct http_hdr *hdrs)
+{
+	size_t sz;
+
+	/* size of the HTX start-line */
+	sz = sizeof(struct htx_sl) + h1sl->rq.m.len + h1sl->rq.u.len + h1sl->rq.v.len;
+	sz += h1_eval_htx_hdrs_size(hdrs);
+	return sz;
+}
+
+/* Estimate the size of the HTX response after the parsing. */
+static size_t h1_eval_htx_res_size(struct h1m *h1m, union h1_sl *h1sl, struct http_hdr *hdrs)
+{
+	size_t sz;
+
+	/* size of the HTX start-line */
+	sz = sizeof(struct htx_sl) + h1sl->st.v.len + h1sl->st.c.len + h1sl->st.r.len;
+	sz += h1_eval_htx_hdrs_size(hdrs);
+	return sz;
+}
+
+/*
+ * Add the EOM in the HTX message and switch the message to the DONE state. It
+ * returns the number of bytes parsed if > 0, or 0 if iet couldn't proceed. This
+ * functions is responsible to update the parser state <h1m>. It also add the
+ * flag CS_FL_EOI on the CS.
+ */
+static size_t h1_process_eom(struct h1s *h1s, struct h1m *h1m, struct htx *htx, size_t max)
+{
+	if (max < sizeof(struct htx_blk) + 1 || !htx_add_endof(htx, HTX_BLK_EOM))
+		return 0;
+
+	h1m->state = H1_MSG_DONE;
+	h1s->cs->flags |= CS_FL_EOI;
+	return (sizeof(struct htx_blk) + 1);
 }
 
 /*
@@ -910,12 +971,14 @@ static void h1_handle_1xx_response(struct h1s *h1s, struct h1m *h1m)
 static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				 struct buffer *buf, size_t *ofs, size_t max)
 {
-	struct http_hdr hdrs[MAX_HTTP_HDR];
+	struct htx_sl *sl;
+	struct http_hdr hdrs[global.tune.max_http_hdr];
 	union h1_sl h1sl;
 	unsigned int flags = HTX_SL_F_NONE;
+	size_t used;
 	int ret = 0;
 
-	if (!max)
+	if (!max || !b_data(buf))
 		goto end;
 
 	/* Realing input buffer if necessary */
@@ -929,13 +992,13 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 			goto h2c_upgrade;
 	}
 
-	ret = h1_headers_to_hdr_list(b_peek(buf, *ofs), b_peek(buf, *ofs) + max,
+	ret = h1_headers_to_hdr_list(b_peek(buf, *ofs), b_tail(buf),
 				     hdrs, sizeof(hdrs)/sizeof(hdrs[0]), h1m, &h1sl);
 	if (ret <= 0) {
 		/* Incomplete or invalid message. If the buffer is full, it's an
 		 * error because headers are too large to be handled by the
 		 * parser. */
-		if (ret < 0 || (!ret && b_full(buf)))
+		if (ret < 0 || (!ret && !buf_room_for_htx_data(buf)))
 			goto error;
 		goto end;
 	}
@@ -943,10 +1006,6 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 	/* messages headers fully parsed, do some checks to prepare the body
 	 * parsing.
 	 */
-
-	/* Be sure to keep some space to do headers rewritting */
-	if (ret > (b_size(buf) - global.tune.maxrewrite))
-		goto error;
 
 	/* Save the request's method or the response's status, check if the body
 	 * length is known and check the VSN validity */
@@ -959,10 +1018,6 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 		if (h1s->meth == HTTP_METH_CONNECT) {
 			/* Switch CONNECT requests to tunnel mode */
 			h1_set_req_tunnel_mode(h1s);
-		}
-		else if (!(h1m->flags & H1_MF_CHNK) && !h1m->body_len) {
-			/* Switch requests with no body to done. */
-			h1m->state = H1_MSG_DONE;
 		}
 
 		if (!h1_process_req_vsn(h1s, h1m, h1sl)) {
@@ -983,18 +1038,14 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 		else if ((h1s->meth == HTTP_METH_HEAD) ||
 			 (h1s->status >= 100 && h1s->status < 200) ||
 			 (h1s->status == 204) || (h1s->status == 304)) {
-			/* Switch responses without body to done. */
+			/* Responses known to have no body. */
 			h1m->flags &= ~(H1_MF_CLEN|H1_MF_CHNK);
 			h1m->flags |= H1_MF_XFER_LEN;
 			h1m->curr_len = h1m->body_len = 0;
-			h1m->state = H1_MSG_DONE;
 		}
 		else if (h1m->flags & (H1_MF_CLEN|H1_MF_CHNK)) {
-			/* Responses with a known body length. Switch requests
-			 * with no body to done. */
+			/* Responses with a known body length. */
 			h1m->flags |= H1_MF_XFER_LEN;
-			if ((h1m->flags & H1_MF_CLEN) && !h1m->body_len)
-				h1m->state = H1_MSG_DONE;
 		}
 		else {
 			/* Responses with an unknown body length */
@@ -1017,22 +1068,48 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 		flags |= HTX_SL_F_XFER_LEN;
 		if (h1m->flags & H1_MF_CHNK)
 			flags |= HTX_SL_F_CHNK;
-		else if (h1m->flags & H1_MF_CLEN)
+		else if (h1m->flags & H1_MF_CLEN) {
 			flags |= HTX_SL_F_CLEN;
-		if (h1m->state == H1_MSG_DONE)
+			if (h1m->body_len == 0)
+				flags |= HTX_SL_F_BODYLESS;
+		}
+		else
 			flags |= HTX_SL_F_BODYLESS;
 	}
 
+	used = htx_used_space(htx);
 	if (!(h1m->flags & H1_MF_RESP)) {
-		struct htx_sl *sl;
+		if (h1_eval_htx_req_size(h1m, &h1sl, hdrs) > max) {
+			if (htx_is_empty(htx))
+				goto error;
+			h1m_init_req(h1m);
+			h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+			ret = 0;
+			goto end;
+		}
 
 		sl = htx_add_stline(htx, HTX_BLK_REQ_SL, flags, h1sl.rq.m, h1sl.rq.u, h1sl.rq.v);
 		if (!sl || !htx_add_all_headers(htx, hdrs))
 			goto error;
 		sl->info.req.meth = h1s->meth;
+
+		/* Check if the uri contains an explicit scheme and if it is
+		 * "http" or "https". */
+		if (h1sl.rq.u.len && h1sl.rq.u.ptr[0] != '/') {
+			sl->flags |= HTX_SL_F_HAS_SCHM;
+			if (h1sl.rq.u.len > 4 && (h1sl.rq.u.ptr[0] | 0x20) == 'h')
+				sl->flags |= ((h1sl.rq.u.ptr[4] == ':') ? HTX_SL_F_SCHM_HTTP : HTX_SL_F_SCHM_HTTPS);
+		}
 	}
 	else {
-		struct htx_sl *sl;
+		if (h1_eval_htx_res_size(h1m, &h1sl, hdrs) > max) {
+			if (htx_is_empty(htx))
+				goto error;
+			h1m_init_res(h1m);
+			h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+			ret = 0;
+			goto end;
+		}
 
 		flags |= HTX_SL_F_IS_RESP;
 		sl = htx_add_stline(htx, HTX_BLK_RES_SL, flags, h1sl.st.v, h1sl.st.c, h1sl.st.r);
@@ -1041,11 +1118,8 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 		sl->info.res.status = h1s->status;
 	}
 
-	if (h1m->state == H1_MSG_DONE) {
-		if (!htx_add_endof(htx, HTX_BLK_EOM))
-			goto error;
-		h1s->cs->flags |= CS_FL_EOI;
-	}
+	/* Set bytes used in the HTX mesage for the headers now */
+	sl->hdrs_bytes = htx_used_space(htx) - used;
 
 	h1_process_input_conn_mode(h1s, h1m, htx);
 
@@ -1053,11 +1127,6 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 	 * ULLONG_MAX. This value is impossible in other cases.
 	 */
 	htx->extra = ((h1m->flags & H1_MF_XFER_LEN) ? h1m->curr_len : ULLONG_MAX);
-
-	/* Recheck there is enough space to do headers rewritting */
-	if (htx_used_space(htx) > b_size(buf) - global.tune.maxrewrite)
-		goto error;
-
 	*ofs += ret;
   end:
 	return ret;
@@ -1067,13 +1136,15 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
 	h1m->err_pos = h1m->next;
   vsn_error:
 	h1s->flags |= (!(h1m->flags & H1_MF_RESP) ? H1S_F_REQ_ERROR : H1S_F_RES_ERROR);
+	h1s->cs->flags |= CS_FL_EOI;
+	htx->flags |= HTX_FL_PARSING_ERROR;
 	h1_capture_bad_message(h1s->h1c, h1s, h1m, buf);
 	ret = 0;
 	goto end;
 
   h2c_upgrade:
 	h1s->h1c->flags |= H1C_F_UPG_H2C;
-	h1s->cs->flags |= CS_FL_REOS;
+	h1s->cs->flags |= CS_FL_EOI;
 	htx->flags |= HTX_FL_UPGRADE;
 	ret = 0;
 	goto end;
@@ -1087,27 +1158,20 @@ static size_t h1_process_headers(struct h1s *h1s, struct h1m *h1m, struct htx *h
  */
 static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 			      struct buffer *buf, size_t *ofs, size_t max,
-			      struct buffer *htxbuf, size_t reserve)
+			      struct buffer *htxbuf)
 {
-	uint32_t data_space;
 	size_t total = 0;
-	int ret = 0;
-
-	data_space = htx_free_data_space(htx);
-	if (data_space <= reserve)
-		goto end;
-	data_space -= reserve;
+	int32_t ret = 0;
 
 	if (h1m->flags & H1_MF_XFER_LEN) {
 		if (h1m->flags & H1_MF_CLEN) {
 			/* content-length: read only h2m->body_len */
-			ret = max;
-			if (ret > data_space)
-				ret = data_space;
+			ret = htx_get_max_blksz(htx, max);
 			if ((uint64_t)ret > h1m->curr_len)
 				ret = h1m->curr_len;
 			if (ret > b_contig_data(buf, *ofs))
 				ret = b_contig_data(buf, *ofs);
+
 			if (ret) {
 				/* very often with large files we'll face the following
 				 * situation :
@@ -1117,6 +1181,8 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 				 *   => we can swap the buffers and place an htx header into
 				 *      the target buffer instead
 				 */
+				int32_t try = ret;
+
 				if (unlikely(htx_is_empty(htx) && ret == b_data(buf) &&
 					     !*ofs && b_head_ofs(buf) == sizeof(struct htx))) {
 					void *raw_area = buf->area;
@@ -1136,30 +1202,31 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 					 * empty pre-initialized HTX header
 					 */
 				}
-				else if (!htx_add_data(htx, ist2(b_peek(buf, *ofs), ret)))
-					goto end;
+				else {
+					ret = htx_add_data(htx, ist2(b_peek(buf, *ofs), try));
+				}
 				h1m->curr_len -= ret;
+				max -= sizeof(struct htx_blk) + ret;
 				*ofs += ret;
 				total += ret;
+				if (ret < try)
+					goto end;
 			}
 
 			if (!h1m->curr_len) {
-				if (!htx_add_endof(htx, HTX_BLK_EOM))
+				if (!h1_process_eom(h1s, h1m, htx, max))
 					goto end;
-				h1m->state = H1_MSG_DONE;
-				h1s->cs->flags |= CS_FL_EOI;
 			}
 		}
 		else if (h1m->flags & H1_MF_CHNK) {
 		  new_chunk:
 			/* te:chunked : parse chunks */
 			if (h1m->state == H1_MSG_CHUNK_CRLF) {
-				ret = h1_skip_chunk_crlf(buf, *ofs, *ofs + max);
+				ret = h1_skip_chunk_crlf(buf, *ofs, b_data(buf));
 				if (ret <= 0)
 					goto end;
 				h1m->state = H1_MSG_CHUNK_SIZE;
 
-				max -= ret;
 				*ofs += ret;
 				total += ret;
 			}
@@ -1167,117 +1234,76 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 			if (h1m->state == H1_MSG_CHUNK_SIZE) {
 				unsigned int chksz;
 
-				ret = h1_parse_chunk_size(buf, *ofs, *ofs + max, &chksz);
+				ret = h1_parse_chunk_size(buf, *ofs, b_data(buf), &chksz);
 				if (ret <= 0)
 					goto end;
-				if (!chksz) {
-					if (!htx_add_endof(htx, HTX_BLK_EOD))
-						goto end;
-					h1s->flags |= H1S_F_HAVE_I_EOD;
-					h1m->state = H1_MSG_TRAILERS;
-				}
-				else
-					h1m->state = H1_MSG_DATA;
+				h1m->state = ((!chksz) ? H1_MSG_TRAILERS : H1_MSG_DATA);
 
 				h1m->curr_len  = chksz;
 				h1m->body_len += chksz;
-				max -= ret;
 				*ofs += ret;
 				total += ret;
+
+				if (!h1m->curr_len)
+					goto end;
 			}
 
 			if (h1m->state == H1_MSG_DATA) {
-				ret = max;
-				if (ret > data_space)
-					ret = data_space;
+				ret = htx_get_max_blksz(htx, max);
 				if ((uint64_t)ret > h1m->curr_len)
 					ret = h1m->curr_len;
 				if (ret > b_contig_data(buf, *ofs))
 					ret = b_contig_data(buf, *ofs);
+
 				if (ret) {
-					if (!htx_add_data(htx, ist2(b_peek(buf, *ofs), ret)))
-						goto end;
+					int32_t try = ret;
+
+					ret = htx_add_data(htx, ist2(b_peek(buf, *ofs), try));
 					h1m->curr_len -= ret;
-					max -= ret;
+					max -= sizeof(struct htx_blk) + ret;
 					*ofs += ret;
 					total += ret;
+					if (ret < try)
+						goto end;
 				}
 				if (!h1m->curr_len) {
 					h1m->state = H1_MSG_CHUNK_CRLF;
-					data_space = htx_free_data_space(htx);
-					if (data_space <= reserve)
-						goto end;
-					data_space -= reserve;
 					goto new_chunk;
 				}
 				goto end;
-			}
-
-			if (h1m->state == H1_MSG_TRAILERS) {
-				/* Trailers were alread parsed, only the EOM
-				 * need to be added */
-				if (h1s->flags & H1S_F_HAVE_I_TLR)
-					goto skip_tlr_parsing;
-
-				ret = h1_measure_trailers(buf, *ofs, max);
-				if (ret > data_space)
-					ret = (htx_is_empty(htx) ? -1 : 0);
-				if (ret <= 0)
-					goto end;
-
-				/* Realing input buffer if tailers wrap. For now
-				 * this is a workaroung. Because trailers are
-				 * not split on CRLF, like headers, there is no
-				 * way to know where to split it when trailers
-				 * wrap. This is a limitation of
-				 * h1_measure_trailers.
-				 */
-				if (b_peek(buf, *ofs) > b_peek(buf, *ofs + ret))
-					b_slow_realign(buf, trash.area, 0);
-
-				if (!htx_add_trailer(htx, ist2(b_peek(buf, *ofs), ret)))
-					goto end;
-				h1s->flags |= H1S_F_HAVE_I_TLR;
-				max -= ret;
-				*ofs += ret;
-				total += ret;
-
-			  skip_tlr_parsing:
-				if (!htx_add_endof(htx, HTX_BLK_EOM))
-					goto end;
-				h1m->state = H1_MSG_DONE;
-				h1s->cs->flags |= CS_FL_EOI;
 			}
 		}
 		else {
 			/* XFER_LEN is set but not CLEN nor CHNK, it means there
 			 * is no body. Switch the message in DONE state
 			 */
-			if (!htx_add_endof(htx, HTX_BLK_EOM))
+			if (!h1_process_eom(h1s, h1m, htx, max))
 				goto end;
-			h1m->state = H1_MSG_DONE;
-			h1s->cs->flags |= CS_FL_EOI;
 		}
 	}
 	else {
 		/* no content length, read till SHUTW */
-		ret = max;
-		if (ret > data_space)
-			ret = data_space;
+		ret = htx_get_max_blksz(htx, max);
 		if (ret > b_contig_data(buf, *ofs))
 			ret = b_contig_data(buf, *ofs);
+
 		if (ret) {
-			if (!htx_add_data(htx, ist2(b_peek(buf, *ofs), ret)))
-				goto end;
+			int32_t try = ret;
+
+			ret = htx_add_data(htx, ist2(b_peek(buf, *ofs), try));
 
 			*ofs += ret;
 			total = ret;
+			if (ret < try)
+				goto end;
 		}
 	}
 
   end:
 	if (ret < 0) {
 		h1s->flags |= (!(h1m->flags & H1_MF_RESP) ? H1S_F_REQ_ERROR : H1S_F_RES_ERROR);
+		h1s->cs->flags |= CS_FL_EOI;
+		htx->flags |= HTX_FL_PARSING_ERROR;
 		h1m->err_state = h1m->state;
 		h1m->err_pos = *ofs + max + ret;
 		h1_capture_bad_message(h1s->h1c, h1s, h1m, buf);
@@ -1290,19 +1316,76 @@ static size_t h1_process_data(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
 }
 
 /*
+ * Parse HTTP/1 trailers. It returns the number of bytes parsed if > 0, or 0 if
+ * it couldn't proceed. Parsing errors are reported by setting H1S_F_*_ERROR
+ * flag and filling h1s->err_pos and h1s->err_state fields. This functions is
+ * responsible to update the parser state <h1m>.
+ */
+static size_t h1_process_trailers(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
+				  struct buffer *buf, size_t *ofs, size_t max)
+{
+	struct http_hdr hdrs[global.tune.max_http_hdr];
+	struct h1m tlr_h1m;
+	int ret = 0;
+
+	if (!max || !b_data(buf))
+		goto end;
+
+	/* Realing input buffer if necessary */
+	if (b_peek(buf, *ofs) > b_tail(buf))
+		b_slow_realign(buf, trash.area, 0);
+
+	tlr_h1m.flags = (H1_MF_NO_PHDR|H1_MF_HDRS_ONLY);
+	ret = h1_headers_to_hdr_list(b_peek(buf, *ofs), b_tail(buf),
+				     hdrs, sizeof(hdrs)/sizeof(hdrs[0]), &tlr_h1m, NULL);
+	if (ret <= 0) {
+		/* Incomplete or invalid trailers. If the buffer is full, it's
+		 * an error because traliers are too large to be handled by the
+		 * parser. */
+		if (ret < 0 || (!ret && !buf_room_for_htx_data(buf)))
+			goto error;
+		goto end;
+	}
+
+	/* messages trailers fully parsed. */
+	if (h1_eval_htx_hdrs_size(hdrs) > max) {
+		if (htx_is_empty(htx))
+			goto error;
+		ret = 0;
+		goto end;
+	}
+
+	if (!htx_add_all_trailers(htx, hdrs))
+		goto error;
+
+	*ofs += ret;
+	h1s->flags |= H1S_F_HAVE_I_TLR;
+  end:
+	return ret;
+
+  error:
+	h1m->err_state = h1m->state;
+	h1m->err_pos = h1m->next;
+	h1s->flags |= (!(h1m->flags & H1_MF_RESP) ? H1S_F_REQ_ERROR : H1S_F_RES_ERROR);
+	h1s->cs->flags |= CS_FL_EOI;
+	htx->flags |= HTX_FL_PARSING_ERROR;
+	h1_capture_bad_message(h1s->h1c, h1s, h1m, buf);
+	ret = 0;
+	goto end;
+}
+
+/*
  * Process incoming data. It parses data and transfer them from h1c->ibuf into
  * <buf>. It returns the number of bytes parsed and transferred if > 0, or 0 if
  * it couldn't proceed.
  */
-static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
+static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, size_t count)
 {
 	struct h1s *h1s = h1c->h1s;
 	struct h1m *h1m;
 	struct htx *htx;
-	size_t data = 0;
+	size_t ret, data;
 	size_t total = 0;
-	size_t ret = 0;
-	size_t count, rsv;
 	int errflag;
 
 	htx = htx_from_buf(buf);
@@ -1317,22 +1400,35 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 	}
 
 	data = htx->data;
-	count = b_data(&h1c->ibuf);
-	rsv = ((flags & CO_RFL_KEEP_RSV) ? global.tune.maxrewrite : 0);
-
-	if (htx_is_empty(htx))
-		h1_handle_1xx_response(h1s, h1m);
+	if (h1s->flags & errflag)
+		goto end;
 
 	do {
+		size_t used = htx_used_space(htx);
+
 		if (h1m->state <= H1_MSG_LAST_LF) {
 			ret = h1_process_headers(h1s, h1m, htx, &h1c->ibuf, &total, count);
 			if (!ret)
 				break;
+			if ((h1m->flags & H1_MF_RESP) &&
+			    h1s->status < 200 && (h1s->status == 100 || h1s->status >= 102)) {
+				h1m_init_res(&h1s->res);
+				h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+			}
 		}
-		else if (h1m->state <= H1_MSG_TRAILERS) {
-			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count, buf, rsv);
+		else if (h1m->state < H1_MSG_TRAILERS) {
+			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count, buf);
 			htx = htx_from_buf(buf);
 			if (!ret)
+				break;
+		}
+		else if (h1m->state == H1_MSG_TRAILERS) {
+			if (!(h1s->flags & H1S_F_HAVE_I_TLR)) {
+				ret = h1_process_trailers(h1s, h1m, htx, &h1c->ibuf, &total, count);
+				if (!ret)
+					break;
+			}
+			if (!h1_process_eom(h1s, h1m, htx, count))
 				break;
 		}
 		else if (h1m->state == H1_MSG_DONE) {
@@ -1341,7 +1437,7 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 			break;
 		}
 		else if (h1m->state == H1_MSG_TUNNEL) {
-			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count, buf, rsv);
+			ret = h1_process_data(h1s, h1m, htx, &h1c->ibuf, &total, count, buf);
 			htx = htx_from_buf(buf);
 			if (!ret)
 				break;
@@ -1351,7 +1447,7 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 			break;
 		}
 
-		count -= ret;
+		count -= htx_used_space(htx) - used;
 	} while (!(h1s->flags & errflag) && count);
 
 	if (h1s->flags & errflag)
@@ -1361,32 +1457,30 @@ static size_t h1_process_input(struct h1c *h1c, struct buffer *buf, int flags)
 
   end:
 	htx_to_buf(htx, buf);
-	data = (htx->data - data);
+	ret = htx->data - data;
 	if (h1c->flags & H1C_F_IN_FULL && buf_room_for_htx_data(&h1c->ibuf)) {
 		h1c->flags &= ~H1C_F_IN_FULL;
-		tasklet_wakeup(h1c->wait_event.task);
+		tasklet_wakeup(h1c->wait_event.tasklet);
 	}
 
 	h1s->cs->flags &= ~(CS_FL_RCV_MORE | CS_FL_WANT_ROOM);
 
 	if (!b_data(&h1c->ibuf))
 		h1_release_buf(h1c, &h1c->ibuf);
-	else if (!htx_is_empty(htx))
+	else if (h1s_data_pending(h1s) && !htx_is_empty(htx))
 		h1s->cs->flags |= CS_FL_RCV_MORE | CS_FL_WANT_ROOM;
 
-	if ((h1s->cs->flags & CS_FL_REOS) && (!b_data(&h1c->ibuf) || htx_is_empty(htx))) {
+	if ((h1s->flags & H1S_F_REOS) && (!h1s_data_pending(h1s) || htx_is_empty(htx))) {
 		h1s->cs->flags |= CS_FL_EOS;
 		if (h1m->state > H1_MSG_LAST_LF && h1m->state < H1_MSG_DONE)
 			h1s->cs->flags |= CS_FL_ERROR;
 	}
 
-	return data;
+	return ret;
 
   parsing_err:
 	b_reset(&h1c->ibuf);
-	htx->flags |= HTX_FL_PARSING_ERROR;
 	htx_to_buf(htx, buf);
-	h1s->cs->flags |= CS_FL_EOS;
 	return 0;
 }
 
@@ -1401,15 +1495,14 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 	struct h1m *h1m;
 	struct htx *chn_htx;
 	struct htx_blk *blk;
-	struct buffer *tmp;
+	struct buffer tmp;
 	size_t total = 0;
-	int process_conn_mode = 1; /* If still 1 on EOH, process the connection mode */
 	int errflag;
 
 	if (!count)
 		goto end;
 
-	chn_htx = htx_from_buf(buf);
+	chn_htx = htxbuf(buf);
 	if (htx_is_empty(chn_htx))
 		goto end;
 
@@ -1427,10 +1520,11 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 		errflag = H1S_F_REQ_ERROR;
 	}
 
+	if (h1s->flags & errflag)
+		goto end;
+
 	/* the htx is non-empty thus has at least one block */
 	blk = htx_get_head_blk(chn_htx);
-
-	tmp = get_trash_chunk();
 
 	/* Perform some optimizations to reduce the number of buffer copies.
 	 * First, if the mux's buffer is empty and the htx area contains
@@ -1449,14 +1543,13 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 	 * the HTX blocks.
 	 */
 	if (!b_data(&h1c->obuf)) {
-		h1c->obuf.head = sizeof(struct htx) + blk->addr;
-
 		if (chn_htx->used == 1 &&
 		    htx_get_blk_type(blk) == HTX_BLK_DATA &&
 		    htx_get_blk_value(chn_htx, blk).len == count) {
 			void *old_area = h1c->obuf.area;
 
 			h1c->obuf.area = buf->area;
+			h1c->obuf.head = sizeof(struct htx) + blk->addr;
 			h1c->obuf.data = count;
 
 			buf->area = old_area;
@@ -1474,11 +1567,13 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 			total += count;
 			goto out;
 		}
-		tmp->area = h1c->obuf.area + h1c->obuf.head;
+		tmp.area = h1c->obuf.area + h1c->obuf.head;
 	}
+	else
+		tmp.area = trash.area;
 
-	tmp->size = b_room(&h1c->obuf);
-
+	tmp.data = 0;
+	tmp.size = b_room(&h1c->obuf);
 	while (count && !(h1s->flags & errflag) && blk) {
 		struct htx_sl *sl;
 		struct ist n, v;
@@ -1488,22 +1583,22 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 
 		vlen = sz;
 		if (vlen > count) {
-			if (type != HTX_BLK_DATA && type != HTX_BLK_TLR)
+			if (type != HTX_BLK_DATA)
 				goto copy;
 			vlen = count;
 		}
 
-		switch (type) {
-			case HTX_BLK_UNUSED:
-				break;
+		if (type == HTX_BLK_UNUSED)
+			goto nextblk;
 
-			case HTX_BLK_REQ_SL:
-				h1m_init_req(h1m);
-				h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+		switch (h1m->state) {
+			case H1_MSG_RQBEFORE:
+				if (type != HTX_BLK_REQ_SL)
+					goto error;
 				sl = htx_get_blk_ptr(chn_htx, blk);
 				h1s->meth = sl->info.req.meth;
 				h1_parse_req_vsn(h1m, sl);
-				if (!htx_reqline_to_h1(sl, tmp))
+				if (!htx_reqline_to_h1(sl, &tmp))
 					goto copy;
 				h1m->flags |= H1_MF_XFER_LEN;
 				if (sl->flags & HTX_SL_F_BODYLESS)
@@ -1511,23 +1606,29 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 				h1m->state = H1_MSG_HDR_FIRST;
 				break;
 
-			case HTX_BLK_RES_SL:
-				h1m_init_res(h1m);
-				h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+			case H1_MSG_RPBEFORE:
+				if (type != HTX_BLK_RES_SL)
+					goto error;
 				sl = htx_get_blk_ptr(chn_htx, blk);
 				h1s->status = sl->info.res.status;
 				h1_parse_res_vsn(h1m, sl);
-				if (!htx_stline_to_h1(sl, tmp))
+				if (!htx_stline_to_h1(sl, &tmp))
 					goto copy;
 				if (sl->flags & HTX_SL_F_XFER_LEN)
 					h1m->flags |= H1_MF_XFER_LEN;
 				if (sl->info.res.status < 200 &&
 				    (sl->info.res.status == 100 || sl->info.res.status >= 102))
-					process_conn_mode = 0;
+					h1s->flags |= H1S_F_HAVE_O_CONN;
 				h1m->state = H1_MSG_HDR_FIRST;
 				break;
 
-			case HTX_BLK_HDR:
+			case H1_MSG_HDR_FIRST:
+			case H1_MSG_HDR_NAME:
+			case H1_MSG_HDR_L2_LWS:
+				if (type == HTX_BLK_EOH)
+					goto last_lf;
+				if (type != HTX_BLK_HDR)
+					goto error;
 				h1m->state = H1_MSG_HDR_NAME;
 				n = htx_get_blk_name(chn_htx, blk);
 				v = htx_get_blk_value(chn_htx, blk);
@@ -1545,30 +1646,29 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 						goto skip_hdr;
 				}
 
-				if (!htx_hdr_to_h1(n, v, tmp))
+				if (!htx_hdr_to_h1(n, v, &tmp))
 					goto copy;
 			  skip_hdr:
 				h1m->state = H1_MSG_HDR_L2_LWS;
 				break;
 
-			case HTX_BLK_PHDR:
-				/* not implemented yet */
-				h1m->flags |= errflag;
-				break;
-
-			case HTX_BLK_EOH:
-				if (h1m->state != H1_MSG_LAST_LF && process_conn_mode) {
+			case H1_MSG_LAST_LF:
+				if (type != HTX_BLK_EOH)
+					goto error;
+			  last_lf:
+				h1m->state = H1_MSG_LAST_LF;
+				if (!(h1s->flags & H1S_F_HAVE_O_CONN)) {
 					/* There is no "Connection:" header and
 					 * it the conn_mode must be
 					 * processed. So do it */
-					n = ist("Connection");
+					n = ist("connection");
 					v = ist("");
 					h1_process_output_conn_mode(h1s, h1m, &v);
 					if (v.len) {
-						if (!htx_hdr_to_h1(n, v, tmp))
+						if (!htx_hdr_to_h1(n, v, &tmp))
 							goto copy;
 					}
-					process_conn_mode = 0;
+					h1s->flags |= H1S_F_HAVE_O_CONN;
 				}
 
 				if ((h1s->meth != HTTP_METH_CONNECT &&
@@ -1579,13 +1679,12 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 				     (h1m->flags & (H1_MF_VER_11|H1_MF_RESP|H1_MF_CLEN|H1_MF_CHNK|H1_MF_XFER_LEN)) ==
 				     (H1_MF_VER_11|H1_MF_RESP|H1_MF_XFER_LEN))) {
 					/* chunking needed but header not seen */
-					if (!chunk_memcat(tmp, "transfer-encoding: chunked\r\n", 28))
+					if (!chunk_memcat(&tmp, "transfer-encoding: chunked\r\n", 28))
 						goto copy;
 					h1m->flags |= H1_MF_CHNK;
 				}
 
-				h1m->state = H1_MSG_LAST_LF;
-				if (!chunk_memcat(tmp, "\r\n", 2))
+				if (!chunk_memcat(&tmp, "\r\n", 2))
 					goto copy;
 
 				if (!(h1m->flags & H1_MF_RESP) && h1s->meth == HTTP_METH_CONNECT) {
@@ -1597,57 +1696,88 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 					 * to the client . Switch the response to tunnel mode. */
 					h1_set_res_tunnel_mode(h1s);
 				}
+				else if ((h1m->flags & H1_MF_RESP) &&
+					 h1s->status < 200 && (h1s->status == 100 || h1s->status >= 102)) {
+					h1m_init_res(&h1s->res);
+					h1m->flags |= (H1_MF_NO_PHDR|H1_MF_CLEAN_CONN_HDR);
+					h1s->flags &= ~H1S_F_HAVE_O_CONN;
+				}
+				else if ((h1m->flags & H1_MF_RESP) &&  h1s->meth == HTTP_METH_HEAD)
+					h1m->state = H1_MSG_DONE;
 				else
 					h1m->state = H1_MSG_DATA;
 				break;
 
-			case HTX_BLK_DATA:
-				v = htx_get_blk_value(chn_htx, blk);
-				v.len = vlen;
-				if (!htx_data_to_h1(v, tmp, !!(h1m->flags & H1_MF_CHNK)))
-					goto copy;
-				break;
-
-			case HTX_BLK_EOD:
-				if (!chunk_memcat(tmp, "0\r\n", 3))
-					goto copy;
-				h1s->flags |= H1S_F_HAVE_O_EOD;
-				h1m->state = H1_MSG_TRAILERS;
-				break;
-
-			case HTX_BLK_TLR:
-				if (!(h1s->flags & H1S_F_HAVE_O_EOD)) {
-					if (!chunk_memcat(tmp, "0\r\n", 3))
+			case H1_MSG_DATA:
+			case H1_MSG_TUNNEL:
+				if (type == HTX_BLK_EOM) {
+					/* Chunked message without explicit trailers */
+					if (h1m->flags & H1_MF_CHNK) {
+						if (!chunk_memcat(&tmp, "0\r\n\r\n", 5))
+							goto copy;
+					}
+					goto done;
+				}
+				else if (type == HTX_BLK_EOT || type == HTX_BLK_TLR) {
+					/* If the message is not chunked, never
+					 * add the last chunk. */
+					if ((h1m->flags & H1_MF_CHNK) && !chunk_memcat(&tmp, "0\r\n", 3))
 						goto copy;
-					h1s->flags |= H1S_F_HAVE_O_EOD;
+					goto trailers;
 				}
+				else if (type != HTX_BLK_DATA)
+					goto error;
 				v = htx_get_blk_value(chn_htx, blk);
 				v.len = vlen;
-				if (!htx_trailer_to_h1(v, tmp))
+				if (!htx_data_to_h1(v, &tmp, !!(h1m->flags & H1_MF_CHNK)))
 					goto copy;
-				h1s->flags |= H1S_F_HAVE_O_TLR;
 				break;
 
-			case HTX_BLK_EOM:
-				if ((h1m->flags & H1_MF_CHNK)) {
-					if (!(h1s->flags & H1S_F_HAVE_O_EOD)) {
-						if (!chunk_memcat(tmp, "0\r\n", 3))
-							goto copy;
-						h1s->flags |= H1S_F_HAVE_O_EOD;
-					}
-					if (!(h1s->flags & H1S_F_HAVE_O_TLR)) {
-						if (!chunk_memcat(tmp, "\r\n", 2))
-							goto copy;
-						h1s->flags |= H1S_F_HAVE_O_TLR;
-					}
+			case H1_MSG_TRAILERS:
+				if (type == HTX_BLK_EOM)
+					goto done;
+				else if (type != HTX_BLK_TLR && type != HTX_BLK_EOT)
+					goto error;
+			  trailers:
+				h1m->state = H1_MSG_TRAILERS;
+				/* If the message is not chunked, ignore
+				 * trailers. It may happen with H2 messages. */
+				if (!(h1m->flags & H1_MF_CHNK))
+					break;
+
+				if (type == HTX_BLK_EOT) {
+					if (!chunk_memcat(&tmp, "\r\n", 2))
+						goto copy;
 				}
+				else { // HTX_BLK_TLR
+					n = htx_get_blk_name(chn_htx, blk);
+					v = htx_get_blk_value(chn_htx, blk);
+					if (!htx_hdr_to_h1(n, v, &tmp))
+						goto copy;
+				}
+				break;
+
+			case H1_MSG_DONE:
+				if (type != HTX_BLK_EOM)
+					goto error;
+			  done:
 				h1m->state = H1_MSG_DONE;
+				if (h1s->h1c->flags & H1C_F_IN_BUSY) {
+					h1s->h1c->flags &= ~H1C_F_IN_BUSY;
+					tasklet_wakeup(h1s->h1c->wait_event.tasklet);
+				}
 				break;
 
 			default:
-				h1m->flags |= errflag;
+			  error:
+				/* Unexpected error during output processing */
+				chn_htx->flags |= HTX_FL_PARSING_ERROR;
+				h1s->flags |= errflag;
+				h1c->flags |= H1C_F_CS_ERROR;
 				break;
 		}
+
+	  nextblk:
 		total += vlen;
 		count -= vlen;
 		if (sz == vlen)
@@ -1658,17 +1788,14 @@ static size_t h1_process_output(struct h1c *h1c, struct buffer *buf, size_t coun
 		}
 	}
 
-	if (htx_is_empty(chn_htx))
-		h1_handle_1xx_response(h1s, h1m);
-
   copy:
 	/* when the output buffer is empty, tmp shares the same area so that we
 	 * only have to update pointers and lengths.
 	 */
-	if (tmp->area == h1c->obuf.area + h1c->obuf.head)
-		h1c->obuf.data = tmp->data;
+	if (tmp.area == h1c->obuf.area + h1c->obuf.head)
+		h1c->obuf.data = tmp.data;
 	else
-		b_putblk(&h1c->obuf, tmp->area, tmp->data);
+		b_putblk(&h1c->obuf, tmp.area, tmp.data);
 
 	htx_to_buf(chn_htx, buf);
  out:
@@ -1685,7 +1812,7 @@ static void h1_wake_stream_for_recv(struct h1s *h1s)
 {
 	if (h1s && h1s->recv_wait) {
 		h1s->recv_wait->events &= ~SUB_RETRY_RECV;
-		tasklet_wakeup(h1s->recv_wait->task);
+		tasklet_wakeup(h1s->recv_wait->tasklet);
 		h1s->recv_wait = NULL;
 	}
 }
@@ -1693,7 +1820,7 @@ static void h1_wake_stream_for_send(struct h1s *h1s)
 {
 	if (h1s && h1s->send_wait) {
 		h1s->send_wait->events &= ~SUB_RETRY_SEND;
-		tasklet_wakeup(h1s->send_wait->task);
+		tasklet_wakeup(h1s->send_wait->tasklet);
 		h1s->send_wait = NULL;
 	}
 }
@@ -1711,6 +1838,11 @@ static int h1_recv(struct h1c *h1c)
 	if (h1c->wait_event.events & SUB_RETRY_RECV)
 		return (b_data(&h1c->ibuf));
 
+	if (!(conn->flags & CO_FL_ERROR) && h1c->flags & H1C_F_CS_WAIT_CONN) {
+		conn->xprt->subscribe(conn, conn->xprt_ctx, SUB_RETRY_RECV, &h1c->wait_event);
+		return 0;
+	}
+
 	if (!h1_recv_allowed(h1c)) {
 		rcvd = 1;
 		goto end;
@@ -1722,7 +1854,7 @@ static int h1_recv(struct h1c *h1c)
 	}
 
 	if (h1s && (h1s->flags & (H1S_F_BUF_FLUSH|H1S_F_SPLICED_DATA))) {
-		if (!b_data(&h1c->ibuf))
+		if (!h1s_data_pending(h1s))
 			h1_wake_stream_for_recv(h1s);
 		rcvd = 1;
 		goto end;
@@ -1768,8 +1900,11 @@ static int h1_recv(struct h1c *h1c)
 	if (ret > 0 || (conn->flags & CO_FL_ERROR) || conn_xprt_read0_pending(conn))
 		h1_wake_stream_for_recv(h1s);
 
-	if (conn_xprt_read0_pending(conn) && h1s && h1s->cs)
-		h1s->cs->flags |= CS_FL_REOS;
+	if (conn_xprt_read0_pending(conn) && h1s) {
+		h1s->flags |= H1S_F_REOS;
+		rcvd = 1;
+	}
+
 	if (!b_data(&h1c->ibuf))
 		h1_release_buf(h1c, &h1c->ibuf);
 	else if (!buf_room_for_htx_data(&h1c->ibuf))
@@ -1845,14 +1980,15 @@ static int h1_process(struct h1c * h1c)
 		return -1;
 
 	if (h1c->flags & H1C_F_CS_WAIT_CONN) {
-		if (!(conn->flags & (CO_FL_CONNECTED|CO_FL_ERROR)))
+		if (!(conn->flags & (CO_FL_CONNECTED|CO_FL_ERROR)) ||
+		    (!(conn->flags & CO_FL_ERROR) && (conn->flags & CO_FL_HANDSHAKE)))
 			goto end;
 		h1c->flags &= ~H1C_F_CS_WAIT_CONN;
 		h1_wake_stream_for_send(h1s);
 	}
 
 	if (!h1s) {
-		if (h1c->flags & H1C_F_CS_ERROR   ||
+		if (h1c->flags & (H1C_F_CS_ERROR|H1C_F_CS_SHUTDOWN) ||
 		    conn->flags & (CO_FL_ERROR | CO_FL_SOCK_WR_SH) ||
 		    conn_xprt_read0_pending(conn))
 			goto release;
@@ -1868,16 +2004,14 @@ static int h1_process(struct h1c * h1c)
 	if (b_data(&h1c->ibuf) && h1s->csinfo.t_idle == -1)
 		h1s->csinfo.t_idle = tv_ms_elapsed(&h1s->csinfo.tv_create, &now) - h1s->csinfo.t_handshake;
 
-	if (!b_data(&h1c->ibuf) && h1s && h1s->cs && h1s->cs->data_cb->wake &&
-	    (conn_xprt_read0_pending(conn) || h1c->flags & H1C_F_CS_ERROR ||
-	    conn->flags & (CO_FL_ERROR | CO_FL_SOCK_WR_SH))) {
-		int flags = 0;
+	if (conn_xprt_read0_pending(conn))
+		h1s->flags |= H1S_F_REOS;
 
+	if (!h1s_data_pending(h1s) && h1s && h1s->cs && h1s->cs->data_cb->wake &&
+	    (h1s->flags & H1S_F_REOS || h1c->flags & H1C_F_CS_ERROR ||
+	    conn->flags & (CO_FL_ERROR | CO_FL_SOCK_WR_SH))) {
 		if (h1c->flags & H1C_F_CS_ERROR || conn->flags & CO_FL_ERROR)
-			flags |= CS_FL_ERROR;
-		if (conn_xprt_read0_pending(conn))
-			flags |= CS_FL_REOS;
-		h1s->cs->flags |= flags;
+			h1s->cs->flags |= CS_FL_ERROR;
 		h1s->cs->data_cb->wake(h1s->cs);
 	}
   end:
@@ -2055,7 +2189,7 @@ static void h1_detach(struct conn_stream *cs)
 					/* The server doesn't want it, let's kill the connection right away */
 					h1c->conn->mux->destroy(h1c->conn);
 				else
-					tasklet_wakeup(h1c->wait_event.task);
+					tasklet_wakeup(h1c->wait_event.tasklet);
 				return;
 
 			}
@@ -2069,7 +2203,7 @@ static void h1_detach(struct conn_stream *cs)
 				/* The connection was added to the server list,
 				 * wake the task so we can subscribe to events
 				 */
-				tasklet_wakeup(h1c->wait_event.task);
+				tasklet_wakeup(h1c->wait_event.tasklet);
 				return;
 			}
 		}
@@ -2088,12 +2222,14 @@ static void h1_detach(struct conn_stream *cs)
 		}
 	}
 
-	/* We don't want to close right now unless the connection is in error */
+	/* We don't want to close right now unless the connection is in error or shut down for writes */
 	if ((h1c->flags & (H1C_F_CS_ERROR|H1C_F_CS_SHUTDOWN|H1C_F_UPG_H2C)) ||
-	    (h1c->conn->flags & CO_FL_ERROR) || !h1c->conn->owner)
+	    (h1c->conn->flags & (CO_FL_ERROR|CO_FL_SOCK_WR_SH)) ||
+	    ((h1c->flags & H1C_F_CS_SHUTW_NOW) && !b_data(&h1c->obuf)) ||
+	    !h1c->conn->owner)
 		h1_release(h1c);
 	else {
-		tasklet_wakeup(h1c->wait_event.task);
+		tasklet_wakeup(h1c->wait_event.tasklet);
 		if (h1c->task) {
 			h1c->task->expire = TICK_ETERNITY;
 			if (b_data(&h1c->obuf)) {
@@ -2227,7 +2363,7 @@ static size_t h1_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	size_t ret = 0;
 
 	if (!(h1c->flags & H1C_F_IN_ALLOC))
-		ret = h1_process_input(h1c, buf, flags);
+		ret = h1_process_input(h1c, buf, count);
 
 	if (flags & CO_RFL_BUF_FLUSH) {
 		struct h1m *h1m = (!conn_is_back(cs->conn) ? &h1s->req : &h1s->res);
@@ -2238,7 +2374,7 @@ static size_t h1_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	else if (ret > 0 || (h1s->flags & H1S_F_SPLICED_DATA)) {
 		h1s->flags &= ~H1S_F_SPLICED_DATA;
 		if (!(h1c->wait_event.events & SUB_RETRY_RECV))
-			tasklet_wakeup(h1c->wait_event.task);
+			tasklet_wakeup(h1c->wait_event.tasklet);
 	}
 	return ret;
 }
@@ -2258,7 +2394,7 @@ static size_t h1_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 	if (h1c->flags & H1C_F_CS_WAIT_CONN)
 		return 0;
 
-	while (total != count) {
+	while (count) {
 		size_t ret = 0;
 
 		if (!(h1c->flags & (H1C_F_OUT_FULL|H1C_F_OUT_ALLOC)))
@@ -2266,6 +2402,7 @@ static size_t h1_snd_buf(struct conn_stream *cs, struct buffer *buf, size_t coun
 		if (!ret)
 			break;
 		total += ret;
+		count -= ret;
 		if (!h1_send(h1c))
 			break;
 	}
@@ -2281,14 +2418,14 @@ static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int c
 	struct h1m *h1m = (!conn_is_back(cs->conn) ? &h1s->req : &h1s->res);
 	int ret = 0;
 
-	if ((h1m->state != H1_MSG_DATA && h1m->state != H1_MSG_TUNNEL) ||
-	    (h1m->state == H1_MSG_DATA && !h1m->curr_len)) {
+	if (h1m->state != H1_MSG_DATA && h1m->state != H1_MSG_TUNNEL) {
 		h1s->flags &= ~(H1S_F_BUF_FLUSH|H1S_F_SPLICED_DATA);
-		cs->conn->xprt->subscribe(cs->conn, cs->conn->xprt_ctx, SUB_RETRY_RECV, &h1s->h1c->wait_event);
+		if (!(h1s->h1c->wait_event.events & SUB_RETRY_RECV))
+			cs->conn->xprt->subscribe(cs->conn, cs->conn->xprt_ctx, SUB_RETRY_RECV, &h1s->h1c->wait_event);
 		goto end;
 	}
 
-	if (b_data(&h1s->h1c->ibuf)) {
+	if (h1s_data_pending(h1s)) {
 		h1s->flags |= H1S_F_BUF_FLUSH;
 		goto end;
 	}
@@ -2298,7 +2435,7 @@ static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int c
 	if (h1m->state == H1_MSG_DATA && count > h1m->curr_len)
 		count = h1m->curr_len;
 	ret = cs->conn->xprt->rcv_pipe(cs->conn, cs->conn->xprt_ctx, pipe, count);
-	if (h1m->state == H1_MSG_DATA && ret > 0) {
+	if (h1m->state == H1_MSG_DATA && ret >= 0) {
 		h1m->curr_len -= ret;
 		if (!h1m->curr_len)
 			h1s->flags &= ~(H1S_F_BUF_FLUSH|H1S_F_SPLICED_DATA);
@@ -2306,7 +2443,7 @@ static int h1_rcv_pipe(struct conn_stream *cs, struct pipe *pipe, unsigned int c
 
   end:
 	if (conn_xprt_read0_pending(cs->conn)) {
-		cs->flags |= CS_FL_REOS;
+		h1s->flags |= H1S_F_REOS;
 		if (!pipe->data)
 			cs->flags |= CS_FL_EOS;
 	}

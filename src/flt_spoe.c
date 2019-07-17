@@ -1298,11 +1298,6 @@ spoe_release_appctx(struct appctx *appctx)
 		task_wakeup(ctx->strm->task, TASK_WOKEN_MSG);
 	}
 
-	/* Release allocated memory */
-	spoe_release_buffer(&spoe_appctx->buffer,
-			    &spoe_appctx->buffer_wait);
-	pool_free(pool_head_spoe_appctx, spoe_appctx);
-
 	if (!LIST_ISEMPTY(&agent->rt[tid].applets))
 		goto end;
 
@@ -1327,6 +1322,11 @@ spoe_release_appctx(struct appctx *appctx)
 	}
 
   end:
+	/* Release allocated memory */
+	spoe_release_buffer(&spoe_appctx->buffer,
+			    &spoe_appctx->buffer_wait);
+	pool_free(pool_head_spoe_appctx, spoe_appctx);
+
 	/* Update runtinme agent info */
 	agent->rt[tid].frame_size = agent->max_frame_size;
 	list_for_each_entry(spoe_appctx, &agent->rt[tid].applets, list)
@@ -1341,14 +1341,17 @@ spoe_handle_connect_appctx(struct appctx *appctx)
 	char *frame, *buf;
 	int   ret;
 
-	if (si->state <= SI_ST_CON) {
+	if (si_state_in(si->state, SI_SB_CER|SI_SB_DIS|SI_SB_CLO)) {
+		/* closed */
+		SPOE_APPCTX(appctx)->status_code = SPOE_FRM_ERR_IO;
+		goto exit;
+	}
+
+	if (!si_state_in(si->state, SI_SB_RDY|SI_SB_EST)) {
+		/* not connected yet */
 		si_rx_endp_more(si);
 		task_wakeup(si_strm(si)->task, TASK_WOKEN_MSG);
 		goto stop;
-	}
-	if (si->state != SI_ST_EST) {
-		SPOE_APPCTX(appctx)->status_code = SPOE_FRM_ERR_IO;
-		goto exit;
 	}
 
 	if (appctx->st1 == SPOE_APPCTX_ERR_TOUT) {
@@ -3479,7 +3482,19 @@ cfg_parse_spoe_agent(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		res = parse_time_err(args[2], &timeout, TIME_UNIT_MS);
-		if (res) {
+		if (res == PARSE_TIME_OVER) {
+			ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s %s>, maximum value is 2147483647 ms (~24.8 days).\n",
+				 file, linenum, args[2], args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (res == PARSE_TIME_UNDER) {
+			ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s %s>, minimum non-null value is 1 ms.\n",
+				 file, linenum, args[2], args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (res) {
 			ha_alert("parsing [%s:%d] : unexpected character '%c' in 'timeout %s'.\n",
 				 file, linenum, *res, args[1]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -3736,6 +3751,7 @@ cfg_parse_spoe_agent(const char *file, int linenum, char **args, int kwm)
 				goto out;
 			}
 			if ((vph->name  = strdup(args[cur_arg])) == NULL) {
+				free(vph);
 				ha_alert("parsing [%s:%d] : out of memory.\n", file, linenum);
 				err_code |= ERR_ALERT | ERR_ABORT;
 				goto out;

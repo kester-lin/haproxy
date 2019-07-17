@@ -88,7 +88,7 @@ static void mux_pt_destroy(struct mux_pt_ctx *ctx)
 
 		conn_stop_tracking(conn);
 		conn_full_close(conn);
-		tasklet_free(ctx->wait_event.task);
+		tasklet_free(ctx->wait_event.tasklet);
 		conn->mux = NULL;
 		conn->ctx = NULL;
 		if (conn->destroy_cb)
@@ -130,11 +130,11 @@ static int mux_pt_init(struct connection *conn, struct proxy *prx, struct sessio
 	if (!ctx)
 		goto fail;
 
-	ctx->wait_event.task = tasklet_new();
-	if (!ctx->wait_event.task)
+	ctx->wait_event.tasklet = tasklet_new();
+	if (!ctx->wait_event.tasklet)
 		goto fail_free_ctx;
-	ctx->wait_event.task->context = ctx;
-	ctx->wait_event.task->process = mux_pt_io_cb;
+	ctx->wait_event.tasklet->context = ctx;
+	ctx->wait_event.tasklet->process = mux_pt_io_cb;
 	ctx->wait_event.events = 0;
 	ctx->conn = conn;
 
@@ -155,8 +155,8 @@ static int mux_pt_init(struct connection *conn, struct proxy *prx, struct sessio
  fail_free:
 	cs_free(cs);
 fail_free_ctx:
-	if (ctx->wait_event.task)
-		tasklet_free(ctx->wait_event.task);
+	if (ctx->wait_event.tasklet)
+		tasklet_free(ctx->wait_event.tasklet);
 	pool_free(pool_head_pt_ctx, ctx);
  fail:
 	return -1;
@@ -316,13 +316,11 @@ static size_t mux_pt_rcv_buf(struct conn_stream *cs, struct buffer *buf, size_t 
 	b_realign_if_empty(buf);
 	ret = cs->conn->xprt->rcv_buf(cs->conn, cs->conn->xprt_ctx, buf, count, flags);
 	if (conn_xprt_read0_pending(cs->conn)) {
-		if (ret == 0)
-			cs->flags &= ~(CS_FL_RCV_MORE | CS_FL_WANT_ROOM);
+		cs->flags &= ~(CS_FL_RCV_MORE | CS_FL_WANT_ROOM);
 		cs->flags |= CS_FL_EOS;
 	}
 	if (cs->conn->flags & CO_FL_ERROR) {
-		if (ret == 0)
-			cs->flags &= ~(CS_FL_RCV_MORE | CS_FL_WANT_ROOM);
+		cs->flags &= ~(CS_FL_RCV_MORE | CS_FL_WANT_ROOM);
 		cs->flags |= CS_FL_ERROR;
 	}
 	return ret;

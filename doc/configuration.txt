@@ -2,9 +2,9 @@
                                 HAProxy
                           Configuration Manual
                          ----------------------
-                              version 2.0
+                              version 2.1
                              willy tarreau
-                              2019/05/22
+                              2019/07/16
 
 
 This document covers the configuration language as implemented in the version
@@ -51,6 +51,7 @@ Summary
 3.4.      Userlists
 3.5.      Peers
 3.6.      Mailers
+3.7.      Programs
 
 4.    Proxies
 4.1.      Proxy keywords matrix
@@ -476,9 +477,25 @@ underscore ("_") but should not start with a digit.
 
       user "$HAPROXY_USER"
 
-A special variable $HAPROXY_LOCALPEER is defined at the startup of the process
-which contains the name of the local peer. (See "-L" in the management guide.)
+Some variables are defined by HAProxy, they can be used in the configuration
+file, or could be inherited by a program (See 3.7. Programs):
 
+* HAPROXY_LOCALPEER: defined at the startup of the process which contains the
+  name of the local peer. (See "-L" in the management guide.)
+
+* HAPROXY_CFGFILES: list of the configuration files loaded by HAProxy,
+  separated by semicolons. Can be useful in the case you specified a
+  directory.
+
+* HAPROXY_MWORKER: In master-worker mode, this variable is set to 1.
+
+* HAPROXY_CLI: configured listeners addresses of the stats socket for every
+  processes, separated by semicolons.
+
+* HAPROXY_MASTER_CLI: In master-worker mode, listeners addresses of the master
+  CLI, separated by semicolons.
+
+See also "external-check command" for other variables.
 
 2.4. Time format
 ----------------
@@ -970,7 +987,7 @@ master-worker [no-exit-on-failure]
 
 mworker-max-reloads <number>
   In master-worker mode, this option limits the number of time a worker can
-  survive to a reload. If the worker did not left after a reload, once its
+  survive to a reload. If the worker did not leave after a reload, once its
   number of reloads is greater than this number, the worker will receive a
   SIGTERM. This option helps to keep under control the number of workers.
   See also "show proc" in the Management Guide.
@@ -1497,7 +1514,7 @@ profiling.tasks { auto | on | off }
   the profiling automatically turns on a thread when it starts to suffer from
   an average latency of 1000 microseconds or higher as reported in the
   "avg_loop_us" activity field, and automatically turns off when the latency
-  reutnrs below 990 microseconds (this value is an average over the last 1024
+  returns below 990 microseconds (this value is an average over the last 1024
   loops so it does not vary quickly and tends to significantly smooth short
   spikes). It may also spontaneously trigger from time to time on overloaded
   systems, containers, or virtual machines, or when the system swaps (which
@@ -1542,7 +1559,7 @@ ssl-mode-async
   implementation supports a maximum of 32 engines. The Openssl ASYNC API
   doesn't support moving read/write buffers and is not compliant with
   haproxy's buffer management. So the asynchronous mode is disabled on
-  read/write  operations (it is only enabled during initial and reneg
+  read/write  operations (it is only enabled during initial and renegotiation
   handshakes).
 
 tune.buffers.limit <number>
@@ -1675,7 +1692,7 @@ tune.idletimer <timeout>
   parameter. The value is in milliseconds between 0 and 65535. A value of zero
   means that haproxy will not try to detect idle streams. The default is 1000,
   which seems to correctly detect end user pauses (e.g. read a page before
-  clicking). There should be not reason for changing this value. Please check
+  clicking). There should be no reason for changing this value. Please check
   tune.ssl.maxrecord below.
 
 tune.listener.multi-queue { on | off }
@@ -1793,14 +1810,14 @@ tune.pool-high-fd-ratio <number>
   and we have to create a new one. The default is 25 (one quarter of the file
   descriptor will mean that roughly half of the maximum front connections can
   keep an idle connection behind, anything beyond this probably doesn't make
-  much sense in the general case when targetting connection reuse).
+  much sense in the general case when targeting connection reuse).
 
 tune.rcvbuf.client <number>
 tune.rcvbuf.server <number>
   Forces the kernel socket receive buffer size on the client or the server side
   to the specified value in bytes. This value applies to all TCP/HTTP frontends
   and backends. It should normally never be set, and the default size (0) lets
-  the kernel autotune this value depending on the amount of available memory.
+  the kernel auto-tune this value depending on the amount of available memory.
   However it can sometimes help to set it to very low values (e.g. 4096) in
   order to save kernel memory by preventing it from buffering too large amounts
   of received data. Lower values will significantly increase CPU usage though.
@@ -1813,7 +1830,7 @@ tune.recv_enough <number>
   of short messages such as telnet or SSH sessions.
 
 tune.runqueue-depth <number>
-  Sets the maxinum amount of task that can be processed at once when running
+  Sets the maximum amount of task that can be processed at once when running
   tasks. The default value is 200. Increasing it may incur latency when
   dealing with I/Os, making it too small can incur extra overhead.
 
@@ -1822,7 +1839,7 @@ tune.sndbuf.server <number>
   Forces the kernel socket send buffer size on the client or the server side to
   the specified value in bytes. This value applies to all TCP/HTTP frontends
   and backends. It should normally never be set, and the default size (0) lets
-  the kernel autotune this value depending on the amount of available memory.
+  the kernel auto-tune this value depending on the amount of available memory.
   However it can sometimes help to set it to very low values (e.g. 4096) in
   order to save kernel memory by preventing it from buffering too large amounts
   of received data. Lower values will significantly increase CPU usage though.
@@ -2067,7 +2084,7 @@ peer <peername> <ip>:<port> [param*]
   "server" keyword explanation below).
 
 server <peername> [<ip>:<port>] [param*]
-  As previously mentionned, "peer" keyword may be replaced by "server" keyword
+  As previously mentioned, "peer" keyword may be replaced by "server" keyword
   with a support for all "server" parameters found in 5.2 paragraph.
   If the underlying peer is local, <ip>:<port> parameters must not be present.
   These parameters must  be provided on a "bind" line (see "bind" keyword
@@ -2104,7 +2121,7 @@ table <tablename> type {ip | integer | string [len <length>] | binary [len <leng
 
   Configure a stickiness table for the current section. This line is parsed
   exactly the same way as the "stick-table" keyword in others section, except
-  for the "peers" argument which is not required here and with an aditionnal
+  for the "peers" argument which is not required here and with an additional
   mandatory first parameter to designate the stick-table. Contrary to others
   sections, there may be several "table" lines in "peers" sections (see also
   "stick-table" keyword).
@@ -2187,6 +2204,48 @@ timeout mail <time>
     mailers mymailers
         timeout mail 20s
         mailer smtp1 192.168.0.1:587
+
+3.7. Programs
+-------------
+In master-worker mode, it is possible to launch external binaries with the
+master, these processes are called programs. These programs are launched and
+managed the same way as the workers.
+
+During a reload of HAProxy, those processes are dealing with the same
+sequence as a worker:
+
+  - the master is re-executed
+  - the master sends a SIGUSR1 signal to the program
+  - if "option start-on-reload" is not disabled, the master launches a new
+    instance of the program
+
+During a stop, or restart, a SIGTERM is sent to the programs.
+
+program <name>
+  This is a new program section, this section will create an instance <name>
+  which is visible in "show proc" on the master CLI. (See "9.4. Master CLI" in
+  the management guide).
+
+command <command> [arguments*]
+  Define the command to start with optional arguments. The command is looked
+  up in the current PATH if it does not include an absolute path. This is a
+  mandatory option of the program section. Arguments containing spaces must
+  be enclosed in quotes or double quotes or be prefixed by a backslash.
+
+user <user name>
+  Changes the executed command user ID to the <user name> from /etc/passwd.
+  See also "group".
+
+group <group name>
+  Changes the executed command group ID to the <group name> from /etc/group.
+  See also "user".
+
+option start-on-reload
+no option start-on-reload
+  Start (or not) a new instance of the program upon a reload of the master.
+  The default is to start a new instance. This option may only be used in a
+  program section.
+
 
 4. Proxies
 ----------
@@ -2291,13 +2350,10 @@ backlog                                   X          X         X         -
 balance                                   X          -         X         X
 bind                                      -          X         X         -
 bind-process                              X          X         X         X
-block                       (deprecated)  -          X         X         X
 capture cookie                            -          X         X         -
 capture request header                    -          X         X         -
 capture response header                   -          X         X         -
-clitimeout                  (deprecated)  X          X         X         -
 compression                               X          X         X         X
-contimeout                  (deprecated)  X          -         X         X
 cookie                                    X          -         X         X
 declare capture                           -          X         X         -
 default-server                            X          -         X         X
@@ -2399,8 +2455,6 @@ external-check path                       X          -         X         X
 persist rdp-cookie                        X          -         X         X
 rate-limit sessions                       X          X         X         -
 redirect                                  -          X         X         X
-redisp                      (deprecated)  X          -         X         X
-redispatch                  (deprecated)  X          -         X         X
 reqadd                      (deprecated)  -          X         X         X
 reqallow                    (deprecated)  -          X         X         X
 reqdel                      (deprecated)  -          X         X         X
@@ -2428,7 +2482,6 @@ server                                    -          -         X         X
 server-state-file-name                    X          -         X         X
 server-template                           -          -         X         X
 source                                    X          -         X         X
-srvtimeout                  (deprecated)  X          -         X         X
 stats admin                               -          X         X         X
 stats auth                                X          X         X         X
 stats enable                              X          X         X         X
@@ -2460,15 +2513,12 @@ tcp-response inspect-delay                -          -         X         X
 timeout check                             X          -         X         X
 timeout client                            X          X         X         -
 timeout client-fin                        X          X         X         -
-timeout clitimeout          (deprecated)  X          X         X         -
 timeout connect                           X          -         X         X
-timeout contimeout          (deprecated)  X          -         X         X
 timeout http-keep-alive                   X          X         X         X
 timeout http-request                      X          X         X         X
 timeout queue                             X          -         X         X
 timeout server                            X          -         X         X
 timeout server-fin                        X          -         X         X
-timeout srvtimeout          (deprecated)  X          -         X         X
 timeout tarpit                            X          X         X         X
 timeout tunnel                            X          -         X         X
 transparent                 (deprecated)  X          -         X         X
@@ -2725,7 +2775,7 @@ balance url_param <param> [check_post]
   for each backend.
 
   With authentication schemes that require the same connection like NTLM, URI
-  based alghoritms must not be used, as they would cause subsequent requests
+  based algorithms must not be used, as they would cause subsequent requests
   to be routed to different backend servers, breaking the invalid assumptions
   NTLM relies on.
 
@@ -2942,35 +2992,6 @@ bind-process [ all | odd | even | <process_num>[-[<process_num>]] ] ...
   See also : "nbproc" in global section, and "process" in section 5.1.
 
 
-block { if | unless } <condition> (deprecated)
-  Block a layer 7 request if/unless a condition is matched
-  May be used in sections :   defaults | frontend | listen | backend
-                                 no    |    yes   |   yes  |   yes
-
-  The HTTP request will be blocked very early in the layer 7 processing
-  if/unless <condition> is matched. A 403 error will be returned if the request
-  is blocked. The condition has to reference ACLs (see section 7). This is
-  typically used to deny access to certain sensitive resources if some
-  conditions are met or not met. There is no fixed limit to the number of
-  "block" statements per instance. To block connections at layer 4 (without
-  sending a 403 error) see "tcp-request connection reject" and
-  "tcp-request content reject" rules.
-
-  This form is deprecated, do not use it in any new configuration, use the new
-  "http-request deny" instead.
-
-  Example:
-        acl invalid_src  src          0.0.0.0/7 224.0.0.0/3
-        acl invalid_src  src_port     0:1023
-        acl local_dst    hdr(host) -i localhost
-        # block is deprecated. Use http-request deny instead:
-        #block if invalid_src || local_dst
-        http-request deny if invalid_src || local_dst
-
-  See also : section 7 about ACL usage, "http-request deny",
-            "http-response deny", "tcp-request connection reject" and
-            "tcp-request content reject".
-
 capture cookie <name> len <length>
   Capture and log a cookie in the request and in the response.
   May be used in sections :   defaults | frontend | listen | backend
@@ -3093,40 +3114,6 @@ capture response header <name> len <length>
              about logging.
 
 
-clitimeout <timeout> (deprecated)
-  Set the maximum inactivity time on the client side.
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   no
-  Arguments :
-    <timeout> is the timeout value is specified in milliseconds by default, but
-              can be in any other unit if the number is suffixed by the unit,
-              as explained at the top of this document.
-
-  The inactivity timeout applies when the client is expected to acknowledge or
-  send data. In HTTP mode, this timeout is particularly important to consider
-  during the first phase, when the client sends the request, and during the
-  response while it is reading data sent by the server. The value is specified
-  in milliseconds by default, but can be in any other unit if the number is
-  suffixed by the unit, as specified at the top of this document. In TCP mode
-  (and to a lesser extent, in HTTP mode), it is highly recommended that the
-  client timeout remains equal to the server timeout in order to avoid complex
-  situations to debug. It is a good practice to cover one or several TCP packet
-  losses by specifying timeouts that are slightly above multiples of 3 seconds
-  (e.g. 4 or 5 seconds).
-
-  This parameter is specific to frontends, but can be specified once for all in
-  "defaults" sections. This is in fact one of the easiest solutions not to
-  forget about it. An unspecified timeout results in an infinite timeout, which
-  is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of expired sessions in
-  the system if the system's timeouts are not configured either.
-
-  This parameter is provided for compatibility but is currently deprecated.
-  Please use "timeout client" instead.
-
-  See also : "timeout client", "timeout http-request", "timeout server", and
-             "srvtimeout".
-
 compression algo <algorithm> ...
 compression type <mime type> ...
 compression offload
@@ -3207,38 +3194,6 @@ compression offload
         compression type text/html text/plain
 
 
-contimeout <timeout> (deprecated)
-  Set the maximum time to wait for a connection attempt to a server to succeed.
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-  Arguments :
-    <timeout> is the timeout value is specified in milliseconds by default, but
-              can be in any other unit if the number is suffixed by the unit,
-              as explained at the top of this document.
-
-  If the server is located on the same LAN as haproxy, the connection should be
-  immediate (less than a few milliseconds). Anyway, it is a good practice to
-  cover one or several TCP packet losses by specifying timeouts that are
-  slightly above multiples of 3 seconds (e.g. 4 or 5 seconds). By default, the
-  connect timeout also presets the queue timeout to the same value if this one
-  has not been specified. Historically, the contimeout was also used to set the
-  tarpit timeout in a listen section, which is not possible in a pure frontend.
-
-  This parameter is specific to backends, but can be specified once for all in
-  "defaults" sections. This is in fact one of the easiest solutions not to
-  forget about it. An unspecified timeout results in an infinite timeout, which
-  is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of failed sessions in
-  the system if the system's timeouts are not configured either.
-
-  This parameter is provided for backwards compatibility but is currently
-  deprecated. Please use "timeout connect", "timeout queue" or "timeout tarpit"
-  instead.
-
-  See also : "timeout connect", "timeout queue", "timeout tarpit",
-             "timeout server", "contimeout".
-
-
 cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               [ postonly ] [ preserve ] [ httponly ] [ secure ]
               [ domain <domain> ]* [ maxidle <idle> ] [ maxlife <life> ]
@@ -3274,7 +3229,7 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
 
               already have a cookie that would have permitted it to access this
               server. When used without the "preserve" option, if the server
-              emits a cookie with the same name, it will be remove before
+              emits a cookie with the same name, it will be removed before
               processing. For this reason, this mode can be used to upgrade
               existing configurations running in the "rewrite" mode. The cookie
               will only be a session cookie and will not be stored on the
@@ -4412,6 +4367,33 @@ http-request replace-header <name> <match-regex> <replace-fmt>
 
       # assuming the backend IP is 192.168.1.20
 
+http-request replace-uri <match-regex> <replace-fmt>
+                           [ { if | unless } <condition> ]
+
+    This matches the regular expression in the URI part of the request
+    according to <match-regex>, and replaces it with the <replace-fmt>
+    argument. Standard back-references using the backslash ('\') followed by a
+    number are supported. The <fmt> field is interpreted as a log-format string
+    so it may contain special expressions just like the <fmt> argument passed
+    to "http-request set-uri". The match is exclusively case-sensitive. Any
+    optional scheme, authority or query string are considered in the matching
+    part of the URI. It is worth noting that regular expressions may be more
+    expensive to evaluate than certain ACLs, so rare replacements may benefit
+    from a condition to avoid performing the evaluation at all if it does not
+    match.
+
+    Example:
+        # prefix /foo : turn /bar?q=1 into /foo/bar?q=1 :
+        http-request replace-uri (.*) /foo\1
+
+        # suffix /foo : turn /bar?q=1 into /bar/foo?q=1 :
+        http-request replace-uri ([^?]*)(\?(.*))? \1/foo\2
+
+        # strip /foo : turn /foo/bar?q=1 into /bar?q=1
+        http-request replace-uri /foo/(.*) /\1
+        # or more efficient if only some requests match :
+        http-request replace-uri /foo/(.*) /\1 if { url_beg /foo/ }
+
 http-request replace-value <name> <match-regex> <replace-fmt>
                            [ { if | unless } <condition> ]
 
@@ -5162,7 +5144,7 @@ http-reuse { never | safe | aggressive | always }
                  proving that the server correctly supports connection reuse.
                  It should only be used when it's sure that the client can
                  retry a failed request once in a while and where the benefit
-                 of aggressive connection reuse significantly outweights the
+                 of aggressive connection reuse significantly outweighs the
                  downsides of rare connection failures.
 
     - "always" : this mode is only recommended when the path to the server is
@@ -6518,7 +6500,7 @@ no option httpclose
 
   If "option httpclose" is set, HAProxy will close connections with the server
   and the client as soon as the request and the response are received. It will
-  alos check if a "Connection: close" header is already set in each direction,
+  also check if a "Connection: close" header is already set in each direction,
   and will add one if missing. Any "Connection" header different from "close"
   will also be removed.
 
@@ -6625,10 +6607,6 @@ no option independent-streams
   the option is set on the backend, it will disable read timeout updates on
   data sent to the server. Doing so will typically break large HTTP posts from
   slow lines, so use it with caution.
-
-  Note: older versions used to call this setting "option independant-streams"
-        with a spelling mistake. This spelling is still supported but
-        deprecated.
 
   See also : "timeout client", "timeout server" and "timeout tunnel"
 
@@ -7496,6 +7474,8 @@ external-check command <command>
     PATH                    The PATH environment variable used when executing
                             the command may be set using "external-check path".
 
+  See also "2.3. Environment variables" for other variables.
+
   If the command executed and exits with a zero status then the check is
   considered to have passed, otherwise the check is considered to have
   failed.
@@ -7708,30 +7688,6 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
           unless { hdr_beg(host) -i www }
 
   See section 7 about ACL usage.
-
-
-redisp (deprecated)
-redispatch (deprecated)
-  Enable or disable session redistribution in case of connection failure
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-  Arguments : none
-
-  In HTTP mode, if a server designated by a cookie is down, clients may
-  definitely stick to it because they cannot flush the cookie, so they will not
-  be able to access the service anymore.
-
-  Specifying "redispatch" will allow the proxy to break their persistence and
-  redistribute them to a working server.
-
-  It also allows to retry last connection to another server in case of multiple
-  connection failures. Of course, it requires having "retries" set to a nonzero
-  value.
-
-  This form is deprecated, do not use it in any new configuration, use the new
-  "option redispatch" instead.
-
-  See also : "option redispatch"
 
 
 reqadd  <string> [{if | unless} <cond>] (deprecated)
@@ -8495,46 +8451,6 @@ source <addr>[:<port>] [interface <name>]
 
   See also : the "source" server option in section 5, the Tproxy patches for
              the Linux kernel on www.balabit.com, the "bind" keyword.
-
-
-srvtimeout <timeout> (deprecated)
-  Set the maximum inactivity time on the server side.
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-  Arguments :
-    <timeout> is the timeout value specified in milliseconds by default, but
-              can be in any other unit if the number is suffixed by the unit,
-              as explained at the top of this document.
-
-  The inactivity timeout applies when the server is expected to acknowledge or
-  send data. In HTTP mode, this timeout is particularly important to consider
-  during the first phase of the server's response, when it has to send the
-  headers, as it directly represents the server's processing time for the
-  request. To find out what value to put there, it's often good to start with
-  what would be considered as unacceptable response times, then check the logs
-  to observe the response time distribution, and adjust the value accordingly.
-
-  The value is specified in milliseconds by default, but can be in any other
-  unit if the number is suffixed by the unit, as specified at the top of this
-  document. In TCP mode (and to a lesser extent, in HTTP mode), it is highly
-  recommended that the client timeout remains equal to the server timeout in
-  order to avoid complex situations to debug. Whatever the expected server
-  response times, it is a good practice to cover at least one or several TCP
-  packet losses by specifying timeouts that are slightly above multiples of 3
-  seconds (e.g. 4 or 5 seconds minimum).
-
-  This parameter is specific to backends, but can be specified once for all in
-  "defaults" sections. This is in fact one of the easiest solutions not to
-  forget about it. An unspecified timeout results in an infinite timeout, which
-  is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of expired sessions in
-  the system if the system's timeouts are not configured either.
-
-  This parameter is provided for compatibility but is currently deprecated.
-  Please use "timeout server" instead.
-
-  See also : "timeout server", "timeout tunnel", "timeout client" and
-             "clitimeout".
 
 
 stats admin { if | unless } <cond>
@@ -9785,7 +9701,7 @@ tcp-request connection <action> [{if | unless} <condition>]
         rules do not stop evaluation and do not change default action. The
         number of counters that may be simultaneously tracked by the same
         connection is set in MAX_SESS_STKCTR at build time (reported in
-        haproxy -vv) whichs defaults to 3, so the track-sc number is between 0
+        haproxy -vv) which defaults to 3, so the track-sc number is between 0
         and (MAX_SESS_STCKTR-1). The first "track-sc0" rule executed enables
         tracking of the counters of the specified table as the first set. The
         first "track-sc1" rule executed enables tracking of the counters of the
@@ -10475,7 +10391,6 @@ timeout check <timeout>
 
 
 timeout client <timeout>
-timeout clitimeout <timeout> (deprecated)
   Set the maximum inactivity time on the client side.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    yes   |   yes  |   no
@@ -10505,17 +10420,12 @@ timeout clitimeout <timeout> (deprecated)
   "defaults" sections. This is in fact one of the easiest solutions not to
   forget about it. An unspecified timeout results in an infinite timeout, which
   is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of expired sessions in
+  during startup because it may result in accumulation of expired sessions in
   the system if the system's timeouts are not configured either.
 
   This also applies to HTTP/2 connections, which will be closed with GOAWAY.
 
-  This parameter replaces the old, deprecated "clitimeout". It is recommended
-  to use it to write new configurations. The form "timeout clitimeout" is
-  provided only by backwards compatibility but its use is strongly discouraged.
-
-  See also : "clitimeout", "timeout server", "timeout tunnel",
-             "timeout http-request".
+  See also : "timeout server", "timeout tunnel", "timeout http-request".
 
 
 timeout client-fin <timeout>
@@ -10546,7 +10456,6 @@ timeout client-fin <timeout>
 
 
 timeout connect <timeout>
-timeout contimeout <timeout> (deprecated)
   Set the maximum time to wait for a connection attempt to a server to succeed.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
@@ -10566,15 +10475,10 @@ timeout contimeout <timeout> (deprecated)
   "defaults" sections. This is in fact one of the easiest solutions not to
   forget about it. An unspecified timeout results in an infinite timeout, which
   is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of failed sessions in
+  during startup because it may result in accumulation of failed sessions in
   the system if the system's timeouts are not configured either.
 
-  This parameter replaces the old, deprecated "contimeout". It is recommended
-  to use it to write new configurations. The form "timeout contimeout" is
-  provided only by backwards compatibility but its use is strongly discouraged.
-
-  See also: "timeout check", "timeout queue", "timeout server", "contimeout",
-            "timeout tarpit".
+  See also: "timeout check", "timeout queue", "timeout server", "timeout tarpit".
 
 
 timeout http-keep-alive <timeout>
@@ -10688,11 +10592,10 @@ timeout queue <timeout>
   connection timeout ("timeout connect") is used, for backwards compatibility
   with older versions with no "timeout queue" parameter.
 
-  See also : "timeout connect", "contimeout".
+  See also : "timeout connect".
 
 
 timeout server <timeout>
-timeout srvtimeout <timeout> (deprecated)
   Set the maximum inactivity time on the server side.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
@@ -10725,14 +10628,10 @@ timeout srvtimeout <timeout> (deprecated)
   "defaults" sections. This is in fact one of the easiest solutions not to
   forget about it. An unspecified timeout results in an infinite timeout, which
   is not recommended. Such a usage is accepted and works but reports a warning
-  during startup because it may results in accumulation of expired sessions in
+  during startup because it may result in accumulation of expired sessions in
   the system if the system's timeouts are not configured either.
 
-  This parameter replaces the old, deprecated "srvtimeout". It is recommended
-  to use it to write new configurations. The form "timeout srvtimeout" is
-  provided only by backwards compatibility but its use is strongly discouraged.
-
-  See also : "srvtimeout", "timeout client" and "timeout tunnel".
+  See also : "timeout client" and "timeout tunnel".
 
 
 timeout server-fin <timeout>
@@ -10781,7 +10680,7 @@ timeout tarpit <timeout>
   ("timeout connect") is used, for backwards compatibility with older versions
   with no "timeout tarpit" parameter.
 
-  See also : "timeout connect", "contimeout".
+  See also : "timeout connect".
 
 
 timeout tunnel <timeout>
@@ -11071,7 +10970,7 @@ accept-proxy
 allow-0rtt
   Allow receiving early data when using TLSv1.3. This is disabled by default,
   due to security considerations. Because it is vulnerable to replay attacks,
-  you should only allow if for requests that are safe to replay, ie requests
+  you should only allow if for requests that are safe to replay, i.e. requests
   that are idempotent. You can use the "wait-for-handshake" action for any
   request that wouldn't be safe with early data.
 
@@ -11079,7 +10978,7 @@ alpn <protocols>
   This enables the TLS ALPN extension and advertises the specified protocol
   list as supported on top of ALPN. The protocol list consists in a comma-
   delimited list of protocol names, for instance: "http/1.1,http/1.0" (without
-  quotes). This requires that the SSL library is build with support for TLS
+  quotes). This requires that the SSL library is built with support for TLS
   extensions enabled (check with haproxy -vv). The ALPN extension replaces the
   initial NPN extension. ALPN is required to enable HTTP/2 on an HTTP frontend.
   Versions of OpenSSL prior to 1.0.2 didn't support ALPN and only supposed the
@@ -11531,7 +11430,7 @@ npn <protocols>
   This enables the NPN TLS extension and advertises the specified protocol list
   as supported on top of NPN. The protocol list consists in a comma-delimited
   list of protocol names, for instance: "http/1.1,http/1.0" (without quotes).
-  This requires that the SSL library is build with support for TLS extensions
+  This requires that the SSL library is built with support for TLS extensions
   enabled (check with haproxy -vv). Note that the NPN extension has been
   replaced with the ALPN extension (see the "alpn" keyword), though this one is
   only available starting with OpenSSL 1.0.2. If HTTP/2 is desired on an older
@@ -11832,7 +11731,7 @@ alpn <protocols>
   This enables the TLS ALPN extension and advertises the specified protocol
   list as supported on top of ALPN. The protocol list consists in a comma-
   delimited list of protocol names, for instance: "http/1.1,http/1.0" (without
-  quotes). This requires that the SSL library is build with support for TLS
+  quotes). This requires that the SSL library is built with support for TLS
   extensions enabled (check with haproxy -vv). The ALPN extension replaces the
   initial NPN extension. ALPN is required to connect to HTTP/2 servers.
   Versions of OpenSSL prior to 1.0.2 didn't support ALPN and only supposed the
@@ -11899,6 +11798,11 @@ check-ssl
   All SSL settings are common to health checks and traffic (e.g. ciphers).
   See the "ssl" option for more information and "no-check-ssl" to disable
   this option.
+
+check-via-socks4
+  This option enables outgoing health checks using upstream socks4 proxy. By
+  default, the health checks won't go through socks tunnel even it was enabled
+  for normal traffic.
 
 ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. This
@@ -12231,6 +12135,13 @@ no-verifyhost
   It may also be used as "default-server" setting to reset any previous
   "default-server" "verifyhost" setting.
 
+no-tfo
+  This option may be used as "server" setting to reset any "tfo"
+  setting which would have been inherited from "default-server" directive as
+  default value.
+  It may also be used as "default-server" setting to reset any previous
+  "default-server" "tfo" setting.
+
 non-stick
   Never add connections allocated to this sever to a stick-table.
   This may be used in conjunction with backup to ensure that
@@ -12240,7 +12151,7 @@ npn <protocols>
   This enables the NPN TLS extension and advertises the specified protocol list
   as supported on top of NPN. The protocol list consists in a comma-delimited
   list of protocol names, for instance: "http/1.1,http/1.0" (without quotes).
-  This requires that the SSL library is build with support for TLS extensions
+  This requires that the SSL library is built with support for TLS extensions
   enabled (check with haproxy -vv). Note that the NPN extension has been
   replaced with the ALPN extension (see the "alpn" keyword), though this one is
   only available starting with OpenSSL 1.0.2.
@@ -12306,7 +12217,7 @@ pool-max-conn <max>
 pool-purge-delay <delay>
   Sets the delay to start purging idle connections. Each <delay> interval, half
   of the idle connections are closed. 0 means we don't keep any idle connection.
-  The default is 1s.
+  The default is 5s.
 
 port <port>
   Using the "port" parameter, it becomes possible to use a different port to
@@ -12395,7 +12306,7 @@ resolve-prefer <family>
     server s1 app1.domain.com:80 resolvers mydns resolve-prefer ipv6
 
 resolve-net <network>[,<network[,...]]
-  This options prioritize th choice of an ip address matching a network. This is
+  This option prioritizes the choice of an ip address matching a network. This is
   useful with clouds to prefer a local ip. In some cases, a cloud high
   availability service can be announced with many ip addresses on many
   different datacenters. The latency between datacenter is not negligible, so
@@ -12560,6 +12471,11 @@ stick
   It may also be used as "default-server" setting to reset any previous
   "default-server" "non-stick" setting.
 
+socks4 <addr>:<port>
+  This option enables upstream socks4 tunnel for outgoing connections to the
+  server. Using this option won't force the health check to go via socks4 by
+  default. You will have to use the keyword "check-via-socks4" to enable it.
+
 tcp-ut <delay>
   Sets the TCP User Timeout for all outgoing connections to this server. This
   option is available on Linux since version 2.6.37. It allows haproxy to
@@ -12581,7 +12497,7 @@ tfo
   See the "tfo" bind option for more information about TCP fast open.
   Please note that when using tfo, you should also use the "conn-failure",
   "empty-response" and "response-timeout" keywords for "retry-on", or haproxy
-  won't be able to retry the connection on failure.
+  won't be able to retry the connection on failure. See also "no-tfo".
 
 track [<proxy>/]<server>
   This option enables ability to set the current state of the server by tracking
@@ -12676,7 +12592,7 @@ will be checked periodically, and if any server are added or removed, haproxy
 will automatically do the same.
 
 A few things important to notice:
-  - all the name servers are queried in the mean time. HAProxy will process the
+  - all the name servers are queried in the meantime. HAProxy will process the
     first valid response.
 
   - a resolution is considered as invalid (NX, timeout, refused), when all the
@@ -13059,7 +12975,7 @@ By default, if the parser cannot parse ip address it considers that the parsed
 string is maybe a domain name and try dns resolution. The flag "-n" disable this
 resolution. It is useful for detecting malformed ip lists. Note that if the DNS
 server is not reachable, the haproxy configuration parsing may last many minutes
-waiting fir the timeout. During this time no error messages are displayed. The
+waiting for the timeout. During this time no error messages are displayed. The
 flag "-n" disable this behavior. Note also that during the runtime, this
 function is disabled for the dynamic acl modifications.
 
@@ -13569,9 +13485,9 @@ concat([<start>],[<var>],[<end>])
   appended after the variable. It may also be omitted. Together, these elements
   allow to concatenate variables with delimiters to an existing set of
   variables. This can be used to build new variables made of a succession of
-  other variables, such as colon-delimited varlues. Note that due to the config
+  other variables, such as colon-delimited values. Note that due to the config
   parser, it is not possible to use a comma nor a closing parenthesis as
-  delimitors.
+  delimiters.
 
   Example:
     tcp-request session set-var(sess.src) src
@@ -13677,7 +13593,7 @@ hex
 
 hex2i
   Converts a hex string containing two hex digits per input byte to an
-  integer. If the input value can not be converted, then zero is returned.
+  integer. If the input value cannot be converted, then zero is returned.
 
 http_date([<offset>])
   Converts an integer supposed to contain a date since epoch to a string
@@ -13996,8 +13912,18 @@ set-var(<var name>)
   contain characters 'a-z', 'A-Z', '0-9', '.' and '_'.
 
 sha1
-  Converts a binary input sample to a SHA1 digest. The result is a binary
+  Converts a binary input sample to a SHA-1 digest. The result is a binary
   sample with length of 20 bytes.
+
+sha2([<bits>])
+  Converts a binary input sample to a digest in the SHA-2 family. The result
+  is a binary sample with length of <bits>/8 bytes.
+
+  Valid values for <bits> are 224, 256, 384, 512, each corresponding to
+  SHA-<bits>. The default value is 256.
+
+  Please note that this converter is only available when haproxy has been
+  compiled with USE_OPENSSL.
 
 strcmp(<var>)
   Compares the contents of <var> with the input value of type string. Returns
@@ -14238,14 +14164,14 @@ ungrpc(<field_number>,[<field_type>])
 
     req.body,ungrpc(48.59.1,int32) # "latitude" of "lo" first PPoint
     req.body,ungrpc(48.59.2,int32) # "longitude" of "lo" first PPoint
-    req.body,ungrpc(49.59.1,int32) # "latidude" of "hi" second PPoint
+    req.body,ungrpc(49.59.1,int32) # "latitude" of "hi" second PPoint
     req.body,ungrpc(49.59.2,int32) # "longitude" of "hi" second PPoint
 
     We could also extract the intermediary 48.59 field as a binary sample as follows:
 
     req.body,ungrpc(48.59)
 
-    As a gRPC message is alway made of a gRPC header followed by protocol buffers
+    As a gRPC message is always made of a gRPC header followed by protocol buffers
     messages, in the previous example the "latitude" of "lo" first PPoint
     could be extracted with these equivalent directives:
 
@@ -15408,7 +15334,7 @@ ssl_bc_alg_keysize : integer
 ssl_bc_alpn : string
   This extracts the Application Layer Protocol Negotiation field from an
   outgoing connection made via a TLS transport layer.
-  The result is a string containing the protocol name negociated with the
+  The result is a string containing the protocol name negotiated with the
   server. The SSL library must have been built with support for TLS
   extensions enabled (check haproxy -vv). Note that the TLS ALPN extension is
   not advertised unless the "alpn" keyword on the "server" line specifies a
@@ -15420,6 +15346,11 @@ ssl_bc_cipher : string
   Returns the name of the used cipher when the outgoing connection was made
   over an SSL/TLS transport layer.
 
+ssl_bc_client_random : binary
+  Returns the client random of the back connection when the incoming connection
+  was made over an SSL/TLS transport layer. It is useful to to decrypt traffic
+  sent using ephemeral ciphers. This requires OpenSSL >= 1.1.0, or BoringSSL.
+
 ssl_bc_is_resumed : boolean
   Returns true when the back connection was made over an SSL/TLS transport
   layer and the newly created SSL session was resumed using a cached
@@ -15428,7 +15359,7 @@ ssl_bc_is_resumed : boolean
 ssl_bc_npn : string
   This extracts the Next Protocol Negotiation field from an outgoing connection
   made via a TLS transport layer. The result is a string containing the
-  protocol name negociated with the server . The SSL library must have been
+  protocol name negotiated with the server . The SSL library must have been
   built with support for TLS extensions enabled (check haproxy -vv). Note that
   the TLS NPN extension is not advertised unless the "npn" keyword on the
   "server" line specifies a protocol list. Also, nothing forces the server to
@@ -15443,6 +15374,11 @@ ssl_bc_unique_id : binary
   When the outgoing connection was made over an SSL/TLS transport layer,
   returns the TLS unique ID as defined in RFC5929 section 3. The unique id
   can be encoded to base64 using the converter: "ssl_bc_unique_id,base64".
+
+ssl_bc_server_random : binary
+  Returns the server random of the back connection when the incoming connection
+  was made over an SSL/TLS transport layer. It is useful to to decrypt traffic
+  sent using ephemeral ciphers. This requires OpenSSL >= 1.1.0, or BoringSSL.
 
 ssl_bc_session_id : binary
   Returns the SSL ID of the back connection when the outgoing connection was
@@ -15665,6 +15601,11 @@ ssl_fc_cipherlist_xxh : integer
   "tune.ssl.capture-cipherlist-size" is set greater than 0, however the hash
   take in account all the data of the cipher list.
 
+ssl_fc_client_random : binary
+  Returns the client random of the front connection when the incoming connection
+  was made over an SSL/TLS transport layer. It is useful to to decrypt traffic
+  sent using ephemeral ciphers. This requires OpenSSL >= 1.1.0, or BoringSSL.
+
 ssl_fc_has_crt : boolean
   Returns true if a client certificate is present in an incoming connection over
   SSL/TLS transport layer. Useful if 'verify' statement is set to 'optional'.
@@ -15682,7 +15623,7 @@ ssl_fc_has_sni : boolean
   This checks for the presence of a Server Name Indication TLS extension (SNI)
   in an incoming connection was made over an SSL/TLS transport layer. Returns
   true when the incoming connection presents a TLS SNI field. This requires
-  that the SSL library is build with support for TLS extensions enabled (check
+  that the SSL library is built with support for TLS extensions enabled (check
   haproxy -vv).
 
 ssl_fc_is_resumed : boolean
@@ -15709,6 +15650,11 @@ ssl_fc_unique_id : binary
   returns the TLS unique ID as defined in RFC5929 section 3. The unique id
   can be encoded to base64 using the converter: "ssl_bc_unique_id,base64".
 
+ssl_fc_server_random : binary
+  Returns the server random of the front connection when the incoming connection
+  was made over an SSL/TLS transport layer. It is useful to to decrypt traffic
+  sent using ephemeral ciphers. This requires OpenSSL >= 1.1.0, or BoringSSL.
+
 ssl_fc_session_id : binary
   Returns the SSL ID of the front connection when the incoming connection was
   made over an SSL/TLS transport layer. It is useful to stick a given client to
@@ -15732,7 +15678,7 @@ ssl_fc_sni : string
   This fetch is different from "req_ssl_sni" above in that it applies to the
   connection being deciphered by haproxy and not to SSL contents being blindly
   forwarded. See also "ssl_fc_sni_end" and "ssl_fc_sni_reg" below. This
-  requires that the SSL library is build with support for TLS extensions
+  requires that the SSL library is built with support for TLS extensions
   enabled (check haproxy -vv).
 
   ACL derivatives :
@@ -16986,7 +16932,7 @@ Detailed fields description :
   - "TR" is the total time in milliseconds spent waiting for a full HTTP
     request from the client (not counting body) after the first byte was
     received. It can be "-1" if the connection was aborted before a complete
-    request could be received or the a bad request was received. It should
+    request could be received or a bad request was received. It should
     always be very small because a request generally fits in one single packet.
     Large times here generally indicate network issues between the client and
     haproxy or requests being typed by hand. See section 8.4 "Timing Events"
@@ -17024,7 +16970,7 @@ Detailed fields description :
 
   - "bytes_read" is the total number of bytes transmitted to the client when
     the log is emitted. This does include HTTP headers. If "option logasap" is
-    specified, the this value will be prefixed with a '+' sign indicating that
+    specified, this value will be prefixed with a '+' sign indicating that
     the final one may be larger. Please note that this value is a 64-bit
     counter, so log analysis tools must be able to handle it without
     overflowing.
@@ -18219,7 +18165,7 @@ filter cache <name>
 
 The cache uses a filter to store cacheable responses. The HTTP rules
 "cache-store" and "cache-use" must be used to define how and when to use a
-cache. By default the correpsonding filter is implicitly defined. And when no
+cache. By default the corresponding filter is implicitly defined. And when no
 other filters than cache or compression are used, it is enough. In such case,
 the compression filter is always evaluated after the cache filter. But it is
 mandatory to explicitly use a filter line to use a cache when at least one

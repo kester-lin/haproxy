@@ -53,6 +53,7 @@
 enum { all_threads_mask = 1UL };
 enum { threads_harmless_mask = 0 };
 enum { threads_want_rdv_mask = 0 };
+enum { threads_sync_mask = 0 };
 enum { tid_bit = 1UL };
 enum { tid = 0 };
 
@@ -77,7 +78,19 @@ extern THREAD_LOCAL struct thread_info *ti; /* thread_info for the current threa
 #define __decl_aligned_rwlock(lock)
 
 #define HA_ATOMIC_CAS(val, old, new) ({((*val) == (*old)) ? (*(val) = (new) , 1) : (*(old) = *(val), 0);})
-#define HA_ATOMIC_DWCAS(val, o, n)   ({((*val) == (*o))   ? (*(val) = (n)   , 1) : (*(o)   = *(val), 0);})
+
+/* warning, n is a pointer to the double value for dwcas */
+#define HA_ATOMIC_DWCAS(val, o, n)				       \
+	({                                                             \
+		long *_v = (long*)(val);                               \
+		long *_o = (long*)(o);				       \
+		long *_n = (long*)(n);				       \
+		long _v0 = _v[0], _v1 = _v[1];			       \
+		(_v0 == _o[0] && _v1 == _o[1]) ?                       \
+			(_v[0] = _n[0], _v[1] = _n[1], 1) :	       \
+			(_o[0] = _v0,   _o[1] = _v1,   0);	       \
+	})
+
 #define HA_ATOMIC_ADD(val, i)        ({*(val) += (i);})
 #define HA_ATOMIC_SUB(val, i)        ({*(val) -= (i);})
 #define HA_ATOMIC_XADD(val, i)						\
@@ -216,6 +229,10 @@ static inline void thread_release()
 {
 }
 
+static inline void thread_sync_release()
+{
+}
+
 static inline unsigned long thread_isolated()
 {
 	return 1;
@@ -293,6 +310,7 @@ static inline unsigned long thread_isolated()
 		__ret_cas;						\
 	})
 
+/* warning, n is a pointer to the double value for dwcas */
 #define HA_ATOMIC_DWCAS(val, o, n) __ha_cas_dw(val, o, n)
 
 #define HA_ATOMIC_XCHG(val, new)					\
@@ -337,6 +355,7 @@ static inline unsigned long thread_isolated()
 #else
 /* gcc >= 4.7 */
 #define HA_ATOMIC_CAS(val, old, new) __atomic_compare_exchange_n(val, old, new, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+/* warning, n is a pointer to the double value for dwcas */
 #define HA_ATOMIC_DWCAS(val, o, n)   __ha_cas_dw(val, o, n)
 #define HA_ATOMIC_ADD(val, i)        __atomic_add_fetch(val, i, __ATOMIC_SEQ_CST)
 #define HA_ATOMIC_XADD(val, i)       __atomic_fetch_add(val, i, __ATOMIC_SEQ_CST)
@@ -366,6 +385,7 @@ static inline unsigned long thread_isolated()
  * ie updating a counter. Otherwise a barrier is required.
  */
 #define _HA_ATOMIC_CAS(val, old, new) __atomic_compare_exchange_n(val, old, new, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)
+/* warning, n is a pointer to the double value for dwcas */
 #define _HA_ATOMIC_DWCAS(val, o, n)   __ha_cas_dw(val, o, n)
 #define _HA_ATOMIC_ADD(val, i)        __atomic_add_fetch(val, i, __ATOMIC_RELAXED)
 #define _HA_ATOMIC_XADD(val, i)       __atomic_fetch_add(val, i, __ATOMIC_RELAXED)
@@ -402,6 +422,7 @@ static inline unsigned long thread_isolated()
 void thread_harmless_till_end();
 void thread_isolate();
 void thread_release();
+void thread_sync_release();
 void ha_tkill(unsigned int thr, int sig);
 void ha_tkillall(int sig);
 
@@ -424,12 +445,17 @@ extern THREAD_LOCAL struct thread_info *ti; /* thread_info for the current threa
 extern volatile unsigned long all_threads_mask;
 extern volatile unsigned long threads_want_rdv_mask;
 extern volatile unsigned long threads_harmless_mask;
+extern volatile unsigned long threads_sync_mask;
 
-/* explanation for threads_want_rdv_mask and threads_harmless_mask :
+/* explanation for threads_want_rdv_mask, threads_harmless_mask, and
+ * threads_sync_mask :
  * - threads_want_rdv_mask is a bit field indicating all threads that have
  *   requested a rendez-vous of other threads using thread_isolate().
  * - threads_harmless_mask is a bit field indicating all threads that are
  *   currently harmless in that they promise not to access a shared resource.
+ * - threads_sync_mask is a bit field indicating that a thread waiting for
+ *   others to finish wants to leave synchronized with others and as such
+ *   promises to do so as well using thread_sync_release().
  *
  * For a given thread, its bits in want_rdv and harmless can be translated like
  * this :
@@ -442,6 +468,9 @@ extern volatile unsigned long threads_harmless_mask;
  *       1    |     1    | thread interested in RDV and waiting for its turn
  *       1    |     0    | thread currently working isolated from others
  *  ----------+----------+----------------------------------------------------
+ *
+ * thread_sync_mask only delays the leaving of threads_sync_release() to make
+ * sure that each thread's harmless bit is cleared before leaving the function.
  */
 
 #define ha_sigmask(how, set, oldset)  pthread_sigmask(how, set, oldset)
@@ -532,6 +561,7 @@ enum lock_label {
 	TLSKEYS_REF_LOCK,
 	AUTH_LOCK,
 	LOGSRV_LOCK,
+	DICT_LOCK,
 	FT_LOCK,
 	OTHER_LOCK,
 	LOCK_LABELS	
@@ -650,6 +680,7 @@ static inline const char *lock_label(enum lock_label label)
 	case AUTH_LOCK:            return "AUTH";
 	case FT_LOCK:		   return "FT_LOCK";
 	case LOGSRV_LOCK:          return "LOGSRV";
+	case DICT_LOCK:            return "DICT";
 	case OTHER_LOCK:           return "OTHER";
 	case LOCK_LABELS:          break; /* keep compiler happy */
 	};

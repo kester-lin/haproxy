@@ -39,6 +39,7 @@
 #include <proto/checks.h>
 #include <proto/cli.h>
 #include <proto/connection.h>
+#include <proto/dict.h>
 #include <proto/dns.h>
 #include <proto/stats.h>
 #include <proto/fd.h>
@@ -343,10 +344,10 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
  out_fail_accept:
 	flt_stream_release(s, 0);
 	task_destroy(t);
-	tasklet_free(s->si[1].wait_event.task);
+	tasklet_free(s->si[1].wait_event.tasklet);
 	LIST_DEL(&s->list);
 out_fail_alloc_si1:
-	tasklet_free(s->si[0].wait_event.task);
+	tasklet_free(s->si[0].wait_event.tasklet);
  out_fail_alloc:
 	pool_free(pool_head_stream, s);
 	return NULL;
@@ -479,8 +480,8 @@ static void stream_free(struct stream *s)
 	si_release_endpoint(&s->si[1]);
 	si_release_endpoint(&s->si[0]);
 
-	tasklet_free(s->si[0].wait_event.task);
-	tasklet_free(s->si[1].wait_event.task);
+	tasklet_free(s->si[0].wait_event.tasklet);
+	tasklet_free(s->si[1].wait_event.tasklet);
 
 	b_free(&s->si[1].l7_buffer);
 	if (must_free_sess) {
@@ -650,12 +651,12 @@ void stream_process_counters(struct stream *s)
 
 /* This function is called with (si->state == SI_ST_CON) meaning that a
  * connection was attempted and that the file descriptor is already allocated.
- * We must check for establishment, error and abort. Possible output states
- * are SI_ST_EST (established), SI_ST_CER (error), SI_ST_DIS (abort), and
- * SI_ST_CON (no change). The function returns 0 if it switches to SI_ST_CER,
- * otherwise 1. This only works with connection-based streams.
+ * We must check for timeout, error and abort. Possible output states are
+ * SI_ST_CER (error), SI_ST_DIS (abort), and SI_ST_CON (no change). This only
+ * works with connection-based streams. We know that there were no I/O event
+ * when reaching this function. Timeouts and errors are *not* cleared.
  */
-static int sess_update_st_con_tcp(struct stream *s)
+static void sess_update_st_con_tcp(struct stream *s)
 {
 	struct stream_interface *si = &s->si[1];
 	struct channel *req = &s->req;
@@ -663,80 +664,36 @@ static int sess_update_st_con_tcp(struct stream *s)
 	struct conn_stream *srv_cs = objt_cs(si->end);
 	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
 
-	/* If we got an error, or if nothing happened and the connection timed
-	 * out, we must give up. The CER state handler will take care of retry
-	 * attempts and error reports.
-	 */
-	if (unlikely(si->flags & (SI_FL_EXP|SI_FL_ERR))) {
-		if (unlikely(req->flags & CF_WROTE_DATA)) {
-			/* Some data were sent past the connection establishment,
-			 * so we need to pretend we're established to log correctly
-			 * and let later states handle the failure.
-			 */
-			si->state    = SI_ST_EST;
-			si->err_type = SI_ET_DATA_ERR;
-			/* Don't add CF_WRITE_ERROR if we're here because
-			 * early data were rejected by the server, or
-			 * http_wait_for_response() will never be called
-			 * to send a 425.
-			 */
-			if (conn->err_code != CO_ER_SSL_EARLY_FAILED)
-				req->flags |= CF_WRITE_ERROR;
-			rep->flags |= CF_READ_ERROR;
-			return 1;
-		}
-		si->exp   = TICK_ETERNITY;
-		si->state = SI_ST_CER;
+	/* the client might want to abort */
+	if ((rep->flags & CF_SHUTW) ||
+	    ((req->flags & CF_SHUTW_NOW) &&
+	     (channel_is_empty(req) || (s->be->options & PR_O_ABRT_CLOSE)))) {
+		si->flags |= SI_FL_NOLINGER;
+		si_shutw(si);
+		si->err_type |= SI_ET_CONN_ABRT;
+		if (s->srv_error)
+			s->srv_error(s, si);
+		/* Note: state = SI_ST_DIS now */
+		return;
+	}
 
+	/* retryable error ? */
+	if (si->flags & (SI_FL_EXP|SI_FL_ERR)) {
 		if (!(s->flags & SF_SRV_REUSED) && conn) {
 			conn_stop_tracking(conn);
 			conn_full_close(conn);
 		}
 
-		if (si->err_type)
-			return 0;
+		if (!si->err_type) {
+			if (si->flags & SI_FL_ERR)
+				si->err_type = SI_ET_CONN_ERR;
+			else
+				si->err_type = SI_ET_CONN_TO;
+		}
 
-		if (si->flags & SI_FL_ERR)
-			si->err_type = SI_ET_CONN_ERR;
-		else
-			si->err_type = SI_ET_CONN_TO;
-		return 0;
+		si->state  = SI_ST_CER;
+		return;
 	}
-
-	/* OK, maybe we want to abort */
-	if (!(req->flags & CF_WROTE_DATA) &&
-	    unlikely((rep->flags & CF_SHUTW) ||
-		     ((req->flags & CF_SHUTW_NOW) && /* FIXME: this should not prevent a connection from establishing */
-		      ((!(req->flags & CF_WRITE_ACTIVITY) && channel_is_empty(req)) ||
-		       (s->be->options & PR_O_ABRT_CLOSE))))) {
-		/* give up */
-		si_shutw(si);
-		si->err_type |= SI_ET_CONN_ABRT;
-		if (s->srv_error)
-			s->srv_error(s, si);
-		return 1;
-	}
-
-	/* If the request channel is waiting for the connect(), we mark the read
-	 * side as attached on the response channel and we wake up it once. So
-	 * it will have a chance to forward data now.
-	 */
-	if (req->flags & CF_WAKE_CONNECT) {
-		rep->flags |= CF_READ_ATTACHED;
-		req->flags |= CF_WAKE_ONCE;
-		req->flags &= ~CF_WAKE_CONNECT;
-	}
-
-	/* we need to wait a bit more if there was no activity either */
-	if (!(req->flags & CF_WRITE_ACTIVITY))
-		return 1;
-
-	/* OK, this means that a connection succeeded. The caller will be
-	 * responsible for handling the transition from CON to EST.
-	 */
-	si->state    = SI_ST_EST;
-	si->err_type = SI_ET_NONE;
-	return 1;
 }
 
 /* This function is called with (si->state == SI_ST_CER) meaning that a
@@ -746,13 +703,16 @@ static int sess_update_st_con_tcp(struct stream *s)
  * retries are exhausted, SI_ST_TAR when a delay is wanted before a new
  * connection attempt, SI_ST_ASS when it's wise to retry on the same server,
  * and SI_ST_REQ when an immediate redispatch is wanted. The buffers are
- * marked as in error state. It returns 0.
+ * marked as in error state. Timeouts and errors are cleared before retrying.
  */
-static int sess_update_st_cer(struct stream *s)
+static void sess_update_st_cer(struct stream *s)
 {
 	struct stream_interface *si = &s->si[1];
 	struct conn_stream *cs = objt_cs(si->end);
 	struct connection *conn = cs_conn(cs);
+
+	si->exp    = TICK_ETERNITY;
+	si->flags &= ~SI_FL_EXP;
 
 	/* we probably have to release last stream from the server */
 	if (objt_server(s->target)) {
@@ -807,44 +767,10 @@ static int sess_update_st_cer(struct stream *s)
 		si->state = SI_ST_CLO;
 		if (s->srv_error)
 			s->srv_error(s, si);
-		return 0;
+		return;
 	}
 
-	/* If the "redispatch" option is set on the backend, we are allowed to
-	 * retry on another server. By default this redispatch occurs on the
-	 * last retry, but if configured we allow redispatches to occur on
-	 * configurable intervals, e.g. on every retry. In order to achieve this,
-	 * we must mark the stream unassigned, and eventually clear the DIRECT
-	 * bit to ignore any persistence cookie. We won't count a retry nor a
-	 * redispatch yet, because this will depend on what server is selected.
-	 * If the connection is not persistent, the balancing algorithm is not
-	 * determinist (round robin) and there is more than one active server,
-	 * we accept to perform an immediate redispatch without waiting since
-	 * we don't care about this particular server.
-	 */
-	if (objt_server(s->target) &&
-	    (s->be->options & PR_O_REDISP) && !(s->flags & SF_FORCE_PRST) &&
-	    ((__objt_server(s->target)->cur_state < SRV_ST_RUNNING) ||
-	     (((s->be->redispatch_after > 0) &&
-	       ((s->be->conn_retries - si->conn_retries) %
-	        s->be->redispatch_after == 0)) ||
-	      ((s->be->redispatch_after < 0) &&
-	       ((s->be->conn_retries - si->conn_retries) %
-	        (s->be->conn_retries + 1 + s->be->redispatch_after) == 0))) ||
-	     (!(s->flags & SF_DIRECT) && s->be->srv_act > 1 &&
-	      ((s->be->lbprm.algo & BE_LB_KIND) == BE_LB_KIND_RR)))) {
-		sess_change_server(s, NULL);
-		if (may_dequeue_tasks(objt_server(s->target), s->be))
-			process_srv_queue(objt_server(s->target));
-
-		s->flags &= ~(SF_DIRECT | SF_ASSIGNED | SF_ADDR_SET);
-		si->state = SI_ST_REQ;
-	} else {
-		if (objt_server(s->target))
-			_HA_ATOMIC_ADD(&__objt_server(s->target)->counters.retries, 1);
-		_HA_ATOMIC_ADD(&s->be->be_counters.retries, 1);
-		si->state = SI_ST_ASS;
-	}
+	stream_choose_redispatch(s);
 
 	if (si->flags & SI_FL_ERR) {
 		/* The error was an asynchronous connection error, and we will
@@ -871,30 +797,125 @@ static int sess_update_st_cer(struct stream *s)
 			si->exp = tick_add(now_ms, MS_TO_TICKS(delay));
 		}
 		si->flags &= ~SI_FL_ERR;
-		return 0;
 	}
-	return 0;
+}
+
+/* This function is called with (si->state == SI_ST_RDY) meaning that a
+ * connection was attempted, that the file descriptor is already allocated,
+ * and that it has succeeded. We must still check for errors and aborts.
+ * Possible output states are SI_ST_EST (established), SI_ST_CER (error),
+ * and SI_ST_DIS (abort). This only works with connection-based streams.
+ * Timeouts and errors are *not* cleared.
+ */
+static void sess_update_st_rdy_tcp(struct stream *s)
+{
+	struct stream_interface *si = &s->si[1];
+	struct channel *req = &s->req;
+	struct channel *rep = &s->res;
+	struct conn_stream *srv_cs = objt_cs(si->end);
+	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
+
+	/* We know the connection at least succeeded, though it could have
+	 * since met an error for any other reason. At least it didn't time out
+	 * eventhough the timeout might have been reported right after success.
+	 * We need to take care of various situations here :
+	 *   - everything might be OK. We have to switch to established.
+	 *   - an I/O error might have been reported after a successful transfer,
+	 *     which is not retryable and needs to be logged correctly, and needs
+	 *     established as well
+	 *   - SI_ST_CON implies !CF_WROTE_DATA but not conversely as we could
+	 *     have validated a connection with incoming data (e.g. TCP with a
+	 *     banner protocol), or just a successful connect() probe.
+	 *   - the client might have requested a connection abort, this needs to
+	 *     be checked before we decide to retry anything.
+	 */
+
+	/* it's still possible to handle client aborts or connection retries
+	 * before any data were sent.
+	 */
+	if (!(req->flags & CF_WROTE_DATA)) {
+		/* client abort ? */
+		if ((rep->flags & CF_SHUTW) ||
+		    ((req->flags & CF_SHUTW_NOW) &&
+		     (channel_is_empty(req) || (s->be->options & PR_O_ABRT_CLOSE)))) {
+			/* give up */
+			si->flags |= SI_FL_NOLINGER;
+			si_shutw(si);
+			si->err_type |= SI_ET_CONN_ABRT;
+			if (s->srv_error)
+				s->srv_error(s, si);
+			return;
+		}
+
+		/* retryable error ? */
+		if (si->flags & SI_FL_ERR) {
+			if (!(s->flags & SF_SRV_REUSED) && conn) {
+				conn_stop_tracking(conn);
+				conn_full_close(conn);
+			}
+
+			if (!si->err_type)
+				si->err_type = SI_ET_CONN_ERR;
+			si->state = SI_ST_CER;
+			return;
+		}
+	}
+
+	/* data were sent and/or we had no error, sess_establish() will
+	 * now take over.
+	 */
+	si->err_type = SI_ET_NONE;
+	si->state    = SI_ST_EST;
 }
 
 /*
  * This function handles the transition between the SI_ST_CON state and the
  * SI_ST_EST state. It must only be called after switching from SI_ST_CON (or
- * SI_ST_INI) to SI_ST_EST, but only when a ->proto is defined.
+ * SI_ST_INI or SI_ST_RDY) to SI_ST_EST, but only when a ->proto is defined.
  * Note that it will switch the interface to SI_ST_DIS if we already have
  * the CF_SHUTR flag, it means we were able to forward the request, and
  * receive the response, before process_stream() had the opportunity to
  * make the switch from SI_ST_CON to SI_ST_EST. When that happens, we want
  * to go through sess_establish() anyway, to make sure the analysers run.
+ * Timeouts are cleared. Error are reported on the channel so that analysers
+ * can handle them.
  */
 static void sess_establish(struct stream *s)
 {
 	struct stream_interface *si = &s->si[1];
+	struct conn_stream *srv_cs = objt_cs(si->end);
+	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
 	struct channel *req = &s->req;
 	struct channel *rep = &s->res;
 
-	/* First, centralize the timers information */
+	/* First, centralize the timers information, and clear any irrelevant
+	 * timeout.
+	 */
 	s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
-	si->exp      = TICK_ETERNITY;
+	si->exp = TICK_ETERNITY;
+	si->flags &= ~SI_FL_EXP;
+
+	/* errors faced after sending data need to be reported */
+	if (si->flags & SI_FL_ERR && req->flags & CF_WROTE_DATA) {
+		/* Don't add CF_WRITE_ERROR if we're here because
+		 * early data were rejected by the server, or
+		 * http_wait_for_response() will never be called
+		 * to send a 425.
+		 */
+		if (conn && conn->err_code != CO_ER_SSL_EARLY_FAILED)
+			req->flags |= CF_WRITE_ERROR;
+		rep->flags |= CF_READ_ERROR;
+		si->err_type = SI_ET_DATA_ERR;
+	}
+
+	/* If the request channel is waiting for the connect(), we mark the read
+	 * side as attached on the response channel and we wake up it once. So
+	 * it will have a chance to forward data now.
+	 */
+	if (req->flags & CF_WAKE_CONNECT) {
+		req->flags |= CF_WAKE_ONCE;
+		req->flags &= ~CF_WAKE_CONNECT;
+	}
 
 	if (objt_server(s->target))
 		health_adjust(objt_server(s->target), HANA_STATUS_L4_OK);
@@ -1060,6 +1081,7 @@ static void sess_update_stream_int(struct stream *s)
 		if (si->flags & SI_FL_EXP) {
 			/* ... and timeout expired */
 			si->exp = TICK_ETERNITY;
+			si->flags &= ~SI_FL_EXP;
 			s->logs.t_queue = tv_ms_elapsed(&s->logs.tv_accept, &now);
 
 			/* we may need to know the position in the queue for logging */
@@ -1104,7 +1126,6 @@ static void sess_update_stream_int(struct stream *s)
 			return;  /* still in turn-around */
 
 		si->flags &= ~SI_FL_EXP;
-
 		si->exp = TICK_ETERNITY;
 
 		/* we keep trying on the same server as long as the stream is
@@ -1122,6 +1143,7 @@ static void sess_update_stream_int(struct stream *s)
 abort_connection:
 	/* give up */
 	si->exp = TICK_ETERNITY;
+	si->flags &= ~SI_FL_EXP;
 	si_shutr(si);
 	si_shutw(si);
 	si->state = SI_ST_CLO;
@@ -1137,8 +1159,8 @@ abort_connection:
 static void sess_set_term_flags(struct stream *s)
 {
 	if (!(s->flags & SF_FINST_MASK)) {
-		if (s->si[1].state < SI_ST_REQ) {
-
+		if (s->si[1].state == SI_ST_INI) {
+			/* anything before REQ in fact */
 			_HA_ATOMIC_ADD(&strm_fe(s)->fe_counters.failed_req, 1);
 			if (strm_li(s) && strm_li(s)->counters)
 				_HA_ATOMIC_ADD(&strm_li(s)->counters->failed_req, 1);
@@ -1147,7 +1169,7 @@ static void sess_set_term_flags(struct stream *s)
 		}
 		else if (s->si[1].state == SI_ST_QUE)
 			s->flags |= SF_FINST_Q;
-		else if (s->si[1].state < SI_ST_EST)
+		else if (si_state_in(s->si[1].state, SI_SB_REQ|SI_SB_TAR|SI_SB_ASS|SI_SB_CON|SI_SB_CER|SI_SB_RDY))
 			s->flags |= SF_FINST_C;
 		else if (s->si[1].state == SI_ST_EST || s->si[1].prev_state == SI_ST_EST)
 			s->flags |= SF_FINST_D;
@@ -1199,17 +1221,6 @@ static void sess_prepare_conn_req(struct stream *s)
 			if (s->srv_error)
 				s->srv_error(s, si);
 			return;
-		}
-
-		/* For applets, there is no connection establishment, but if the
-		 * request channel is waiting for it, we mark the read side as
-		 * attached on the response channel and we wake up it once. So
-		 * it will have a chance to forward data now.
-		 */
-		if (s->req.flags & CF_WAKE_CONNECT) {
-			s->res.flags |= CF_READ_ATTACHED;
-			s->req.flags |= CF_WAKE_ONCE;
-			s->req.flags &= ~CF_WAKE_CONNECT;
 		}
 
 		if (tv_iszero(&s->logs.tv_request))
@@ -1513,6 +1524,49 @@ static int process_server_rules(struct stream *s, struct channel *req, int an_bi
 	return 1;
 }
 
+static inline void sticking_rule_find_target(struct stream *s,
+                                             struct stktable *t, struct stksess *ts)
+{
+	struct proxy *px = s->be;
+	struct eb32_node *node;
+	struct dict_entry *de;
+	void *ptr;
+	struct server *srv;
+
+	/* Look for the server name previously stored in <t> stick-table */
+	HA_RWLOCK_RDLOCK(STK_SESS_LOCK, &ts->lock);
+	ptr = __stktable_data_ptr(t, ts, STKTABLE_DT_SERVER_NAME);
+	de = stktable_data_cast(ptr, server_name);
+	HA_RWLOCK_RDUNLOCK(STK_SESS_LOCK, &ts->lock);
+
+	if (de) {
+		struct ebpt_node *name;
+
+		name = ebis_lookup(&px->conf.used_server_name, de->value.key);
+		if (name) {
+			srv = container_of(name, struct server, conf.name);
+			goto found;
+		}
+	}
+
+	/* Look for the server ID */
+	HA_RWLOCK_RDLOCK(STK_SESS_LOCK, &ts->lock);
+	ptr = __stktable_data_ptr(t, ts, STKTABLE_DT_SERVER_ID);
+	node = eb32_lookup(&px->conf.used_server_id, stktable_data_cast(ptr, server_id));
+	HA_RWLOCK_RDUNLOCK(STK_SESS_LOCK, &ts->lock);
+
+	if (!node)
+		return;
+
+	srv = container_of(node, struct server, conf.id);
+ found:
+	if ((srv->cur_state != SRV_ST_STOPPED) ||
+	    (px->options & PR_O_PERSIST) || (s->flags & SF_FORCE_PRST)) {
+		s->flags |= SF_DIRECT | SF_ASSIGNED;
+		s->target = &srv->obj_type;
+	}
+}
+
 /* This stream analyser works on a request. It applies all sticking rules on
  * it then returns 1. The data must already be present in the buffer otherwise
  * they won't match. It always returns 1.
@@ -1569,27 +1623,8 @@ static int process_sticking_rules(struct stream *s, struct channel *req, int an_
 				struct stksess *ts;
 
 				if ((ts = stktable_lookup_key(rule->table.t, key)) != NULL) {
-					if (!(s->flags & SF_ASSIGNED)) {
-						struct eb32_node *node;
-						void *ptr;
-
-						/* srv found in table */
-						HA_RWLOCK_RDLOCK(STK_SESS_LOCK, &ts->lock);
-						ptr = __stktable_data_ptr(rule->table.t, ts, STKTABLE_DT_SERVER_ID);
-						node = eb32_lookup(&px->conf.used_server_id, stktable_data_cast(ptr, server_id));
-						HA_RWLOCK_RDUNLOCK(STK_SESS_LOCK, &ts->lock);
-						if (node) {
-							struct server *srv;
-
-							srv = container_of(node, struct server, conf.id);
-							if ((srv->cur_state != SRV_ST_STOPPED) ||
-							    (px->options & PR_O_PERSIST) ||
-							    (s->flags & SF_FORCE_PRST)) {
-								s->flags |= SF_DIRECT | SF_ASSIGNED;
-								s->target = &srv->obj_type;
-							}
-						}
-					}
+					if (!(s->flags & SF_ASSIGNED))
+						sticking_rule_find_target(s, rule->table.t, ts);
 					stktable_touch_local(rule->table.t, ts, 1);
 				}
 			}
@@ -1687,6 +1722,7 @@ static int process_store_rules(struct stream *s, struct channel *rep, int an_bit
 	for (i = 0; i < s->store_count; i++) {
 		struct stksess *ts;
 		void *ptr;
+		struct dict_entry *de;
 
 		if (objt_server(s->target) && objt_server(s->target)->flags & SRV_F_NON_STICK) {
 			stksess_free(s->store[i].table, s->store[i].ts);
@@ -1705,6 +1741,15 @@ static int process_store_rules(struct stream *s, struct channel *rep, int an_bit
 		ptr = __stktable_data_ptr(s->store[i].table, ts, STKTABLE_DT_SERVER_ID);
 		stktable_data_cast(ptr, server_id) = __objt_server(s->target)->puid;
 		HA_RWLOCK_WRUNLOCK(STK_SESS_LOCK, &ts->lock);
+
+		HA_RWLOCK_WRLOCK(STK_SESS_LOCK, &ts->lock);
+		de = dict_insert(&server_name_dict, __objt_server(s->target)->id);
+		if (de) {
+			ptr = __stktable_data_ptr(s->store[i].table, ts, STKTABLE_DT_SERVER_NAME);
+			stktable_data_cast(ptr, server_name) = de;
+		}
+		HA_RWLOCK_WRUNLOCK(STK_SESS_LOCK, &ts->lock);
+
 		stktable_touch_local(s->store[i].table, ts, 1);
 	}
 	s->store_count = 0; /* everything is stored */
@@ -1794,7 +1839,6 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
  	si_sync_recv(si_f);
 	si_sync_recv(si_b);
 
-redo:
 	rate = update_freq_ctr(&s->call_rate, 1);
 	if (rate >= 100000 && s->call_rate.prev_ctr) { // make sure to wait at least a full second
 		stream_dump_and_crash(&s->obj_type, read_freq_ctr(&s->call_rate));
@@ -1880,6 +1924,7 @@ redo:
 		}
 	}
 
+ resync_stream_interface:
 	/* below we may emit error messages so we have to ensure that we have
 	 * our buffers properly allocated.
 	 */
@@ -1901,7 +1946,7 @@ redo:
 	 */
 	srv = objt_server(s->target);
 	if (unlikely(si_f->flags & SI_FL_ERR)) {
-		if (si_f->state == SI_ST_EST || si_f->state == SI_ST_DIS) {
+		if (si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS)) {
 			si_shutr(si_f);
 			si_shutw(si_f);
 			si_report_error(si_f);
@@ -1920,7 +1965,7 @@ redo:
 	/* not for IPC */
 	if (!last_error) {
 	if (unlikely(si_b->flags & SI_FL_ERR)) {
-		if (si_b->state == SI_ST_EST || si_b->state == SI_ST_DIS) {
+		if (si_state_in(si_b->state, SI_SB_EST|SI_SB_DIS)) {
 			si_shutr(si_b);
 			si_shutw(si_b);
 			si_report_error(si_b);
@@ -1944,11 +1989,16 @@ redo:
 	last_error = 0;
 
 
-	if (si_b->state == SI_ST_CON) {
+	if (si_state_in(si_b->state, SI_SB_CON|SI_SB_RDY)) {
 		/* we were trying to establish a connection on the server side,
 		 * maybe it succeeded, maybe it failed, maybe we timed out, ...
 		 */
-		if (unlikely(!sess_update_st_con_tcp(s)))
+		if (si_b->state == SI_ST_RDY)
+			sess_update_st_rdy_tcp(s);
+		else if (si_b->state == SI_ST_CON)
+			sess_update_st_con_tcp(s);
+
+		if (si_b->state == SI_ST_CER)
 			sess_update_st_cer(s);
 		else if (si_b->state == SI_ST_EST)
 			sess_establish(s);
@@ -1964,7 +2014,6 @@ redo:
 	rp_cons_last = si_f->state;
 	rp_prod_last = si_b->state;
 
- resync_stream_interface:
 	/* Check for connection closure */
 #if 0
 	DPRINTF(stderr,
@@ -2015,7 +2064,7 @@ redo:
 	    s->pending_events & TASK_WOKEN_MSG) {
 		unsigned int flags = req->flags;
 
-		if (si_f->state >= SI_ST_EST) {
+		if (si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO)) {
 			int max_loops = global.tune.maxpollevents;
 			unsigned int ana_list;
 			unsigned int ana_back;
@@ -2095,7 +2144,7 @@ redo:
 		req->flags &= ~CF_WAKE_ONCE;
 		rqf_last = req->flags;
 
-		if ((req->flags ^ flags) & CF_MASK_STATIC)
+		if ((req->flags ^ flags) & (CF_SHUTR|CF_SHUTW))
 			goto resync_request;
 	}
 
@@ -2132,7 +2181,7 @@ redo:
 		 s->pending_events & TASK_WOKEN_MSG) {
 		unsigned int flags = res->flags;
 
-		if (si_b->state >= SI_ST_EST) {
+		if (si_state_in(si_b->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO)) {
 			int max_loops = global.tune.maxpollevents;
 			unsigned int ana_list;
 			unsigned int ana_back;
@@ -2180,7 +2229,7 @@ redo:
 		res->flags &= ~CF_WAKE_ONCE;
 		rpf_last = res->flags;
 
-		if ((res->flags ^ flags) & CF_MASK_STATIC)
+		if ((res->flags ^ flags) & (CF_SHUTR|CF_SHUTW))
 			goto resync_response;
 	}
 
@@ -2297,7 +2346,7 @@ redo:
 	 */
 	if (unlikely((!req->analysers || (req->analysers == AN_REQ_FLT_END && !(req->flags & CF_FLT_ANALYZE))) &&
 	    !(req->flags & (CF_SHUTW|CF_SHUTR_NOW)) &&
-	    (si_f->state >= SI_ST_EST) &&
+	    (si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO)) &&
 	    (req->to_forward != CHN_INFINITE_FORWARD))) {
 		/* This buffer is freewheeling, there's no analyser
 		 * attached to it. If any data are left in, we'll permit them to
@@ -2350,7 +2399,7 @@ redo:
 
 	/* reflect what the L7 analysers have seen last */
 	rqf_last = req->flags;
-
+#if 0 /* merge */
 	/*
 	 * Now forward all shutdown requests between both sides of the buffer
 	 */
@@ -2394,7 +2443,7 @@ redo:
 		si_shutr(si_f);
 	}
 #endif	
-
+#endif
 	/* it's possible that an upper layer has requested a connection setup or abort.
 	 * There are 2 situations where we decide to establish a new connection :
 	 *  - there are data scheduled for emission in the buffer
@@ -2426,8 +2475,7 @@ redo:
 	/* we may have a pending connection request, or a connection waiting
 	 * for completion.
 	 */
-	if (si_b->state >= SI_ST_REQ && si_b->state < SI_ST_CON) {
-
+	if (si_state_in(si_b->state, SI_SB_REQ|SI_SB_QUE|SI_SB_TAR|SI_SB_ASS)) {
 		/* prune the request variables and swap to the response variables. */
 		if (s->vars_reqres.scope != SCOPE_RES) {
 			if (!LIST_ISEMPTY(&s->vars_reqres.head)) {
@@ -2454,7 +2502,7 @@ redo:
 
 			/* Now we can add the server name to a header (if requested) */
 			/* check for HTTP mode and proxy server_name_hdr_name != NULL */
-			if ((si_b->state >= SI_ST_CON) && (si_b->state < SI_ST_CLO) &&
+			if (si_state_in(si_b->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST) &&
 			    (s->be->server_id_hdr_name != NULL) &&
 			    (s->be->mode == PR_MODE_HTTP) &&
 			    objt_server(s->target)) {
@@ -2467,12 +2515,52 @@ redo:
 		} while (si_b->state == SI_ST_ASS);
 	}
 
+	/* Let's see if we can send the pending request now */
+	si_sync_send(si_b);
+
+	/*
+	 * Now forward all shutdown requests between both sides of the request buffer
+	 */
+
+	/* first, let's check if the request buffer needs to shutdown(write), which may
+	 * happen either because the input is closed or because we want to force a close
+	 * once the server has begun to respond. If a half-closed timeout is set, we adjust
+	 * the other side's timeout as well.
+	 */
+	if (unlikely((req->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
+		     (CF_AUTO_CLOSE|CF_SHUTR))) {
+		channel_shutw_now(req);
+	}
+
+	/* shutdown(write) pending */
+	if (unlikely((req->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW &&
+		     channel_is_empty(req))) {
+		if (req->flags & CF_READ_ERROR)
+			si_b->flags |= SI_FL_NOLINGER;
+		si_shutw(si_b);
+	}
+
+	/* shutdown(write) done on server side, we must stop the client too */
+	if (unlikely((req->flags & (CF_SHUTW|CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTW &&
+		     !req->analysers))
+		channel_shutr_now(req);
+
+	/* shutdown(read) pending */
+	if (unlikely((req->flags & (CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTR_NOW)) {
+		if (si_f->flags & SI_FL_NOHALF)
+			si_f->flags |= SI_FL_NOLINGER;
+		si_shutr(si_f);
+	}
+
 	/* Benchmarks have shown that it's optimal to do a full resync now */
-	if (si_f->state == SI_ST_DIS || si_b->state == SI_ST_DIS)
+	if (si_f->state == SI_ST_DIS ||
+	    si_state_in(si_b->state, SI_SB_RDY|SI_SB_DIS) ||
+	    (si_f->flags & SI_FL_ERR && si_f->state != SI_ST_CLO) ||
+	    (si_b->flags & SI_FL_ERR && si_b->state != SI_ST_CLO))
 		goto resync_stream_interface;
 
 	/* otherwise we want to check if we need to resync the req buffer or not */
-	if ((req->flags ^ rqf_last) & CF_MASK_STATIC)
+	if ((req->flags ^ rqf_last) & (CF_SHUTR|CF_SHUTW))
 		goto resync_request;
 
 	/* perform output updates to the response buffer */
@@ -2484,7 +2572,7 @@ redo:
 	 */
 	if (unlikely((!res->analysers || (res->analysers == AN_RES_FLT_END && !(res->flags & CF_FLT_ANALYZE))) &&
 	    !(res->flags & (CF_SHUTW|CF_SHUTR_NOW)) &&
-	    (si_b->state >= SI_ST_EST) &&
+	    si_state_in(si_b->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO) &&
 	    (res->to_forward != CHN_INFINITE_FORWARD))) {
 		/* This buffer is freewheeling, there's no analyser
 		 * attached to it. If any data are left in, we'll permit them to
@@ -2560,6 +2648,9 @@ redo:
 	/* reflect what the L7 analysers have seen last */
 	rpf_last = res->flags;
 
+	/* Let's see if we can send the pending response now */
+	si_sync_send(si_f);
+
 	/*
 	 * Now forward all shutdown requests between both sides of the buffer
 	 */
@@ -2592,14 +2683,20 @@ redo:
 		si_shutr(si_b);
 	}
 
-	if (si_f->state == SI_ST_DIS || si_b->state == SI_ST_DIS)
+	if (si_f->state == SI_ST_DIS ||
+	    si_state_in(si_b->state, SI_SB_RDY|SI_SB_DIS) ||
+	    (si_f->flags & SI_FL_ERR && si_f->state != SI_ST_CLO) ||
+	    (si_b->flags & SI_FL_ERR && si_b->state != SI_ST_CLO))
 		goto resync_stream_interface;
 
-	if (req->flags != rqf_last)
+	if ((req->flags & ~rqf_last) & CF_MASK_ANALYSER)
 		goto resync_request;
 
 	if ((res->flags ^ rpf_last) & CF_MASK_STATIC)
 		goto resync_response;
+
+	if (((req->flags ^ rqf_last) | (res->flags ^ rpf_last)) & CF_MASK_ANALYSER)
+		goto resync_request;
 
 	/* we're interested in getting wakeups again */
 	si_f->flags &= ~SI_FL_DONT_WAKE;
@@ -2632,24 +2729,11 @@ redo:
 		}
 	}
 
-	if (likely((si_f->state != SI_ST_CLO) ||
-		   (si_b->state > SI_ST_INI && si_b->state < SI_ST_CLO))) {
-		enum si_state si_b_prev_state, si_f_prev_state;
-
-		si_f_prev_state = si_f->prev_state;
-		si_b_prev_state = si_b->prev_state;
-
+	if (likely((si_f->state != SI_ST_CLO) || !si_state_in(si_b->state, SI_SB_INI|SI_SB_CLO))) {
 		if ((sess->fe->options & PR_O_CONTSTATS) && (s->flags & SF_BE_ASSIGNED))
 			stream_process_counters(s);
 
 		si_update_both(si_f, si_b);
-
-		if (si_f->state == SI_ST_DIS || si_f->state != si_f_prev_state ||
-		    si_b->state == SI_ST_DIS || si_b->state != si_b_prev_state ||
-		    ((si_f->flags & SI_FL_ERR) && si_f->state != SI_ST_CLO) ||
-		    ((si_b->flags & SI_FL_ERR) && si_b->state != SI_ST_CLO) ||
-		    (((req->flags ^ rqf_last) | (res->flags ^ rpf_last)) & CF_MASK_ANALYSER))
-			goto redo;
 
 		/* Trick: if a request is being waiting for the server to respond,
 		 * and if we know the server can timeout, we don't want the timeout
@@ -3355,7 +3439,7 @@ static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct st
 			chunk_appendf(&trash,
 				      "      htx=%p flags=0x%x size=%u data=%u used=%u wrap=%s extra=%llu\n",
 				      htx, htx->flags, htx->size, htx->data, htx->used,
-				      (!htx->used || htx->tail+1 == htx->wrap) ? "NO" : "YES",
+				      (htx->tail >= htx->head) ? "NO" : "YES",
 				      (unsigned long long)htx->extra);
 		}
 
@@ -3394,7 +3478,7 @@ static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct st
 			chunk_appendf(&trash,
 				      "      htx=%p flags=0x%x size=%u data=%u used=%u wrap=%s extra=%llu\n",
 				      htx, htx->flags, htx->size, htx->data, htx->used,
-				      (!htx->used || htx->tail+1 == htx->wrap) ? "NO" : "YES",
+				      (htx->tail >= htx->head) ? "NO" : "YES",
 				      (unsigned long long)htx->extra);
 		}
 

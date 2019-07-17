@@ -18,8 +18,11 @@
 #include <sys/time.h>
 
 #define MAX_FRAME_SIZE    16384
-#define SPOP_VERSION      "1.0"
+#define SPOP_VERSION      "2.0"
 #define SPOA_CAPABILITIES ""
+
+/* Flags set on the SPOE frame */
+#define SPOE_FRM_FL_FIN         0x00000001
 
 /* All supported data types */
 enum spoe_data_type {

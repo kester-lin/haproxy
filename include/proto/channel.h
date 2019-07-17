@@ -38,6 +38,7 @@
 #include <types/stream.h>
 #include <types/stream_interface.h>
 
+#include <proto/stream.h>
 #include <proto/task.h>
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
@@ -382,20 +383,21 @@ static inline void channel_add_input(struct channel *chn, unsigned int len)
 
 static inline unsigned long long channel_htx_forward(struct channel *chn, struct htx *htx, unsigned long long bytes)
 {
-	unsigned long long ret;
+	unsigned long long ret = 0;
 
-	b_set_data(&chn->buf, htx->data);
-	ret = channel_forward(chn, bytes);
-	b_set_data(&chn->buf, b_size(&chn->buf));
+	if (htx->data) {
+		b_set_data(&chn->buf, htx->data);
+		ret = channel_forward(chn, bytes);
+		b_set_data(&chn->buf, b_size(&chn->buf));
+	}
 	return ret;
 }
 
 
 static inline void channel_htx_forward_forever(struct channel *chn, struct htx *htx)
 {
-	b_set_data(&chn->buf, htx->data);
-	channel_forward_forever(chn);
-	b_set_data(&chn->buf, b_size(&chn->buf));
+	c_adv(chn, htx->data - co_data(chn));
+	chn->to_forward = CHN_INFINITE_FORWARD;
 }
 /*********************************************************************/
 /* These functions are used to compute various channel content sizes */
@@ -742,17 +744,30 @@ static inline int channel_htx_recv_limit(const struct channel *chn, const struct
 	 * cause an integer underflow in the comparison since both are unsigned
 	 * while maxrewrite is signed.
 	 * The code below has been verified for being a valid check for this :
-	 *   - if (o + to_forward) overflow => return max_data_space  [ large enough ]
-	 *   - if o + to_forward >= maxrw   => return max_data_space  [ large enough ]
-	 *   - otherwise return max_data_space - (maxrw - (o + to_forward))
+	 *   - if (o + to_forward) overflow => return htx->size  [ large enough ]
+	 *   - if o + to_forward >= maxrw   => return htx->size  [ large enough ]
+	 *   - otherwise return htx->size - (maxrw - (o + to_forward))
 	 */
 	transit = co_data(chn) + chn->to_forward;
 	reserve -= transit;
 	if (transit < chn->to_forward ||                 // addition overflow
 	    transit >= (unsigned)global.tune.maxrewrite) // enough transit data
-		return htx_max_data_space(htx);
+		return htx->size;
  end:
-	return (htx_max_data_space(htx) - reserve);
+	return (htx->size - reserve);
+}
+
+/* HTX version of channel_full(). Instead of checking if INPUT data exceeds
+ * (size - reserve), this function checks if the free space for data in <htx>
+ * and the data scheduled for output are lower to the reserve. In such case, the
+ * channel is considered as full.
+ */
+static inline int channel_htx_full(const struct channel *c, const struct htx *htx,
+				   unsigned int reserve)
+{
+	if (!htx->size)
+		return 0;
+	return (htx_free_data_space(htx) + co_data(c) <= reserve);
 }
 
 /* Returns non-zero if the channel's INPUT buffer's is considered full, which
@@ -769,22 +784,22 @@ static inline int channel_full(const struct channel *c, unsigned int reserve)
 	if (b_is_null(&c->buf))
 		return 0;
 
+	if (IS_HTX_STRM(chn_strm(c)))
+		return channel_htx_full(c, htxbuf(&c->buf), reserve);
+
 	return (ci_data(c) + reserve >= c_size(c));
 }
 
-/* HTX version of channel_full(). Instead of checking if INPUT data exceeds
- * (size - reserve), this function checks if the free space for data in <htx>
- * and the data scheduled for output are lower to the reserve. In such case, the
- * channel is considered as full.
- */
-static inline int channel_htx_full(const struct channel *c, const struct htx *htx,
-				   unsigned int reserve)
+/* HTX version of channel_recv_max(). */
+static inline int channel_htx_recv_max(const struct channel *chn, const struct htx *htx)
 {
-	if (!htx->size)
-		return 0;
-	return (htx_free_data_space(htx) + co_data(c) <= reserve);
-}
+	int ret;
 
+	ret = channel_htx_recv_limit(chn, htx) - htx_used_space(htx);
+	if (ret < 0)
+		ret = 0;
+	return ret;
+}
 
 /* Returns the amount of space available at the input of the buffer, taking the
  * reserved space into account if ->to_forward indicates that an end of transfer
@@ -795,18 +810,10 @@ static inline int channel_recv_max(const struct channel *chn)
 {
 	int ret;
 
+	if (IS_HTX_STRM(chn_strm(chn)))
+		return channel_htx_recv_max(chn, htxbuf(&chn->buf));
+
 	ret = channel_recv_limit(chn) - b_data(&chn->buf);
-	if (ret < 0)
-		ret = 0;
-	return ret;
-}
-
-/* HTX version of channel_recv_max(). */
-static inline int channel_htx_recv_max(const struct channel *chn, const struct htx *htx)
-{
-	int ret;
-
-	ret = channel_htx_recv_limit(chn, htx) - htx->data;
 	if (ret < 0)
 		ret = 0;
 	return ret;
@@ -914,6 +921,28 @@ static inline void channel_slow_realign(struct channel *chn, char *swap)
 	return b_slow_realign(&chn->buf, swap, co_data(chn));
 }
 
+
+/* Forward all headers of an HTX message, starting from the SL to the EOH. This
+ * function returns the position of the block after the EOH, if
+ * found. Otherwise, it returns -1.
+ */
+static inline int32_t channel_htx_fwd_headers(struct channel *chn, struct htx *htx)
+{
+	int32_t pos;
+	size_t  data = 0;
+
+	for (pos = htx_get_first(htx); pos != -1; pos = htx_get_next(htx, pos)) {
+		struct htx_blk *blk = htx_get_blk(htx, pos);
+		data += htx_get_blksz(blk);
+		if (htx_get_blk_type(blk) == HTX_BLK_EOH) {
+			pos = htx_get_next(htx, pos);
+			break;
+		}
+	}
+	c_adv(chn, data);
+	return pos;
+}
+
 /*
  * Advance the channel buffer's read pointer by <len> bytes. This is useful
  * when data have been read directly from the buffer. It is illegal to call
@@ -929,6 +958,7 @@ static inline void co_skip(struct channel *chn, int len)
 
 	/* notify that some data was written to the SI from the buffer */
 	chn->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
+	chn_prod(chn)->flags &= ~SI_FL_RXBLK_ROOM; // si_rx_room_rdy()
 }
 
 /* HTX version of co_skip(). This function skips at most <len> bytes from the
@@ -946,6 +976,7 @@ static inline void co_htx_skip(struct channel *chn, struct htx *htx, int len)
 
 		/* notify that some data was written to the SI from the buffer */
 		chn->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
+		chn_prod(chn)->flags &= ~SI_FL_RXBLK_ROOM; // si_rx_room_rdy()
 	}
 }
 

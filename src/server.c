@@ -25,6 +25,7 @@
 
 #include <types/applet.h>
 #include <types/cli.h>
+#include <types/dict.h>
 #include <types/global.h>
 #include <types/cli.h>
 #include <types/dns.h>
@@ -46,10 +47,14 @@
 #include <proto/dns.h>
 #include <netinet/tcp.h>
 
+#include <ebsttree.h>
+
 static void srv_update_status(struct server *s);
 static void srv_update_state(struct server *srv, int version, char **params);
 static int srv_apply_lastaddr(struct server *srv, int *err_code);
 static int srv_set_fqdn(struct server *srv, const char *fqdn, int dns_locked);
+static void srv_state_parse_line(char *buf, const int version, char **params, char **srv_params);
+static int srv_state_get_version(FILE *f);
 
 /* List head of all known server keywords */
 static struct srv_kw_list srv_keywords = {
@@ -61,6 +66,16 @@ struct eb_root idle_conn_srv = EB_ROOT;
 struct task *idle_conn_task = NULL;
 struct task *idle_conn_cleanup[MAX_THREADS] = { NULL };
 struct list toremove_connections[MAX_THREADS];
+__decl_hathreads(HA_SPINLOCK_T toremove_lock[MAX_THREADS]);
+
+/* The server names dictionary */
+struct dict server_name_dict = {
+	.name = "server names",
+	.values = EB_ROOT_UNIQUE,
+};
+
+/* tree where global state_file is loaded */
+struct eb_root state_file = EB_ROOT;
 
 int srv_downtime(const struct server *s)
 {
@@ -322,6 +337,14 @@ static int srv_parse_check_send_proxy(char **args, int *cur_arg,
 	return 0;
 }
 
+/* Parse the "check-via-socks4" server keyword */
+static int srv_parse_check_via_socks4(char **args, int *cur_arg,
+                                      struct proxy *curproxy, struct server *newsrv, char **err)
+{
+	newsrv->check.via_socks4 = 1;
+	return 0;
+}
+
 /* Parse the "cookie" server keyword */
 static int srv_parse_cookie(char **args, int *cur_arg,
                             struct proxy *curproxy, struct server *newsrv, char **err)
@@ -389,7 +412,17 @@ static int srv_parse_pool_purge_delay(char **args, int *cur_arg, struct proxy *c
 		return ERR_ALERT | ERR_FATAL;
 	}
 	res = parse_time_err(arg, &time, TIME_UNIT_MS);
-	if (res) {
+	if (res == PARSE_TIME_OVER) {
+		memprintf(err, "timer overflow in argument '%s' to '%s' (maximum value is 2147483647 ms or ~24.8 days)",
+			  args[*cur_arg+1], args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+	else if (res == PARSE_TIME_UNDER) {
+		memprintf(err, "timer underflow in argument '%s' to '%s' (minimum non-null value is 1 ms)",
+			  args[*cur_arg+1], args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+	else if (res) {
 		memprintf(err, "unexpected character '%c' in argument to <%s>.\n",
 		    *res, args[*cur_arg]);
 		return ERR_ALERT | ERR_FATAL;
@@ -549,6 +582,14 @@ static int srv_parse_no_send_proxy_v2(char **args, int *cur_arg,
                                       struct proxy *curproxy, struct server *newsrv, char **err)
 {
 	return srv_disable_pp_flags(newsrv, SRV_PP_V2);
+}
+
+/* Parse the "no-tfo" server keyword */
+static int srv_parse_no_tfo(char **args, int *cur_arg,
+                            struct proxy *curproxy, struct server *newsrv, char **err)
+{
+	newsrv->flags &= ~SRV_F_FASTOPEN;
+	return 0;
 }
 
 /* Parse the "non-stick" server keyword */
@@ -886,6 +927,55 @@ static int srv_parse_track(char **args, int *cur_arg,
 	newsrv->trackit = strdup(arg);
 
 	return 0;
+}
+
+/* Parse the "socks4" server keyword */
+static int srv_parse_socks4(char **args, int *cur_arg,
+                            struct proxy *curproxy, struct server *newsrv, char **err)
+{
+	char *errmsg;
+	int port_low, port_high;
+	struct sockaddr_storage *sk;
+	struct protocol *proto;
+
+	errmsg = NULL;
+
+	if (!*args[*cur_arg + 1]) {
+		memprintf(err, "'%s' expects <addr>:<port> as argument.\n", args[*cur_arg]);
+		goto err;
+	}
+
+	/* 'sk' is statically allocated (no need to be freed). */
+	sk = str2sa_range(args[*cur_arg + 1], NULL, &port_low, &port_high, &errmsg, NULL, NULL, 1);
+	if (!sk) {
+		memprintf(err, "'%s %s' : %s\n", args[*cur_arg], args[*cur_arg + 1], errmsg);
+		goto err;
+	}
+
+	proto = protocol_by_family(sk->ss_family);
+	if (!proto || !proto->connect) {
+		ha_alert("'%s %s' : connect() not supported for this address family.\n", args[*cur_arg], args[*cur_arg + 1]);
+		goto err;
+	}
+
+	newsrv->flags |= SRV_F_SOCKS4_PROXY;
+	newsrv->socks4_addr = *sk;
+
+	if (port_low != port_high) {
+		ha_alert("'%s' does not support port offsets (found '%s').\n", args[*cur_arg], args[*cur_arg + 1]);
+		goto err;
+	}
+
+	if (!port_low) {
+		ha_alert("'%s': invalid port range %d-%d.\n", args[*cur_arg], port_low, port_high);
+		goto err;
+	}
+
+	return 0;
+
+ err:
+	free(errmsg);
+	return ERR_ALERT | ERR_FATAL;
 }
 
 
@@ -1273,6 +1363,7 @@ static struct srv_kw_list srv_kws = { "ALL", { }, {
 	{ "no-check-send-proxy", srv_parse_no_check_send_proxy, 0,  1 }, /* disable PROXY protol for health checks */
 	{ "no-send-proxy",       srv_parse_no_send_proxy,       0,  1 }, /* Disable use of PROXY V1 protocol */
 	{ "no-send-proxy-v2",    srv_parse_no_send_proxy_v2,    0,  1 }, /* Disable use of PROXY V2 protocol */
+	{ "no-tfo",              srv_parse_no_tfo,              0,  1 }, /* Disable use of TCP Fast Open */
 	{ "non-stick",           srv_parse_non_stick,           0,  1 }, /* Disable stick-table persistence */
 	{ "observe",             srv_parse_observe,             1,  1 }, /* Enables health adjusting based on observing communication with the server */
 	{ "pool-max-conn",       srv_parse_pool_max_conn,       1,  1 }, /* Set the max number of orphan idle connections, 0 means unlimited */
@@ -1284,8 +1375,10 @@ static struct srv_kw_list srv_kws = { "ALL", { }, {
 	{ "send-proxy-v2",       srv_parse_send_proxy_v2,       0,  1 }, /* Enforce use of PROXY V2 protocol */
 	{ "source",              srv_parse_source,             -1,  1 }, /* Set the source address to be used to connect to the server */
 	{ "stick",               srv_parse_stick,               0,  1 }, /* Enable stick-table persistence */
-	{ "tfo",                 srv_parse_tfo,                 0,  0 }, /* enable TCP Fast Open of server */
+	{ "tfo",                 srv_parse_tfo,                 0,  1 }, /* enable TCP Fast Open of server */
 	{ "track",               srv_parse_track,               1,  1 }, /* Set the current state of the server, tracking another one */
+	{ "socks4",              srv_parse_socks4,              1,  1 }, /* Set the socks4 proxy of the server*/
+	{ "check-via-socks4",    srv_parse_check_via_socks4,    0,  1 }, /* enable socks4 proxy for health checks */
 	{ NULL, NULL, 0 },
 }};
 
@@ -1721,6 +1814,9 @@ static void srv_settings_cpy(struct server *srv, struct server *src, int srv_tmp
 
 	if (srv_tmpl)
 		srv->srvrq = src->srvrq;
+
+	srv->check.via_socks4         = src->check.via_socks4;
+	srv->socks4_addr              = src->socks4_addr;
 }
 
 struct server *new_server(struct proxy *proxy)
@@ -1749,10 +1845,9 @@ struct server *new_server(struct proxy *proxy)
 	srv->agent.proxy = proxy;
 	srv->xprt  = srv->check.xprt = srv->agent.xprt = xprt_get(XPRT_RAW);
 
-	srv->pool_purge_delay = 1000;
-	srv->max_idle_conns = -1;
-	srv->max_reuse = -1;
-
+	/* please don't put default server settings here, they are set in
+	 * init_default_instance().
+	 */
 	return srv;
 }
 
@@ -2237,7 +2332,20 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 		while (*args[cur_arg]) {
 			if (!strcmp(args[cur_arg], "agent-inter")) {
 				const char *err = parse_time_err(args[cur_arg + 1], &val, TIME_UNIT_MS);
-				if (err) {
+
+				if (err == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s> of server %s, maximum value is 2147483647 ms (~24.8 days).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s> of server %s, minimum non-null value is 1 ms.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err) {
 					ha_alert("parsing [%s:%d] : unexpected character '%c' in 'agent-inter' argument of server %s.\n",
 					      file, linenum, *err, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -2462,7 +2570,20 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			else if (!strcmp(args[cur_arg], "inter")) {
 				const char *err = parse_time_err(args[cur_arg + 1], &val, TIME_UNIT_MS);
-				if (err) {
+
+				if (err == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s> of server %s, maximum value is 2147483647 ms (~24.8 days).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s> of server %s, minimum non-null value is 1 ms.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err) {
 					ha_alert("parsing [%s:%d] : unexpected character '%c' in 'inter' argument of server %s.\n",
 					      file, linenum, *err, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -2479,7 +2600,20 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			else if (!strcmp(args[cur_arg], "fastinter")) {
 				const char *err = parse_time_err(args[cur_arg + 1], &val, TIME_UNIT_MS);
-				if (err) {
+
+				if (err == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s> of server %s, maximum value is 2147483647 ms (~24.8 days).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s> of server %s, minimum non-null value is 1 ms.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err) {
 					ha_alert("parsing [%s:%d]: unexpected character '%c' in 'fastinter' argument of server %s.\n",
 					      file, linenum, *err, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -2496,7 +2630,20 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			else if (!strcmp(args[cur_arg], "downinter")) {
 				const char *err = parse_time_err(args[cur_arg + 1], &val, TIME_UNIT_MS);
-				if (err) {
+
+				if (err == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s> of server %s, maximum value is 2147483647 ms (~24.8 days).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s> of server %s, minimum non-null value is 1 ms.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err) {
 					ha_alert("parsing [%s:%d]: unexpected character '%c' in 'downinter' argument of server %s.\n",
 					      file, linenum, *err, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -2543,7 +2690,20 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			else if (!strcmp(args[cur_arg], "slowstart")) {
 				/* slowstart is stored in seconds */
 				const char *err = parse_time_err(args[cur_arg + 1], &val, TIME_UNIT_MS);
-				if (err) {
+
+				if (err == PARSE_TIME_OVER) {
+					ha_alert("parsing [%s:%d]: timer overflow in argument <%s> to <%s> of server %s, maximum value is 2147483647 ms (~24.8 days).\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err == PARSE_TIME_UNDER) {
+					ha_alert("parsing [%s:%d]: timer underflow in argument <%s> to <%s> of server %s, minimum non-null value is 1 ms.\n",
+						 file, linenum, args[cur_arg+1], args[cur_arg], newsrv->id);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				else if (err) {
 					ha_alert("parsing [%s:%d] : unexpected character '%c' in 'slowstart' argument of server %s.\n",
 					      file, linenum, *err, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -3220,6 +3380,130 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	}
 }
 
+
+/*
+ * read next line from file <f> and return the server state version if one found.
+ * If no version is found, then 0 is returned
+ * Note that this should be the first read on <f>
+ */
+static int srv_state_get_version(FILE *f) {
+	char buf[2];
+	int ret;
+
+	/* first character of first line of the file must contain the version of the export */
+	if (fgets(buf, 2, f) == NULL) {
+		return 0;
+	}
+
+	ret = atoi(buf);
+	if ((ret < SRV_STATE_FILE_VERSION_MIN) ||
+	    (ret > SRV_STATE_FILE_VERSION_MAX))
+		return 0;
+
+	return ret;
+}
+
+
+/*
+ * parses server state line stored in <buf> and supposedly in version <version>.
+ * Set <params> and <srv_params> accordingly.
+ * In case of error, params[0] is set to NULL.
+ */
+static void srv_state_parse_line(char *buf, const int version, char **params, char **srv_params)
+{
+	int buflen, arg, srv_arg;
+	char *cur, *end;
+
+	buflen = strlen(buf);
+	cur = buf;
+	end = cur + buflen;
+
+	/* we need at least one character */
+	if (buflen == 0) {
+		params[0] = NULL;
+		return;
+	}
+
+	/* ignore blank characters at the beginning of the line */
+	while (isspace(*cur))
+		++cur;
+
+	/* Ignore empty or commented lines */
+	if (cur == end || *cur == '#') {
+		params[0] = NULL;
+		return;
+	}
+
+	/* truncated lines */
+	if (buf[buflen - 1] != '\n') {
+		//ha_warning("server-state file '%s': truncated line\n", filepath);
+		params[0] = NULL;
+		return;
+	}
+
+	/* Removes trailing '\n' */
+	buf[buflen - 1] = '\0';
+
+	/* we're now ready to move the line into *srv_params[] */
+	params[0] = cur;
+	arg = 1;
+	srv_arg = 0;
+	while (*cur && arg < SRV_STATE_FILE_MAX_FIELDS) {
+		if (isspace(*cur)) {
+			*cur = '\0';
+			++cur;
+			while (isspace(*cur))
+				++cur;
+			switch (version) {
+				case 1:
+					/*
+					 * srv_addr:             params[4]  => srv_params[0]
+					 * srv_op_state:         params[5]  => srv_params[1]
+					 * srv_admin_state:      params[6]  => srv_params[2]
+					 * srv_uweight:          params[7]  => srv_params[3]
+					 * srv_iweight:          params[8]  => srv_params[4]
+					 * srv_last_time_change: params[9]  => srv_params[5]
+					 * srv_check_status:     params[10] => srv_params[6]
+					 * srv_check_result:     params[11] => srv_params[7]
+					 * srv_check_health:     params[12] => srv_params[8]
+					 * srv_check_state:      params[13] => srv_params[9]
+					 * srv_agent_state:      params[14] => srv_params[10]
+					 * bk_f_forced_id:       params[15] => srv_params[11]
+					 * srv_f_forced_id:      params[16] => srv_params[12]
+					 * srv_fqdn:             params[17] => srv_params[13]
+					 * srv_port:             params[18] => srv_params[14]
+					 * srvrecord:            params[19] => srv_params[15]
+					 */
+					if (arg >= 4) {
+						srv_params[srv_arg] = cur;
+						++srv_arg;
+					}
+					break;
+			}
+
+			params[arg] = cur;
+			++arg;
+		}
+		else {
+			++cur;
+		}
+	}
+
+	/* if line is incomplete line, then ignore it.
+	 * otherwise, update useful flags */
+	switch (version) {
+		case 1:
+			if (arg < SRV_STATE_FILE_NB_FIELDS_VERSION_1) {
+				params[0] = NULL;
+				return;
+			}
+			break;
+	}
+
+	return;
+}
+
+
 /* This function parses all the proxies and only take care of the backends (since we're looking for server)
  * For each proxy, it does the following:
  *  - opens its server state file (either one or local one)
@@ -3236,12 +3520,10 @@ static void srv_update_state(struct server *srv, int version, char **params)
  */
 void apply_server_state(void)
 {
-	char *cur, *end;
 	char mybuf[SRV_STATE_LINE_MAXLEN];
-	int mybuflen;
 	char *params[SRV_STATE_FILE_MAX_FIELDS] = {0};
 	char *srv_params[SRV_STATE_FILE_MAX_FIELDS] = {0};
-	int arg, srv_arg, version, diff;
+	int version, global_file_version;
 	FILE *f;
 	char *filepath;
 	char globalfilepath[MAXPATHLEN + 1];
@@ -3249,7 +3531,13 @@ void apply_server_state(void)
 	int len, fileopenerr, globalfilepathlen, localfilepathlen;
 	struct proxy *curproxy, *bk;
 	struct server *srv;
+	char *line;
+	char *bkname, *srvname;
+	struct state_line *st;
+	struct ebmb_node *node, *next_node;
 
+
+	global_file_version = 0;
 	globalfilepathlen = 0;
 	/* create the globalfilepath variable */
 	if (global.server_state_file) {
@@ -3297,7 +3585,57 @@ void apply_server_state(void)
 	if (globalfilepathlen == 0)
 		globalfilepath[0] = '\0';
 
-	/* read servers state from local file */
+	/* Load global server state in a tree */
+	if (globalfilepathlen > 0) {
+		errno = 0;
+		f = fopen(globalfilepath, "r");
+		if (errno)
+			ha_warning("Can't open global server state file '%s': %s\n", globalfilepath, strerror(errno));
+
+		global_file_version = srv_state_get_version(f);
+		if (global_file_version == 0)
+			goto out_load_server_state_in_tree;
+
+		while (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f)) {
+			line = NULL;
+
+			line = strdup(mybuf);
+			if (line == NULL)
+				continue;
+
+			srv_state_parse_line(mybuf, global_file_version, params, srv_params);
+			if (params[0] == NULL)
+				continue;
+
+			/* bkname */
+			bkname = params[1];
+			/* srvname */
+			srvname = params[3];
+
+			/* key */
+			chunk_printf(&trash, "%s %s", bkname, srvname);
+
+			/* store line in tree */
+			st = calloc(1, sizeof(*st) + trash.size);
+			if (st == NULL) {
+				goto nextline;
+			}
+			memcpy(st->name_name.key, trash.area, trash.size);
+			ebst_insert(&state_file, &st->name_name);
+
+			/* save line */
+			st->line = line;
+
+			continue;
+
+ nextline:
+			/* free up memory in case of error during the processing of the line */
+			free(line);
+		}
+	}
+ out_load_server_state_in_tree:
+
+	/* parse all proxies and load states form tree (global file) or from local file */
 	for (curproxy = proxies_list; curproxy != NULL; curproxy = curproxy->next) {
 		/* servers are only in backends */
 		if (!(curproxy->cap & PR_CAP_BE))
@@ -3372,169 +3710,125 @@ void apply_server_state(void)
 				continue;
 		}
 
-		/* preload global state file */
-		errno = 0;
-		f = fopen(filepath, "r");
-		if (errno && fileopenerr)
-			ha_warning("Can't open server state file '%s': %s\n", filepath, strerror(errno));
-		if (!f)
-			continue;
+		/* when global file is used, we get data from the tree
+		 * Note that in such case we don't check backend name neither uuid.
+		 * Backend name can't be wrong since it's used as a key to retrieve the server state
+		 * line from the tree.
+		 */
+		if (curproxy->load_server_state_from_file == PR_SRV_STATE_FILE_GLOBAL) {
+			struct server *srv = curproxy->srv;
+			while (srv) {
+				struct ebmb_node *node;
+				struct state_line *st;
 
-		mybuf[0] = '\0';
-		mybuflen = 0;
-		version = 0;
+				chunk_printf(&trash, "%s %s", curproxy->id, srv->id);
+				node = ebst_lookup(&state_file, trash.area);
+				if (!node)
+					goto next;
 
-		/* first character of first line of the file must contain the version of the export */
-		if (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f) == NULL) {
-			ha_warning("Can't read first line of the server state file '%s'\n", filepath);
-			goto fileclose;
+				st = container_of(node, struct state_line, name_name);
+				memcpy(mybuf, st->line, strlen(st->line));
+				mybuf[strlen(st->line)] = 0;
+
+				srv_state_parse_line(mybuf, global_file_version, params, srv_params);
+				if (params[0] == NULL)
+					goto next;
+
+				srv_update_state(srv, global_file_version, srv_params);
+
+ next:
+				srv = srv->next;
+			}
+
+			continue; /* next proxy in list */
 		}
-
-		cur = mybuf;
-		version = atoi(cur);
-		if ((version < SRV_STATE_FILE_VERSION_MIN) ||
-		    (version > SRV_STATE_FILE_VERSION_MAX))
-			goto fileclose;
-
-		while (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f)) {
-			int bk_f_forced_id = 0;
-			int check_id = 0;
-			int check_name = 0;
-
-			mybuflen = strlen(mybuf);
-			cur = mybuf;
-			end = cur + mybuflen;
-
-			bk = NULL;
-			srv = NULL;
-
-			/* we need at least one character */
-			if (mybuflen == 0)
+		else {
+			/* load 'local' state file */
+			errno = 0;
+			f = fopen(filepath, "r");
+			if (errno && fileopenerr)
+				ha_warning("Can't open server state file '%s': %s\n", filepath, strerror(errno));
+			if (!f)
 				continue;
 
-			/* ignore blank characters at the beginning of the line */
-			while (isspace(*cur))
-				++cur;
+			mybuf[0] = '\0';
 
-			/* Ignore empty or commented lines */
-			if (cur == end || *cur == '#')
-				continue;
-
-			/* truncated lines */
-			if (mybuf[mybuflen - 1] != '\n') {
-				ha_warning("server-state file '%s': truncated line\n", filepath);
-				continue;
+			/* first character of first line of the file must contain the version of the export */
+			version = srv_state_get_version(f);
+			if (version == 0) {
+				ha_warning("Can't get version of the server state file '%s'\n", filepath);
+				goto fileclose;
 			}
 
-			/* Removes trailing '\n' */
-			mybuf[mybuflen - 1] = '\0';
+			while (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f)) {
+				int bk_f_forced_id = 0;
+				int check_id = 0;
+				int check_name = 0;
 
-			/* we're now ready to move the line into *srv_params[] */
-			params[0] = cur;
-			arg = 1;
-			srv_arg = 0;
-			while (*cur && arg < SRV_STATE_FILE_MAX_FIELDS) {
-				if (isspace(*cur)) {
-					*cur = '\0';
-					++cur;
-					while (isspace(*cur))
-						++cur;
-					switch (version) {
-						case 1:
-							/*
-							 * srv_addr:             params[4]  => srv_params[0]
-							 * srv_op_state:         params[5]  => srv_params[1]
-							 * srv_admin_state:      params[6]  => srv_params[2]
-							 * srv_uweight:          params[7]  => srv_params[3]
-							 * srv_iweight:          params[8]  => srv_params[4]
-							 * srv_last_time_change: params[9]  => srv_params[5]
-							 * srv_check_status:     params[10] => srv_params[6]
-							 * srv_check_result:     params[11] => srv_params[7]
-							 * srv_check_health:     params[12] => srv_params[8]
-							 * srv_check_state:      params[13] => srv_params[9]
-							 * srv_agent_state:      params[14] => srv_params[10]
-							 * bk_f_forced_id:       params[15] => srv_params[11]
-							 * srv_f_forced_id:      params[16] => srv_params[12]
-							 * srv_fqdn:             params[17] => srv_params[13]
-							 * srv_port:             params[18] => srv_params[14]
-							 * srvrecord:            params[19] => srv_params[15]
-							 */
-							if (arg >= 4) {
-								srv_params[srv_arg] = cur;
-								++srv_arg;
-							}
-							break;
-					}
+				srv_state_parse_line(mybuf, version, params, srv_params);
 
-					params[arg] = cur;
-					++arg;
-				}
-				else {
-					++cur;
-				}
-			}
-
-			/* if line is incomplete line, then ignore it.
-			 * otherwise, update useful flags */
-			switch (version) {
-				case 1:
-					if (arg < SRV_STATE_FILE_NB_FIELDS_VERSION_1)
-						continue;
-					bk_f_forced_id = (atoi(params[15]) & PR_O_FORCED_ID);
-					check_id = (atoi(params[0]) == curproxy->uuid);
-					check_name = (strcmp(curproxy->id, params[1]) == 0);
-					break;
-			}
-
-			diff = 0;
-			bk = curproxy;
-
-			/* if backend can't be found, let's continue */
-			if (!check_id && !check_name)
-				continue;
-			else if (!check_id && check_name) {
-				ha_warning("backend ID mismatch: from server state file: '%s', from running config '%d'\n", params[0], bk->uuid);
-				send_log(bk, LOG_NOTICE, "backend ID mismatch: from server state file: '%s', from running config '%d'\n", params[0], bk->uuid);
-			}
-			else if (check_id && !check_name) {
-				ha_warning("backend name mismatch: from server state file: '%s', from running config '%s'\n", params[1], bk->id);
-				send_log(bk, LOG_NOTICE, "backend name mismatch: from server state file: '%s', from running config '%s'\n", params[1], bk->id);
-				/* if name doesn't match, we still want to update curproxy if the backend id
-				 * was forced in previous the previous configuration */
-				if (!bk_f_forced_id)
+				if (params[0] == NULL) {
 					continue;
-			}
+				}
 
-			/* look for the server by its id: param[2] */
-			/* else look for the server by its name: param[3] */
-			diff = 0;
-			srv = server_find_best_match(bk, params[3], atoi(params[2]), &diff);
+				/* if line is incomplete line, then ignore it.
+				 * otherwise, update useful flags */
+				switch (version) {
+					case 1:
+						bk_f_forced_id = (atoi(params[15]) & PR_O_FORCED_ID);
+						check_id = (atoi(params[0]) == curproxy->uuid);
+						check_name = (strcmp(curproxy->id, params[1]) == 0);
+						break;
+				}
 
-			if (!srv) {
-				/* if no server found, then warning and continue with next line */
-				ha_warning("can't find server '%s' with id '%s' in backend with id '%s' or name '%s'\n",
-					   params[3], params[2], params[0], params[1]);
-				send_log(bk, LOG_NOTICE, "can't find server '%s' with id '%s' in backend with id '%s' or name '%s'\n",
-					 params[3], params[2], params[0], params[1]);
-				continue;
-			}
-			else if (diff & PR_FBM_MISMATCH_ID) {
-				ha_warning("In backend '%s' (id: '%d'): server ID mismatch: from server state file: '%s', from running config %d\n", bk->id, bk->uuid, params[2], srv->puid);
-				send_log(bk, LOG_NOTICE, "In backend '%s' (id: %d): server ID mismatch: from server state file: '%s', from running config %d\n", bk->id, bk->uuid, params[2], srv->puid);
-				continue;
-			}
-			else if (diff & PR_FBM_MISMATCH_NAME) {
-				ha_warning("In backend '%s' (id: %d): server name mismatch: from server state file: '%s', from running config '%s'\n", bk->id, bk->uuid, params[3], srv->id);
-				send_log(bk, LOG_NOTICE, "In backend '%s' (id: %d): server name mismatch: from server state file: '%s', from running config '%s'\n", bk->id, bk->uuid, params[3], srv->id);
-				continue;
-			}
+				bk = curproxy;
 
-			/* now we can proceed with server's state update */
-			srv_update_state(srv, version, srv_params);
+				/* if backend can't be found, let's continue */
+				if (!check_id && !check_name)
+					continue;
+				else if (!check_id && check_name) {
+					ha_warning("backend ID mismatch: from server state file: '%s', from running config '%d'\n", params[0], bk->uuid);
+					send_log(bk, LOG_NOTICE, "backend ID mismatch: from server state file: '%s', from running config '%d'\n", params[0], bk->uuid);
+				}
+				else if (check_id && !check_name) {
+					ha_warning("backend name mismatch: from server state file: '%s', from running config '%s'\n", params[1], bk->id);
+					send_log(bk, LOG_NOTICE, "backend name mismatch: from server state file: '%s', from running config '%s'\n", params[1], bk->id);
+					/* if name doesn't match, we still want to update curproxy if the backend id
+					 * was forced in previous the previous configuration */
+					if (!bk_f_forced_id)
+						continue;
+				}
+
+				/* look for the server by its name: param[3] */
+				srv = server_find_best_match(bk, params[3], 0, NULL);
+
+				if (!srv) {
+					/* if no server found, then warning and continue with next line */
+					ha_warning("can't find server '%s' in backend '%s'\n",
+						   params[3], params[1]);
+					send_log(bk, LOG_NOTICE, "can't find server '%s' in backend '%s'\n",
+						 params[3], params[1]);
+					continue;
+				}
+
+				/* now we can proceed with server's state update */
+				srv_update_state(srv, version, srv_params);
+			}
 		}
 fileclose:
 		fclose(f);
 	}
+
+	/* now free memory allocated for the tree */
+	for (node = ebmb_first(&state_file), next_node = node ? ebmb_next(node) : NULL;
+             node;
+             node = next_node, next_node = node ? ebmb_next(node) : NULL) {
+		st = container_of(node, struct state_line, name_name);
+		ebmb_delete(&st->name_name);
+		free(st->line);
+		free(st);
+	}
+
 }
 
 /*
@@ -5367,6 +5661,7 @@ struct task *srv_cleanup_idle_connections(struct task *task, void *context, unsi
 			int j;
 			int did_remove = 0;
 
+			HA_SPIN_LOCK(OTHER_LOCK, &toremove_lock[i]);
 			for (j = 0; j < max_conn; j++) {
 				struct connection *conn = LIST_POP_LOCKED(&srv->idle_orphan_conns[i], struct connection *, list);
 				if (!conn)
@@ -5374,6 +5669,7 @@ struct task *srv_cleanup_idle_connections(struct task *task, void *context, unsi
 				did_remove = 1;
 				LIST_ADDQ_LOCKED(&toremove_connections[i], &conn->list);
 			}
+			HA_SPIN_UNLOCK(OTHER_LOCK, &toremove_lock[i]);
 			if (did_remove && max_conn < srv->curr_idle_thr[i])
 				srv_is_empty = 0;
 			if (did_remove)
