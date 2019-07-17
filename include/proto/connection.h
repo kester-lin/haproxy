@@ -611,6 +611,13 @@ static inline void conn_init(struct connection *conn)
 	conn->send_wait = NULL;
 	conn->recv_wait = NULL;
 	conn->idle_time = 0;
+	conn->conn_gipl = NULL;
+	conn->recv_time.tv_sec = 0;
+	conn->recv_time.tv_usec = 0;
+	conn->pending_recv = 0;
+	conn->pipe_buf_tail = NULL;
+	conn->sent_pipe = NULL;	
+	conn->sent_pipe_tail = NULL;
 }
 
 /* sets <owner> as the connection's owner */

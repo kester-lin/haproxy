@@ -1918,6 +1918,7 @@ redo:
 		}
 	}
 	/* not for IPC */
+	if (!last_error) {
 	if (unlikely(si_b->flags & SI_FL_ERR)) {
 		if (si_b->state == SI_ST_EST || si_b->state == SI_ST_DIS) {
 			si_shutr(si_b);
@@ -1939,6 +1940,9 @@ redo:
 		}
 		/* note: maybe we should process connection errors here ? */
 	} 
+	}
+	last_error = 0;
+
 
 	if (si_b->state == SI_ST_CON) {
 		/* we were trying to establish a connection on the server side,
@@ -1962,7 +1966,7 @@ redo:
 
  resync_stream_interface:
 	/* Check for connection closure */
-
+#if 0
 	DPRINTF(stderr,
 		"[%u] %s:%d: task=%p s=%p, sfl=0x%08x, rq=%p, rp=%p, exp(r,w)=%u,%u rqf=%08x rpf=%08x rqh=%lu rqt=%lu rph=%lu rpt=%lu cs=%d ss=%d, cet=0x%x set=0x%x retr=%d\n",
 		now_ms, __FUNCTION__, __LINE__,
@@ -1974,7 +1978,7 @@ redo:
 		ci_data(req), co_data(req), ci_data(res), co_data(res), si_f->state, si_b->state,
 		si_f->err_type, si_b->err_type,
 		si_b->conn_retries);
-
+#endif
 	/* nothing special to be done on client side */
 	if (unlikely(si_f->state == SI_ST_DIS))
 		si_f->state = SI_ST_CLO;
@@ -2685,13 +2689,13 @@ redo:
 
 		if (si_b->exp)
 			t->expire = tick_first(t->expire, si_b->exp);
-
+#if 0
 		DPRINTF(stderr,
 			"[%u] queuing with exp=%u req->rex=%u req->wex=%u req->ana_exp=%u"
 			" rep->rex=%u rep->wex=%u, si[0].exp=%u, si[1].exp=%u, cs=%d, ss=%d\n",
 			now_ms, t->expire, req->rex, req->wex, req->analyse_exp,
 			res->rex, res->wex, si_f->exp, si_b->exp, si_f->state, si_b->state);
-
+#endif
 		s->pending_events &= ~(TASK_WOKEN_TIMER | TASK_WOKEN_RES);
 		stream_release_buffers(s);
 		return t; /* nothing more to do */

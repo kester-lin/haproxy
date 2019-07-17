@@ -12,6 +12,8 @@
 #define ENABLE_EXTEND_CHECK	        0
 #define ENABLE_NO_BUFFER_MODE       0
 #define ENABLE_TIME_MEASURE         0
+#define ENABLE_TIME_MEASURE_EPOLL   0
+#define ENABLE_LIST_ADD_TAIL        1
 #endif
 
 struct gctl_ipc

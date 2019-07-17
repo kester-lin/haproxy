@@ -34,13 +34,14 @@
 #include <types/task.h>
 #include <types/vars.h>
 
-#if 0
+#if 1
 #define ENABLE_EPOLL
 #define USE_ACCEPT4
 #define TPROXY
 #define CONFIG_HAP_LINUX_SPLICE
 #define CONFIG_HAP_LINUX_TPROXY
 #define USE_SYSCALL_FUTEX
+#define USE_LINUX_SPLICE 1
 #endif
 
 #ifndef UNIX_MAX_PATH

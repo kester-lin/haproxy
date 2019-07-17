@@ -4,11 +4,26 @@
 #include <types/cuju_ft_def.h>
 #include <proto/pipe.h>
 
+extern int pb_event;
+
+
 #if ENABLE_CUJU_FT
 extern u_int16_t fd_list_migration;
 extern u_int16_t fd_pipe_cnt;
 extern u_int16_t empty_pipe;
+extern u_int16_t empty_pbuffer;
+extern u_int16_t last_error;
 extern u_int32_t guest_ip_db;
+
+extern int trace_cnt;
+extern int flush_cnt;
+
+#if ENABLE_TIME_MEASURE_EPOLL	
+extern struct timeval time_tepoll;
+extern struct timeval time_tepoll_end;
+extern unsigned long tepoll_time;	
+#endif
+#if ENABLE_TIME_MEASURE	
 
 
 extern struct timeval time_poll;
@@ -18,10 +33,6 @@ extern struct timeval time_send;
 extern struct timeval time_send_end;
 
 
-
-extern int trace_cnt;
-extern int flush_cnt;
-
 extern struct timeval time_release;
 extern struct timeval time_release_end;
 extern unsigned long release_time;	
@@ -29,6 +40,7 @@ extern unsigned long release_time;
 extern struct timeval time_loop;
 extern struct timeval time_loop_end;
 extern unsigned long loop_time;	
+#endif
 
 #if ENABLE_CUJU_IPC
 
@@ -38,6 +50,10 @@ extern unsigned long loop_time;
 #define IPC_TIME 3
 #define IPC_SIGNAL 4
 #define IPC_CUJU 5
+
+
+#define COPY_PIPE_COPY 0
+#define COPY_PIPE_CLEAN 1
 
 /* cuju_ft_mode */
 enum CUJU_FT_MODE

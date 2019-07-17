@@ -393,6 +393,17 @@ static int mux_pt_snd_pipe(struct conn_stream *cs, struct pipe *pipe)
 #endif
 
 	ret = cs->conn->xprt->snd_pipe(cs->conn, cs->conn->xprt_ctx, pipe);
+
+#if ENABLE_TIME_MEASURE_EPOLL
+	gettimeofday(&time_tepoll_end, NULL);
+
+	if (!pb_event) {
+		tepoll_time = tv_to_us(&time_tepoll_end) - tv_to_us(&time_tepoll);
+
+		printf("Total Time(epoll):  %lu\n", tepoll_time);
+	}
+#endif
+
 #if ENABLE_TIME_MEASURE	
 	gettimeofday(&time_send_end, NULL);
 

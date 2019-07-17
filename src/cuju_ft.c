@@ -11,10 +11,13 @@
 #include <proto/connection.h>
 #include <proto/proto_tcp.h>
 #include <proto/stream_interface.h>
+#include <sys/sendfile.h>
+
 
 #ifdef DEBUG_FULL
 #include <assert.h>
 #endif
+
 
 #if ENABLE_CUJU_FT
 #define FAKE_CUJU_ID 0
@@ -36,7 +39,21 @@ struct guest_ip_list
 static struct guest_ip_list gip_list = {
 	.list = LIST_HEAD_INIT(gip_list.list)
 };
+#endif
 
+#define DEBUG_CUJU_IPC 0
+#if DEBUG_CUJU_IPC
+#define CJIRPRINTF(x...) printf(x)
+#else
+#define CJIRPRINTF(x...)
+#endif
+
+
+#define DEBUG_CUJU_IPC_ID 0
+#if DEBUG_CUJU_IPC_ID
+#define CJIDRPRINTF(x...) printf(x)
+#else
+#define CJIDRPRINTF(x...)
 #endif
 
 #define MAC_LENGTH 4
@@ -53,9 +70,18 @@ static struct ft_fd_list ftfd_list = {
 
 u_int16_t fd_pipe_cnt = 0;
 u_int16_t empty_pipe = 0;
+u_int16_t empty_pbuffer = 0;
+u_int16_t last_error = 0;
 
 struct gctl_ipc gctl_ipc;
-extern int pb_event;
+
+int pb_event = 0;
+
+#if ENABLE_TIME_MEASURE_EPOLL
+struct timeval time_tepoll;
+struct timeval time_tepoll_end;
+unsigned long tepoll_time;	
+#endif
 
 #if ENABLE_TIME_MEASURE
 struct timeval time_poll;
@@ -136,12 +162,12 @@ static inline __u64 tv_to_us(const struct timeval* tv)
 }
 #endif
 
-
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 {
 	int ret = 0;
 	static unsigned long retry_cnt = 0;
 
+#if 1
 	if (!source->data) {
 #ifdef DEBUG_FULL
 		printf("assert in %s source data is zero\n", __func__);
@@ -159,9 +185,10 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 		return 0;
 #endif
 	}
+#endif
 
 	while (1) {
-		if (clean) {
+		if (clean == COPY_PIPE_CLEAN) {
 			ret = splice(source->cons, NULL, dest->prod, NULL,
 						 source->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 		}
@@ -246,7 +273,8 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 					
 				ft_clean_pipe(pipe_trace);				
 				put_pipe(pipe_trace);
-				(*pipe_cnt)--;	
+				(*pipe_cnt)-=2;	
+				printf("release pipe 2 total:%d\n", (*pipe_cnt));
 
 			//}
 			
@@ -320,8 +348,11 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 #if ENABLE_TIME_MEASURE				
 				flush_cnt++;
 #endif				
-				(*pipe_cnt)--;
-				(*total_pipe_cnt)--;
+				(*pipe_cnt)-=2;
+				(*total_pipe_cnt)-=2;
+
+				printf("release pipe 2 total:%d\n", (*total_pipe_cnt));
+
 				pipe_trace = pipe_prev->pipe_nxt;
 
 #if ENABLE_TIME_MEASURE
@@ -385,17 +416,25 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
 				
 				//printf("pipe_trace->transfered: %p %p\n", pipe_trace->pipe_dup, pipe_trace);
+				//printf("pipe_trace->transfered: %p\n", pipe_trace);
 
-				ft_clean_pipe(pipe_trace->pipe_dup);
-				put_pipe(pipe_trace->pipe_dup);
+				//ft_clean_pipe(pipe_trace->pipe_dup);
+				//put_pipe(pipe_trace->pipe_dup);
 				
 				ft_clean_pipe(pipe_trace);				
 				put_pipe(pipe_trace);
 				
+				printf("release pipe 1 total:%d\n", (*total_pipe_cnt));
+				
 				transfer_cnt++;
 				(*pipe_cnt)--;
 				(*total_pipe_cnt)--;
+
 				pipe_trace = pipe_prev->pipe_nxt;
+			}
+			else {
+				printf("Transfered End\n");
+				break;
 			}
 		}
 	}
@@ -410,6 +449,8 @@ void ft_clean_pipe(struct pipe *pipe)
 	pipe->pipe_dup = NULL;
 	pipe->flush_id = 0;
 	pipe->flush_idx = 0;
+	pipe->epoch_id = 0;
+	pipe->epoch_idx = 0;	
 	pipe->in_fd = 0;
 	pipe->out_fd = 0;
 	pipe->trans_suspend = 0;
@@ -599,6 +640,8 @@ int cuju_process(struct conn_stream *cs)
 		return -1;
 	}
 
+	//printf("%s data:%zu\n", __func__, ic->buf.data);
+
 	ipc_ptr = (struct proto_ipc *)ic->buf.area;
 	
 	if((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) && 
@@ -615,7 +658,6 @@ int cuju_process(struct conn_stream *cs)
 			return -1;
 		}
 	}
-
 
 	//if ((ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) || (ipc_ptr->cuju_ft_arp)) {
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
@@ -647,16 +689,19 @@ int cuju_process(struct conn_stream *cs)
 		if (!guest_info)
 			assert(1);
 	}
-
 	
 	/* Set GCTL */
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_RUN) {
 		guest_info->gctl_ipc.epoch_id = ipc_ptr->epoch_id;
+		CJIDRPRINTF("Epoch ID:%u\n", ipc_ptr->epoch_id);
 	}
 
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
 		guest_info->gctl_ipc.flush_id =	ipc_ptr->epoch_id;
+		CJIDRPRINTF("Flush ID:%u\n", ipc_ptr->epoch_id);
 	}
+
+	//printf("cuju_ft_mode is %d\n", ipc_ptr->cuju_ft_mode);
 
 	/* clear */
 	ic->buf.data = 0;
@@ -849,14 +894,17 @@ u_int16_t get_ft_fd(void)
 {
 	u_int16_t tmp_fd = 0;
 	struct ft_fd_list* ftfdl;
+	struct ft_fd_list* def ;
 
-	list_for_each_entry(ftfdl, &ftfd_list.list, list) {
-		tmp_fd = ftfdl->ft_fd;
-		/* release */
-
-		LIST_DEL(&ftfdl->list);
-		free(ftfdl);
-		return tmp_fd;
+	list_for_each_entry_safe(ftfdl, def, &ftfd_list.list, list) {
+		if (ftfdl->ft_fd != 0) {
+			tmp_fd = ftfdl->ft_fd;
+			/* release */
+			ftfdl->ft_fd = 0;
+			LIST_DEL(&ftfdl->list);
+			free(ftfdl);
+			return tmp_fd;
+		}
 	}
 
 	return 0;

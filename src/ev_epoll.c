@@ -115,7 +115,6 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	int old_fd;
 
 #if ENABLE_EPOLL_MIGRATION
-	int pb_event = 0;
 	static unsigned long pb_cnt = 0;
 #endif
 
@@ -175,13 +174,17 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 		tv_update_date(timeout, status);
 
 		if (status) {
+					
 			pb_event = 0;
+#if ENABLE_TIME_MEASURE_EPOLL					
+			gettimeofday(&time_tepoll, NULL);
+#endif
 			break;
 		}
 #if ENABLE_EPOLL_MIGRATION
 		if (pb_event) {
 			pb_cnt++;
-			//printf("EPOLL Event Get\n");
+			//printf("PB EPOLL Event Get\n");
 			break;
 		}
 #endif
@@ -208,6 +211,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			activity[tid].poll_dead++;
 			continue;
 		}
+		//printf("EPOLL Event (%d) Get FD:%d\n", status, fd);	
 
 		if (!(fdtab[fd].thread_mask & tid_bit)) {
 			/* FD has been migrated */

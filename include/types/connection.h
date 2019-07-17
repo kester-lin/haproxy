@@ -454,11 +454,19 @@ struct connection {
 	unsigned int idle_time;                 /* Time the connection was added to the idle list, or 0 if not in the idle list */
 #if ENABLE_CUJU_FT
 	unsigned int cujuipc_idx;
-	struct gctl_ipc gctl_ipc;
+	struct guest_ip_list* conn_gipl;
 	uint8_t direction;  /* 1 means that dest. is client application, 2 means that dest. is Guest. */
 	uint16_t backend_pipecnt;
 	uint16_t frontend_pipecnt;
-#endif	
+	struct timeval recv_time;
+	uint8_t pending_recv;
+	struct pipe* pipe_buf_tail;
+
+	struct pipe* sent_pipe;
+	struct pipe* sent_pipe_tail;
+	uint32_t last_flush_id; 
+
+#endif
 };
 enum dir_mode {
 	DIR_NO_CHECK,

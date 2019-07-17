@@ -41,6 +41,13 @@
 #include <types/global.h>
 #include <types/pipe.h>
 
+#define DEBUG_STREAM_INTERFACE 0
+#if DEBUG_STREAM_INTERFACE
+#define SIPRINTF(x...) printf(x)
+#else
+#define SIPRINTF(x...)
+#endif
+
 /* functions used by default on a detached stream-interface */
 static void stream_int_shutr(struct stream_interface *si);
 static void stream_int_shutw(struct stream_interface *si);
@@ -652,18 +659,22 @@ int si_cs_send(struct conn_stream *cs)
 
 	if (oc->pipe && conn->xprt->snd_pipe && conn->mux->snd_pipe) {
 		ret = conn->mux->snd_pipe(cs, oc->pipe);
+		//if ((ret > 0) || empty_pipe || empty_pbuffer) {
 		if ((ret > 0) || empty_pipe) {
 			oc->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
 			did_send = 1;
+			//empty_pbuffer = 0;
 			//show_ft_time();
 		}
 
 #if ENABLE_CUJU_FT
+#if 1 /* FIXED */
 		if (!oc->pipe->data && !oc->pipe->pipe_nxt) {
 			ft_clean_pipe(oc->pipe);				
 			put_pipe(oc->pipe);
 			oc->pipe = NULL;
 		}
+#endif
 #else
 		if (!oc->pipe->data) {
 			put_pipe(oc->pipe);
@@ -771,11 +782,12 @@ int si_cs_send(struct conn_stream *cs)
 	if(!fdtab[conn->handle.fd].enable_migration)
 		if (!channel_is_empty(oc))
 			conn->mux->subscribe(cs, SUB_RETRY_SEND, &si->wait_event);
-
-#else
+#endif
+	
+	/* UPSTREAM */
 	if (!channel_is_empty(oc))
 		conn->mux->subscribe(cs, SUB_RETRY_SEND, &si->wait_event);
-#endif
+
 
 	return did_send;
 }
@@ -790,18 +802,38 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 	struct stream_interface *si = ctx;
 	struct conn_stream *cs = objt_cs(si->end);
 	int ret = 0;
+	int value_1 = 0;
 
 	if (!cs)
 		return NULL;
 
-	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si)))
+	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si))) {
+		SIPRINTF("%s enter si_cs_send\n", __func__);
 		ret = si_cs_send(cs);
-	if (!(si->wait_event.events & SUB_RETRY_RECV))
+	}
+
+#if 0
+	if (!(si->wait_event.events & SUB_RETRY_RECV)) {
+		SIPRINTF("%s enter si_cs_recv\n", __func__);
 		ret |= si_cs_recv(cs);
+	}	
+#else
+	value_1 = (si->wait_event.events & SUB_RETRY_RECV);
+	//if (cs->conn->direction != DIR_DEST_CLIENT)
+	//{
+		if (!value_1) {	
+			SIPRINTF("%s enter si_cs_recv\n", __func__);
+			ret |= si_cs_recv(cs);
+		}	
+	//}
+#endif 
+
 #if ENABLE_CUJU_FT
 	if (!(cs->conn->cujuipc_idx == 1)) {
-		if (ret != 0)
+		if (ret != 0) {
+			SIPRINTF("%s enter si_cs_process\n", __func__);
 			si_cs_process(cs);
+		}
 	}
 	else {
 		cuju_process(cs);
@@ -1114,8 +1146,10 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 	    !(si->flags & SI_FL_WAIT_DATA))       /* not waiting for data */
 		return;
 
-	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si)))
+	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si))) {
+		SIPRINTF("%s enter si_cs_send\n", __func__);
 		si_cs_send(cs);  /* default run */
+	}
 
 	if (cs->flags & (CS_FL_ERROR|CS_FL_ERR_PENDING) || cs->conn->flags & CO_FL_ERROR) {
 		/* Write error on the file descriptor */
@@ -1200,20 +1234,25 @@ int si_cs_recv(struct conn_stream *cs)
 	int read_poll = MAX_READ_POLL_LOOPS;
 	int flags = 0;
 
+	SIPRINTF("%s: Enter \n", __func__);
+
 	/* If another call to si_cs_recv() failed, and we subscribed to
 	 * recv events already, give up now.
 	 */
 	if (si->wait_event.events & SUB_RETRY_RECV)
 		return 0;
 
+	SIPRINTF("%s: CF_SHUTR \n", __func__);
 	/* maybe we were called immediately after an asynchronous shutr */
 	if (ic->flags & CF_SHUTR)
 		return 1;
 
+	SIPRINTF("%s: CS_FL_EOS \n", __func__);
 	/* stop here if we reached the end of data */
 	if (cs->flags & CS_FL_EOS)
 		goto out_shutdown_r;
 
+	SIPRINTF("%s: Check CS_FL_RCV_MORE \n", __func__);
 	/* stop immediately on errors. Note that we DON'T want to stop on
 	 * POLL_ERR, as the poller might report a write error while there
 	 * are still data available in the recv buffer. This typically
@@ -1230,6 +1269,7 @@ int si_cs_recv(struct conn_stream *cs)
 	/* prepare to detect if the mux needs more room */
 	cs->flags &= ~CS_FL_WANT_ROOM;
 
+	SIPRINTF("%s: (CF_STREAMER | CF_STREAMER_FAST)\n", __func__);
 	if ((ic->flags & (CF_STREAMER | CF_STREAMER_FAST)) && !co_data(ic) &&
 	    global.tune.idle_timer &&
 	    (unsigned short)(now_ms - ic->last_read) >= global.tune.idle_timer) {
@@ -1242,12 +1282,14 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->flags &= ~(CF_STREAMER | CF_STREAMER_FAST);
 	}
 
+	SIPRINTF("%s: Check RCV_PIPE\n", __func__);
 	/* First, let's see if we may splice data across the channel without
 	 * using a buffer.
 	 */
 	if (conn->xprt->rcv_pipe && conn->mux->rcv_pipe &&
 	    (ic->pipe || ic->to_forward >= MIN_SPLICE_FORWARD) &&
 	    ic->flags & CF_KERN_SPLICING) {
+		SIPRINTF("%s: Enter Check RCV_PIPE\n", __func__);	
 		if (c_data(ic)) {
 			/* We're embarrassed, there are already data pending in
 			 * the buffer and we don't want to have them at two
@@ -1255,54 +1297,74 @@ int si_cs_recv(struct conn_stream *cs)
 			 * place and ask the consumer to hurry.
 			 */
 			flags |= CO_RFL_BUF_FLUSH;
+			SIPRINTF("%s: abort_splice 1\n", __func__);	
 			goto abort_splice;
 		}
-
+		SIPRINTF("%s: ic->pipe == NULL\n", __func__);
+		
 		if (unlikely(ic->pipe == NULL)) {
 			if (pipes_used >= global.maxpipes || !(ic->pipe = get_pipe())) {
 				ic->flags &= ~CF_KERN_SPLICING;
+				SIPRINTF("%s: abort_splice 2\n", __func__);
 				goto abort_splice;
 			}
 		}
-
+		
+		SIPRINTF("%s: conn->mux->rcv_pipe\n", __func__);
+		
 		ret = conn->mux->rcv_pipe(cs, ic->pipe, ic->to_forward);
 		if (ret < 0) {
 			/* splice not supported on this end, let's disable it */
 			ic->flags &= ~CF_KERN_SPLICING;
+			SIPRINTF("%s: abort_splice 3\n", __func__);
 			goto abort_splice;
 		}
+/*      
+		if ((cs->conn->direction == DIR_DEST_CLIENT) &&  ) {
 
-		if (ret > 0) {
+		}
+*/
+		SIPRINTF("%s: rcv_pipe ret is %d\n", __func__, ret);	
+		if ((ret > 0) || cs->conn->pending_recv) {
 			if (ic->to_forward != CHN_INFINITE_FORWARD)
 				ic->to_forward -= ret;
 			ic->total += ret;
 			cur_read += ret;
 			ic->flags |= CF_READ_PARTIAL;
+			
 		}
 
+		SIPRINTF("%s: CS_FL_EOS\n", __func__);
 		if (cs->flags & CS_FL_EOS)
 			goto out_shutdown_r;
 
+		SIPRINTF("%s: CO_FL_ERROR\n", __func__);
 		if (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR)
 			return 1;
 
+		SIPRINTF("%s: conn->flags & CO_FL_WAIT_ROOM\n", __func__);
 		if (conn->flags & CO_FL_WAIT_ROOM) {
 			/* the pipe is full or we have read enough data that it
 			 * could soon be full. Let's stop before needing to poll.
 			 */
 			si_rx_room_blk(si);
+			SIPRINTF("%s: done_recv\n", __func__);
 			goto done_recv;
 		}
 
 		/* splice not possible (anymore), let's go on on standard copy */
 	}
 	else {
+		SIPRINTF("%s: Enter Check RCV_PIPE ELSE\n", __func__);	
 		/* be sure not to block regular receive path below */
 		conn->flags &= ~CO_FL_WAIT_ROOM;
 	}
+	SIPRINTF("%s: End of Check RCV_PIPE\n", __func__);
 
  abort_splice:
  #if ENABLE_CUJU_FT
+	SIPRINTF("%s: abort_splice check pipe \n", __func__);
+
  	if (ic->pipe &&  unlikely(!ic->pipe->data) && (!ic->pipe->pipe_nxt)) {
 		put_pipe(ic->pipe);
 		ic->pipe = NULL;
@@ -1313,11 +1375,15 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->pipe = NULL;
 	}
 #endif	
-
+	SIPRINTF("%s: si_alloc_ibuf \n", __func__);
 	/* now we'll need a input buffer for the stream */
-	if (!si_alloc_ibuf(si, &(si_strm(si)->buffer_wait)))
+	if (!si_alloc_ibuf(si, &(si_strm(si)->buffer_wait))) {
+		SIPRINTF("%s: goto end_recv\n", __func__);
 		goto end_recv;
+	}
+	
 
+	SIPRINTF("%s: Check Flags\n", __func__);
 	/* Important note : if we're called with POLL_IN|POLL_HUP, it means the read polling
 	 * was enabled, which implies that the recv buffer was not full. So we have a guarantee
 	 * that if such an event is not handled above in splice, it will be handled here by
@@ -1326,26 +1392,35 @@ int si_cs_recv(struct conn_stream *cs)
 	while ((cs->flags & CS_FL_RCV_MORE) ||
 	    (!(conn->flags & (CO_FL_ERROR | CO_FL_WAIT_ROOM | CO_FL_HANDSHAKE)) &&
 	       (!(cs->flags & (CS_FL_ERROR|CS_FL_EOS))) && !(ic->flags & CF_SHUTR))) {
+		SIPRINTF("%s: Enter Check Flags\n", __func__);
 		/* <max> may be null. This is the mux responsibility to set
 		 * CS_FL_RCV_MORE on the CS if more space is needed.
 		 */  
 		max = channel_recv_max(ic);
+
+		SIPRINTF("%s: Enter rcv_buf\n", __func__);
 		/* mux_pt_rcv_buf -> raw_sock_to_buf */
 		ret = cs->conn->mux->rcv_buf(cs, &ic->buf, max,
 		          flags |
 		          (co_data(ic) ? CO_RFL_BUF_WET : 0) |
 		          ((channel_recv_limit(ic) < b_size(&ic->buf)) ? CO_RFL_KEEP_RSV : 0));
 
-		if (cs->flags & CS_FL_WANT_ROOM)
+		SIPRINTF("%s: Leave rcv_buf\n", __func__);		  
+
+		if (cs->flags & CS_FL_WANT_ROOM) {
+			SIPRINTF("%s: Enter CS_FL_WANT_ROOM\n", __func__);
 			si_rx_room_blk(si);
+		}	
 
 		if (cs->flags & CS_FL_READ_PARTIAL) {
+			SIPRINTF("%s: Enter CS_FL_READ_PARTIAL\n", __func__);
 			if (tick_isset(ic->rex))
 				ic->rex = tick_add_ifset(now_ms, ic->rto);
 			cs->flags &= ~CS_FL_READ_PARTIAL;
 		}
 
 		if (ret <= 0) {
+			SIPRINTF("%s: Enter ret <= 0\n", __func__);
 			break;
 		}
 
@@ -1372,6 +1447,7 @@ int si_cs_recv(struct conn_stream *cs)
 		}
 		cur_read += ret;
 
+		SIPRINTF("%s: Enter to_forward\n", __func__);
 		/* if we're allowed to directly forward data, we must update ->o */
 		if (ic->to_forward && !(ic->flags & (CF_SHUTW|CF_SHUTW_NOW))) {
 			unsigned long fwd = ret;
@@ -1386,6 +1462,7 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->flags |= CF_READ_PARTIAL;
 		ic->total += ret;
 
+		SIPRINTF("%s: Enter CF_READ_DONTWAIT\n", __func__);
 		if ((ic->flags & CF_READ_DONTWAIT) || --read_poll <= 0) {
 			/* we're stopped by the channel's policy */
 			si_rx_chan_blk(si);
@@ -1397,6 +1474,8 @@ int si_cs_recv(struct conn_stream *cs)
 		 * not have them in buffers.
 		 */
 		if (ret < max) {
+			SIPRINTF("%s: Enter ret < max\n", __func__);
+
 			/* if a streamer has read few data, it may be because we
 			 * have exhausted system buffers. It's not worth trying
 			 * again.
@@ -1426,7 +1505,10 @@ int si_cs_recv(struct conn_stream *cs)
 			break;
 	} /* while !flags */
 
- done_recv:
+	SIPRINTF("%s: Enter done_recv\n", __func__);
+
+done_recv:
+ 	SIPRINTF("%s: Enter end_recv\n", __func__);
 	if (cur_read) {
 		if ((ic->flags & (CF_STREAMER | CF_STREAMER_FAST)) &&
 		    (cur_read <= ic->buf.size / 2)) {
@@ -1466,7 +1548,9 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->last_read = now_ms;
 	}
 
- end_recv:
+end_recv:
+	SIPRINTF("%s: Enter end_recv\n", __func__);
+
 	if (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR)
 		return 1;
 
@@ -1475,9 +1559,11 @@ int si_cs_recv(struct conn_stream *cs)
 		goto out_shutdown_r;
 
 	/* Subscribe to receive events if we're blocking on I/O */
-	if (!si_rx_blocked(si)) {
+	if ((!si_rx_blocked(si)) || cs->conn->pending_recv) {
+		SIPRINTF("conn->mux->subscribe SUB_RETRY_RECV\n");
 		conn->mux->subscribe(cs, SUB_RETRY_RECV, &si->wait_event);
 		si_rx_endp_done(si);
+		cs->conn->pending_recv = 0;
 	} else {
 		si_rx_endp_more(si); /* first data */
 	}

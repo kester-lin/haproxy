@@ -58,6 +58,14 @@
 #define DSRPRINTF(x...)
 #endif
 
+
+#define DEBUG_RS_LIST 0
+#if DEBUG_RS_LIST
+#define RSLPRINTF(x...) printf(x)
+#else
+#define RSLPRINTF(x...)
+#endif
+
 /* A pipe contains 16 segments max, and it's common to see segments of 1448 bytes
  * because of timestamps. Use this as a hint for not looping on splice().
  */
@@ -73,10 +81,6 @@ u_int16_t next_pipe_cnt = 0;
 struct timeval time_flush;
 struct timeval time_flush_end;
 unsigned long flush_time;
-
-struct timeval time_rpbt;
-struct timeval time_rpbt_end;
-unsigned long rpbt_time;
 
 struct timeval time_dup;
 struct timeval time_dup_end;
@@ -104,14 +108,6 @@ struct timeval time_dz;
 struct timeval time_dz_end;
 unsigned long time_dzone;	
 
-struct timeval time_get_pipe;
-struct timeval time_get_pipe_end;
-unsigned long get_pipe_time;
-
-struct timeval time_dup_pipe;
-struct timeval time_dup_pipe_end;
-unsigned long dup_pipe_time;	
-
 struct timeval time_a_other;
 struct timeval time_a_other_end;
 unsigned long a_other_time;	
@@ -120,16 +116,6 @@ struct timeval time_cz_other;
 struct timeval time_cz_other_end;
 unsigned long cz_other_time;
 
-#if 0
-REGPRM1 static inline unsigned long tv_to_us(struct timeval *tv)
-{
-	unsigned long ret;
-
-	ret  = tv->tv_sec * 1000 * 1000 + tv->tv_usec;
-
-	return ret;
-}
-#else
 /** Convert to micro-seconds */
 static inline __u64 tv_to_us(const struct timeval* tv) 
 {
@@ -137,7 +123,6 @@ static inline __u64 tv_to_us(const struct timeval* tv)
         us += (__u64)tv->tv_sec * (__u64)1000000;
         return us;
 }
-#endif
 
 /* Returns :
  *   -1 if splice() is not supported
@@ -152,6 +137,9 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
 	struct guest_ip_list* guest_info = NULL;
+	unsigned long recv_t;
+	uint32_t epoch_id = 0;
+	uint32_t flush_id = 0;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -186,21 +174,16 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
 
-#if 1
-	guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
-#else
-	if (ipv4_to.s_addr == guest_ip_db) {
-		conn->direction = DIR_DEST_GUEST;
-		//printf("Dest. is Guest, Conn is %p\n", conn);
+	if (!conn->conn_gipl) {
+		guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+		conn->conn_gipl = guest_info;
 	}
-	else if (ipv4_from.s_addr == guest_ip_db) {
-		conn->direction = DIR_DEST_CLIENT;
-		//printf("Dest. is Client Application, Conn is %p\n", conn);
-	} 
 	else {
-		//printf("Check Dest. No Info.\n");
+		guest_info = conn->conn_gipl;
 	}
-#endif
+
+	epoch_id = guest_info->gctl_ipc.epoch_id;
+	flush_id = guest_info->gctl_ipc.flush_id;	
 
 	while (count) {
 		if (count > MAX_SPLICE_AT_ONCE)
@@ -250,10 +233,12 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 		} /* ret <= 0 */
 
 		/* Recv the Data tag epoch id*/
-		if ((pipe->epoch_idx == 0) && (conn->direction == DIR_DEST_CLIENT)) {
-			//pipe->epoch_id = ft_get_epochcnt();
+		//if ((pipe->epoch_idx == 0) && (conn->direction == DIR_DEST_CLIENT)) {
+		if (conn->direction == DIR_DEST_CLIENT) {
 			pipe->epoch_id = guest_info->gctl_ipc.epoch_id;
+
 			pipe->epoch_idx = 1; 
+			DSRPRINTF("%s: %p epochid:%lu\n", __func__, pipe, pipe->epoch_id);			
 		}
 
 		retval += ret;
@@ -296,27 +281,24 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 {
 	int ret = 0;
 	int done = 0;
-	
-#if ENABLE_TIME_MEASURE	
-	clock_t start, end; 
-#endif	
+	static int first_index = 0;
 
 #if ENABLE_CUJU_FT
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_buf = NULL;
 	struct pipe *pipe_dup = NULL;
 	struct pipe *pipe_trans = pipe;
+	struct pipe *pipe_last = pipe;
 	//struct pipe *pipe_ted = NULL;
 	int t_flag = 0;
 	u_int32_t curr_flush_id;
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
 	struct guest_ip_list* guest_info = NULL;
-#endif
 
-#if ENABLE_TIME_MEASURE
- 	gettimeofday(&time_az, NULL);
-	gettimeofday(&time_a_other, NULL);
+	struct pipe *pipe_loop = NULL;
+	struct pipe *pipe_idx = NULL;
+	int loop_cnt = 0;
 #endif
 
 	if (!conn_ctrl_ready(conn))
@@ -327,92 +309,101 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	conn_refresh_polling_flags(conn);
 
-#if ENABLE_TIME_MEASURE
-	gettimeofday(&time_a_other_end, NULL);
-#endif
+	DSRPRINTF("%s: %p\n", __func__, pipe);
+
+	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
+	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+
+	if (!conn->conn_gipl) {
+		guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+		conn->conn_gipl = guest_info;
+	}
+	else {
+		guest_info = conn->conn_gipl;
+	}
+
 
 #if ENABLE_CUJU_FT	
-#if !(ENABLE_NO_BUFFER_MODE)
 	pipe->out_fd = conn->handle.fd;
 
 	if (pipe->data) {
+		if (!first_index) {
+			first_index = 1;
+			//conn->pipe_buf_tail = pipe;
+			printf("########################FIRST RETRANSMIT########################\n");
+		}
+
 		DSRPRINTF("Pipe Have Data:%d\n", pipe->data);
-#if ENABLE_TIME_MEASURE
-		gettimeofday(&time_get_pipe, NULL);
-#endif
-		pipe_buf = get_pipe();
-		pipe_dup = get_pipe();
-		
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_get_pipe_end, NULL);
-#endif
 
-		if (pipe_buf == NULL) {
+		if (conn->direction == DIR_DEST_GUEST) {
+			DSRPRINTF("DIR_DEST_GUEST\n");
+			pipe_buf = get_pipe();
+			pipe_dup = get_pipe();
+
+			if (pipe_buf == NULL) {
 #if PIPE_ASSERT
-			assert(0);
+				assert(0);
 #else
-			return 0;
+				return 0;
 #endif			
-		}
-		if (pipe_dup == NULL) {
+			}
+			if (pipe_dup == NULL) {
 #if PIPE_ASSERT
-			assert(0);
+				assert(0);
 #else
-			return 0;
+				return 0;
 #endif			
+			}
+
+			ft_dup_pipe(pipe, pipe_buf, COPY_PIPE_COPY);
+			ft_dup_pipe(pipe, pipe_dup, COPY_PIPE_CLEAN);
+
+			fd_pipe_cnt+=2;
+			DSRPRINTF("Create pipe 2 total:%d\n", fd_pipe_cnt);
+			conn->backend_pipecnt+=2;
 		}
+		else {
+			DSRPRINTF("DIR_DEST_CLIENT\n");
 
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_dup_pipe, NULL);
-#endif
-		ft_dup_pipe(pipe, pipe_buf, 0);
-		ft_dup_pipe(pipe, pipe_dup, 1);
+			pipe_buf = get_pipe();
+			
+			if (pipe_buf == NULL) {
+				DSRPRINTF("NULL pointer\n");
+#if PIPE_ASSERT
+				assert(0);
+#else
+				return 0;
+#endif			
+			}
 
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_dup_pipe_end, NULL);
-#endif
-		fd_pipe_cnt++;
+			DSRPRINTF("Get Pipe:%p\n", pipe_buf);	
 
-		if(conn->direction == DIR_DEST_GUEST) {
-			conn->backend_pipecnt++;
-		}
-		else if (conn->direction == DIR_DEST_CLIENT) {
+			ft_dup_pipe(pipe, pipe_buf, 1);
+			fd_pipe_cnt++;
+
+			DSRPRINTF("Create pipe 1 total:%d\n", fd_pipe_cnt);
 			conn->frontend_pipecnt++;
 		}
-
-		//pipe_ted = pipe->pipe_ted;
-
-		DSRPRINTF("Create Pipe CNT:%d\n", fd_pipe_cnt);
-		//printf("Pipe: %p\n", pipe_buf);
-		//printf("Pipe: %p\n\n", pipe_dup);
 	}
 	else {
+		DSRPRINTF("Pipe Have No Data\n");
+
 		if (pipe->pipe_nxt == NULL)	{
 			DSRPRINTF("########################NULL RETRANSMIT########################\n");
 			goto after_send;
 		}
 	}
-#endif
 
-#if ENABLE_TIME_MEASURE
-	gettimeofday(&time_az_end, NULL);
-	gettimeofday(&time_bz, NULL);
-#endif
-
-#if !(ENABLE_NO_BUFFER_MODE)
 	/* enable when enter FT */
-	fdtab[conn->handle.fd].enable_migration = 1;
+	////fdtab[conn->handle.fd].enable_migration = 1;
 
 	if (pipe->pipe_nxt) {
-		//DSRPRINTF("Pipe Have NXT\n");
+		DSRPRINTF("Pipe Have NXT\n");
 
 		/* search pipe_nxt is empty insert new incoming to the pipe buffer tail */
-#if ENABLE_TIME_MEASURE
-		gettimeofday(&time_dup, NULL);
-#endif
-		
 		next_pipe_cnt = 0;
 
+#if !ENABLE_LIST_ADD_TAIL   /* Add list tail method */ 
 		while (1) {
 			if (pipe_trace->pipe_nxt == NULL) {
 				if(pipe->data) {
@@ -426,38 +417,31 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	
 			pipe_trace = pipe_trace->pipe_nxt;
 
+			/* only for failover */
 			if((pipe_trace->pipe_dup) && pipe_trace->pipe_dup->data &&
 				!(pipe_trace->trans_suspend) && !(pipe_trace->data)) {
-				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, 0);
+				ft_dup_pipe(pipe_trace->pipe_dup, pipe_trace, COPY_PIPE_COPY);
 			}
 		}
-
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_dup_end, NULL);
-		dup_time = tv_to_us(&time_dup_end) - tv_to_us(&time_dup);
-#endif
-		//		
+#else
+		if (pipe_buf != NULL) {
+			if (conn->pipe_buf_tail == NULL)
+				conn->pipe_buf_tail = pipe;
+			conn->pipe_buf_tail->pipe_nxt = pipe_buf;
+			pipe_buf->pipe_dup = pipe_dup;
+		}
+#endif 
 	}
 	else {
-		if (pipe_buf == NULL || pipe_dup == NULL) {
-			DSRPRINTF("Pipe BUF&DUP are Zero\n");
-
-#if PIPE_ASSERT
-			assert(1);
-#else
-			return 0;
-#endif
-		}
-
+		DSRPRINTF("Pipe Have NO NXT\n");		
 		pipe->pipe_nxt = pipe_buf;
 		pipe->pipe_nxt->pipe_dup = pipe_dup;
+		conn->pipe_buf_tail = pipe->pipe_nxt;
 	}
+	
 	done = 0;
 	pipe_trans = pipe->pipe_nxt;
 	pipe->data = 0;
-
-#endif	
-
 
 	if (pipe_trans == NULL) { 
 		DSRPRINTF("pipe_trans is NULL\n");
@@ -468,56 +452,18 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #endif
 	}
 
-	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
-	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
-
-#if 1
-	guest_info = check_guestip(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
-#else
-	if (ipv4_to.s_addr == guest_ip_db) {
-		conn->direction = DIR_DEST_GUEST;
-		//printf("[WRITE] Dest. is Guest, Conn is %p\n", conn);
-	}
-	else if (ipv4_from.s_addr == guest_ip_db) {
-		conn->direction = DIR_DEST_CLIENT;
-		//printf("[WRITE] Dest. is Client Application, Conn is %p\n", conn);
-	} 
-	else {
-		//printf("[WRITE] Check Dest. NO Info.\n");
-	}
-#endif
-
-#if ENABLE_TIME_MEASURE
-	gettimeofday(&time_bz_end, NULL);
-	gettimeofday(&time_cz, NULL);
-#endif	
-
 	if (conn->direction == DIR_DEST_GUEST) {
-#if ENABLE_TIME_MEASURE
-		gettimeofday(&time_cz_other, NULL);
-#endif
 
-#if !(ENABLE_NO_BUFFER_MODE)
+#if !ENABLE_LIST_ADD_TAIL   /* Add list tail method */ 
 		//curr_flush_id = ft_get_flushcnt();
 		curr_flush_id = guest_info->gctl_ipc.flush_id;
 
-
-		if(pipe_trans->flush_idx) {
+		if (pipe_trans->flush_idx) {
 			DSRPRINTF("Enter Flush\n");
-#if ENABLE_TIME_MEASURE
-			gettimeofday(&time_flush, NULL);
-			start = clock();
-#endif			
+
 			/* check for release */
 			ft_release_pipe_by_flush(pipe, curr_flush_id, &fd_pipe_cnt ,&conn->backend_pipecnt);
-#if ENABLE_TIME_MEASURE			
-			end = clock();
-			gettimeofday(&time_flush_end, NULL);
 
-			flush_time = tv_to_us(&time_flush_end) - tv_to_us(&time_flush);
-
-			time_taken = ((double) (end - start)) / CLOCKS_PER_SEC; 
-#endif
 			pipe_trans = pipe->pipe_nxt;
 
 			if (pipe_trans == NULL) {
@@ -530,21 +476,20 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			pipe_trans->flush_idx = 1;
 			pipe_trans->flush_id = curr_flush_id;
 		}
+#else
+		curr_flush_id = guest_info->gctl_ipc.flush_id;
+		pipe_trans->flush_id = curr_flush_id;
 #endif		
-
-#if ENABLE_TIME_MEASURE
-		gettimeofday(&time_cz_other_end, NULL);
-		gettimeofday(&time_transfer, NULL);
-#endif
 
 		transfer_cnt = 0;
 		transfer_data_cnt = 0;
 
 		/* WRITE */
+		DSRPRINTF("Trans Loop %p, %d\n", pipe_trans, pipe_trans->data);
 		while (pipe_trans->data) {
 			if (!pipe_trans->transfered) {
 				
-				DSRPRINTF("pipe_trans->data:%d\n", pipe_trans->data);
+				DSRPRINTF("pipe_trans->data:%d\n", pipe_trans->data, pipe_trans->flush_id);
 
 				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
 							pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
@@ -553,19 +498,19 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 					//pipe_trans->trans_suspend = 1;
 					t_flag = (errno == EAGAIN);
 
-					//printf("RET is %d  t_flag is %d\n", ret, t_flag);
+					DSRPRINTF("RET is %d  t_flag is %d\n", ret, t_flag);
 					if (ret == 0 || t_flag) {
-						//printf("ret == 0 || t_flag\n");
+						DSRPRINTF("ret == 0 || t_flag\n");
 						pipe_trans->trans_suspend = 1;
 						fd_cant_send(conn->handle.fd);
 						break;
 					}
 					else if (errno == EINTR) {
-						//printf("errno == EINTR\n");
+						DSRPRINTF("errno == EINTR\n");
 						continue;
 					}
 
-					//printf("CO_FL_ERROR\n");
+					DSRPRINTF("CO_FL_ERROR\n");
 					/* here we have another error */
 					conn->flags |= CO_FL_ERROR;
 					break;
@@ -574,36 +519,155 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				done += ret;
 				pipe_trans->data -= ret;
 				pipe_trans->transfer_cnt++;
-				pipe_trans->trans_suspend = 0;
-#if !(ENABLE_NO_BUFFER_MODE)				
+				pipe_trans->trans_suspend = 0;			
 				pipe_trans->transfered = 1;
-#endif				
-				//printf("Transfered\n");
-			}
-#if !(ENABLE_NO_BUFFER_MODE)
-			if (pipe_trans->pipe_nxt != NULL) {
-				pipe_trans = pipe_trans->pipe_nxt;
-				//printf("Transfered then goto pipe_nxt\n");
+				
+				DSRPRINTF("Transfered\n");
 			}
 			else {
+				printf("pipe_trans->transfered\n");
+			}
+
+			if (pipe_trans->pipe_nxt != NULL) {
+				RSLPRINTF("Go to next, Trans:%p\n", pipe_trans);
+#if ENABLE_LIST_ADD_TAIL			
+				if (pipe_trans->transfered) {
+					if (conn->sent_pipe == NULL) {
+						conn->sent_pipe = pipe_trans;
+						conn->sent_pipe_tail = pipe_trans;
+						RSLPRINTF("NULL pipe_trans:%p\n", pipe_trans);
+					}
+					else {
+						RSLPRINTF("Link Next T:%p TN:%p pipe_trans:%p\n", conn->sent_pipe_tail, conn->sent_pipe_tail->pipe_nxt, pipe_trans); 
+						conn->sent_pipe_tail->pipe_nxt = pipe_trans;
+						conn->sent_pipe_tail = conn->sent_pipe_tail->pipe_nxt;
+						RSLPRINTF("LE Next T:%p TN:%p pipe_trans:%p\n", conn->sent_pipe_tail, conn->sent_pipe_tail->pipe_nxt, pipe_trans);						
+					}
+					pipe_last->pipe_nxt = pipe_trans->pipe_nxt; 
+					conn->sent_pipe_tail->pipe_nxt = NULL;
+					DSRPRINTF("Transfered then goto pipe_nxt\n");
+				}
+				else {
+					RSLPRINTF("Go to next No Transfer\n");
+				}
+
+				pipe_trans = pipe_last->pipe_nxt;
+				RSLPRINTF("pipe_last:%p\n", pipe_last);
+#else
+				pipe_trans = pipe_trans->pipe_nxt;		
+#endif
+			}
+			else {
+				RSLPRINTF("Go to End, Trans:%p\n", pipe_trans);
+				if (pipe_trans->transfered) {
+#if ENABLE_LIST_ADD_TAIL					
+					if (conn->sent_pipe == NULL) {
+						conn->sent_pipe = pipe_trans;
+						conn->sent_pipe_tail = pipe_trans;
+						//pipe->pipe_nxt = NULL;
+					}
+					else {
+						conn->sent_pipe_tail->pipe_nxt = pipe_trans;
+						conn->sent_pipe_tail = conn->sent_pipe_tail->pipe_nxt;
+						conn->sent_pipe_tail->pipe_nxt = NULL;
+					}
+					DSRPRINTF("Transfered then exit\n");
+				}
+				else {
+					RSLPRINTF("Bo Next No Transfer\n");
+				}
+				pipe_last->pipe_nxt = NULL; 
+#endif				
 				break;
 			}
-#endif					
 		}
-		transfer_data_cnt = done;
+#if DEBUG_RS_LIST
+		pipe_loop = conn->sent_pipe ;
+		loop_cnt = 0;
+		RSLPRINTF("######################### Loop Start #########################\n");
+		while (pipe_loop) {
+			loop_cnt++;
+			RSLPRINTF("%p(%d) -> ", pipe_loop, pipe_loop->transfered); 
+			pipe_loop = pipe_loop->pipe_nxt;
 
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_transfer_end, NULL);
-		transfer_time = tv_to_us(&time_transfer_end) - tv_to_us(&time_transfer);
+			if ((loop_cnt % 8) == 0)
+				RSLPRINTF("\n");
+
+			if (pipe_loop == NULL) {
+				RSLPRINTF("NULL\n");
+				break;
+			}
+		}
+		printf("########################## Loop End ##########################\n");
 #endif
-		
+#if 1
+		if (conn->last_flush_id != curr_flush_id) {
+			pipe_loop = conn->sent_pipe ;
+			loop_cnt = 0;
+			conn->last_flush_id = curr_flush_id;
+			RSLPRINTF("conn->sent_pipe:%p pipe_loop:%p\n", conn->sent_pipe, pipe_loop); 
+			RSLPRINTF("######################### Release Start #########################\n");
+			while (pipe_loop) {
+				loop_cnt++;			
+
+				pipe_idx = pipe_loop;
+				pipe_loop = pipe_loop->pipe_nxt;
+#if DEBUG_RS_LIST
+				if (pipe_idx) {
+					RSLPRINTF("Target: %p %d FlushID:%d:%d \n", pipe_idx, pipe_idx->flush_id, curr_flush_id, pipe_idx->flush_id);
+				}
+#endif
+				if (pipe_idx && pipe_idx->transfered && (curr_flush_id >= pipe_idx->flush_id)) {
+					RSLPRINTF("!!!Release: %p\n", pipe_idx);
+					ft_clean_pipe(pipe_idx->pipe_dup);
+					put_pipe(pipe_idx->pipe_dup);
+
+					ft_clean_pipe(pipe_idx);
+					put_pipe(pipe_idx);
+
+					conn->sent_pipe = pipe_loop;
+					//conn->sent_pipe_tail = pipe_loop;
+				}
+				else {
+					conn->sent_pipe = pipe_idx;
+					break; 
+				}
+			}
+			RSLPRINTF("########################## Release End ##########################\n");
+		}
+#endif
+#if DEBUG_RS_LIST
+		RSLPRINTF("######################### Check Start #########################\n");
+
+		pipe_loop = conn->sent_pipe ;
+		loop_cnt = 0;
+		while (pipe_loop) {
+			loop_cnt++;
+			RSLPRINTF("%p(%d) -> ", pipe_loop, pipe_loop->transfered); 
+			pipe_loop = pipe_loop->pipe_nxt;
+
+			if ((loop_cnt % 8) == 0)
+				RSLPRINTF("\n");
+
+			if (pipe_loop == NULL) {
+				RSLPRINTF("NULL\n");
+				break;
+			}
+		}
+		RSLPRINTF("########################## Check End ##########################\n");
+#endif	
+		transfer_data_cnt = done;
 	}
 	else if (conn->direction == DIR_DEST_CLIENT) {
-		//curr_flush_id = ft_get_epochcnt();
-		curr_flush_id = guest_info->gctl_ipc.epoch_id;
+		curr_flush_id = guest_info->gctl_ipc.flush_id;
 
 		while (pipe_trans->data) {
-			if (curr_flush_id > pipe_trans->flush_id) {
+			//if (curr_flush_id > pipe_trans->epoch_id) {
+		    DSRPRINTF("curr_flush_id: %d\n", curr_flush_id);
+
+			if (curr_flush_id >= pipe_trans->epoch_id) {	
+				DSRPRINTF("Outgoing Path: transfer: %d\n", pipe_trans->data);
+
 				ret = splice(pipe_trans->cons, NULL, conn->handle.fd, NULL,
 							pipe_trans->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
@@ -611,15 +675,19 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 					//pipe_trans->trans_suspend = 1;
 					t_flag = (errno == EAGAIN);
 
-					//printf("RET is %d  t_flag is %d\n", ret, t_flag);
+					DSRPRINTF("RET is %d t_flag is %d\n", ret, t_flag);
 					if (ret == 0 || t_flag) {
-						//printf("ret == 0 || t_flag\n");
+						DSRPRINTF("ret == 0 || t_flag\n");
 						pipe_trans->trans_suspend = 1;
-						fd_cant_send(conn->handle.fd);
-						break;
+						empty_pbuffer = 1;
+						last_error = t_flag; 
+						
+						continue;
+						//fd_cant_send(conn->handle.fd);
+						//fd_stop_send(conn->handle.fd);
 					}
 					else if (errno == EINTR) {
-						//printf("errno == EINTR\n");
+						DSRPRINTF("errno == EINTR\n");
 						continue;
 					}
 
@@ -628,37 +696,67 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 					conn->flags |= CO_FL_ERROR;
 					break;
 				}
+				DSRPRINTF("Outgoing Path: transfer data:%u\n", ret);
+
+				if(!ret)
+					assert(0);
 
 				done += ret;
 				pipe_trans->data -= ret;
 				pipe_trans->transfer_cnt++;
 				pipe_trans->trans_suspend = 0;
 				pipe_trans->transfered = 1;
-				//printf("Transfered\n");
+				DSRPRINTF("Transfered\n");
 				/* Pipe Release for DEST */
 			}
-#if !(ENABLE_NO_BUFFER_MODE)
-			if (pipe_trans->pipe_nxt != NULL) {
-				pipe_trans = pipe_trans->pipe_nxt;
-				//printf("Transfered then goto pipe_nxt\n");
-			}
 			else {
+				DSRPRINTF("DIR_DEST_CLIENT Break Pipe ID is %lu < %u(now)\n", pipe_trans->epoch_id, curr_flush_id);
+				empty_pbuffer = 1;
 				break;
 			}
-#endif					
-		}
-#if !(ENABLE_NO_BUFFER_MODE)
-		if (done) {
-#if ENABLE_TIME_MEASURE
-			gettimeofday(&time_rpbt, NULL);
-#endif			
-			ft_release_pipe_by_transfer(pipe, &fd_pipe_cnt , &conn->frontend_pipecnt);
-#if ENABLE_TIME_MEASURE	
-			gettimeofday(&time_rpbt_end, NULL);
-			rpbt_time = tv_to_us(&time_rpbt_end) - tv_to_us(&time_rpbt);
-#endif     	
-		 }
+
+			if (pipe_trans->pipe_nxt != NULL) {
+#if ENABLE_LIST_ADD_TAIL	
+				struct pipe *pipe_release = pipe_trans;
+				
+				pipe_trans = pipe_trans->pipe_nxt;
+				
+				if (pipe_release->transfered) {
+					if (pipe_release == conn->pipe_buf_tail) {
+						conn->pipe_buf_tail = NULL;
+					}
+					ft_clean_pipe(pipe_release);				
+					put_pipe(pipe_release);
+					
+				}
+#else
+				pipe_trans = pipe_trans->pipe_nxt;
+#endif				
+				DSRPRINTF("Transfered then goto pipe_nxt\n");
+			}
+			else {
+#if ENABLE_LIST_ADD_TAIL
+				if (pipe_trans->transfered) {
+					if (pipe_trans == conn->pipe_buf_tail) {
+						conn->pipe_buf_tail = NULL;
+					}					
+					ft_clean_pipe(pipe_trans);				
+					put_pipe(pipe_trans);
+
+					pipe->pipe_nxt = NULL;
+				}				
 #endif
+				DSRPRINTF("DIR_DEST_CLIENT Break No Next\n");
+				break;
+			}			
+		}
+
+#if !ENABLE_LIST_ADD_TAIL 
+		if (done) {
+			ft_release_pipe_by_transfer(pipe, &fd_pipe_cnt , &conn->frontend_pipecnt);
+		 }
+#endif		 
+
 //
 	}
 	else {
@@ -708,11 +806,6 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		pipe->data -= ret;
 	}
 #endif
-
-#if ENABLE_TIME_MEASURE
-	gettimeofday(&time_cz_end, NULL);
-	gettimeofday(&time_dz, NULL);
-#endif	
 	
 after_send:
 
@@ -720,20 +813,6 @@ after_send:
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
 	conn_cond_update_sock_polling(conn);
-
-#if ENABLE_TIME_MEASURE
-	gettimeofday(&time_dz_end, NULL);
-	time_azone = tv_to_us(&time_az_end) - tv_to_us(&time_az);
-	time_bzone = tv_to_us(&time_bz_end) - tv_to_us(&time_bz);
-	time_czone = tv_to_us(&time_cz_end) - tv_to_us(&time_cz);
-	time_dzone = tv_to_us(&time_dz_end) - tv_to_us(&time_dz);
-	get_pipe_time = tv_to_us(&time_get_pipe_end) - tv_to_us(&time_get_pipe);
-	dup_pipe_time = tv_to_us(&time_dup_pipe_end) - tv_to_us(&time_dup_pipe);
-	a_other_time = tv_to_us(&time_a_other_end) - tv_to_us(&time_a_other);
-	cz_other_time = tv_to_us(&time_cz_other_end) - tv_to_us(&time_cz_other);
-#endif
-
-
 
 #if ENABLE_CUJU_FT
 	if (pipe->pipe_nxt == NULL) {
@@ -749,9 +828,7 @@ after_send:
 		
 		conn->flags |= CO_FL_XPRT_WR_ENA;
 	}
-
 #endif
-
 	return done;
 }
 
