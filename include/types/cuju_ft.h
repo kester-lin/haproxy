@@ -6,14 +6,28 @@
 
 extern int pb_event;
 
+#define IP_LENGTH 4
+#define DEFAULT_NIC_CNT 3
+#define CONNECTION_LENGTH 12
+#define DEFAULT_CONN_CNT 3
+//#define DEFAULT_IPC_ARRAY  (24+(IP_LENGTH*DEFAULT_NIC_CNT)+(CONNECTION_LENGTH*DEFAULT_CONN_CNT))
+
+#define TOTAL_NIC   8
+#define TOTAL_CONN   8
+#define DEFAULT_IPC_ARRAY  (20+(IP_LENGTH*TOTAL_NIC)+(CONNECTION_LENGTH*TOTAL_CONN))
+
 
 #if ENABLE_CUJU_FT
+extern struct proto_ipc *ipt_target;
+
 extern u_int16_t fd_list_migration;
-extern u_int16_t fd_pipe_cnt;
+extern u_int32_t fd_pipe_cnt;
 extern u_int16_t empty_pipe;
 extern u_int16_t empty_pbuffer;
 extern u_int16_t last_error;
 extern u_int32_t guest_ip_db;
+
+extern u_int16_t ipc_fd;
 
 extern int trace_cnt;
 extern int flush_cnt;
@@ -25,13 +39,7 @@ extern unsigned long tepoll_time;
 #endif
 #if ENABLE_TIME_MEASURE	
 
-
 extern struct timeval time_poll;
-extern struct timeval time_recv;
-extern struct timeval time_recv_end;
-extern struct timeval time_send;
-extern struct timeval time_send_end;
-
 
 extern struct timeval time_release;
 extern struct timeval time_release_end;
@@ -40,6 +48,35 @@ extern unsigned long release_time;
 extern struct timeval time_loop;
 extern struct timeval time_loop_end;
 extern unsigned long loop_time;	
+
+extern struct timeval time_recv;
+extern struct timeval time_recv_end;
+extern unsigned long time_in_recv;	
+
+extern struct timeval time_send;
+extern struct timeval time_send_end;
+extern unsigned long time_in_send;	
+
+extern struct timeval time_sicsp;
+extern struct timeval time_sicsp_end;
+extern unsigned long time_in_sicsp;	
+
+extern struct timeval time_sicsio_send;
+extern struct timeval time_sicsio_send_end;
+extern unsigned long time_in_sicsio_send;	
+
+extern struct timeval time_sicsio_recv;
+extern struct timeval time_sicsio_recv_end;
+extern unsigned long time_in_sicsio_recv;	
+
+extern struct timeval time_sicsp_send;
+extern struct timeval time_sicsp_send_end;
+extern unsigned long time_in_sicsp_send;	
+
+extern struct timeval time_sicsp_int;
+extern struct timeval time_sicsp_int_end;
+extern unsigned long time_in_sicsp_int;
+
 #endif
 
 #if ENABLE_CUJU_IPC
@@ -73,21 +110,23 @@ enum CUJU_FT_MODE
     CUJU_FT_TRANSACTION_RUN,
 };
 
+/* IPC PROTO */
 struct proto_ipc
 {
-    u_int32_t transmit_cnt;
-    u_int32_t ipc_mode : 8;
+    u_int32_t ipc_mode:8;
     u_int32_t cuju_ft_arp:2;
-    u_int32_t cuju_ft_mode : 6;
-    u_int32_t gft_id : 16;
+    u_int32_t cuju_ft_mode:6;
+    u_int32_t gft_id:16;
     u_int32_t epoch_id;
-    u_int32_t packet_cnt : 16;
-    u_int32_t packet_size : 16;
+    u_int32_t flush_id;
+    u_int32_t packet_cnt:16;
+    u_int32_t packet_size:16;
     u_int32_t time_interval;
-    u_int32_t nic_count : 16;
-    u_int32_t conn_count : 16;
+    u_int32_t nic_count:16;
+    u_int32_t conn_count:16;
+    unsigned int nic[TOTAL_NIC];
+    unsigned char conn[TOTAL_CONN][CONNECTION_LENGTH];   
 };
-
 
 struct guest_ip_list
 {
@@ -121,7 +160,7 @@ u_int8_t del_guestip(u_int32_t guest_ip);
 struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* dir);
 u_int8_t add_ft_fd(u_int16_t ftfd);
 u_int16_t get_ft_fd(void);
-
+__u64 tv_to_us(const struct timeval* tv);
 #endif
 
 #endif

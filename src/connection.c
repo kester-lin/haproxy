@@ -29,6 +29,14 @@
 
 #include <common/debug.h>
 
+#define DEBUG_CONNECTION 0
+#if DEBUG_CONNECTION
+#define CONNPRINTF(x...) printf(x)
+#else
+#define CONNPRINTF(x...)
+#endif
+
+
 DECLARE_POOL(pool_head_connection, "connection",  sizeof(struct connection));
 DECLARE_POOL(pool_head_connstream, "conn_stream", sizeof(struct conn_stream));
 
@@ -48,10 +56,14 @@ void conn_fd_handler(int fd)
 	unsigned int flags;
 	int io_available = 0;
 
+	CONNPRINTF("[%s] FD:%d\n", __func__, fd);
+
 	if (unlikely(!conn)) {
 		activity[tid].conn_dead++;
 		return;
 	}
+
+	//CONNPRINTF("[%s] Enter ID:%d\n", __func__, pthread_self());
 
 	conn_refresh_polling_flags(conn);
 	conn->flags |= CO_FL_WILL_UPDATE;

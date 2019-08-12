@@ -506,10 +506,10 @@ static inline void conn_init(struct connection *conn)
 	conn->conn_gipl = NULL;
 	conn->recv_time.tv_sec = 0;
 	conn->recv_time.tv_usec = 0;
-	conn->pending_recv = 0;
 	conn->pipe_buf_tail = NULL;
 	conn->sent_pipe = NULL;	
 	conn->sent_pipe_tail = NULL;
+	conn->shm_idx = 0;
 }
 
 /* sets <owner> as the connection's owner */

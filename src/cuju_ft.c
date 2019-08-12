@@ -56,11 +56,7 @@ static struct guest_ip_list gip_list = {
 #define CJIDRPRINTF(x...)
 #endif
 
-#define MAC_LENGTH 4
-#define DEFAULT_NIC_CNT 3
-#define CONNECTION_LENGTH 12
-#define DEFAULT_CONN_CNT 3
-#define DEFAULT_IPC_ARRAY  (24+(MAC_LENGTH*DEFAULT_NIC_CNT)+(CONNECTION_LENGTH*DEFAULT_CONN_CNT))
+#define SUPPORT_VM_CNT       100
 
 u_int16_t fd_list_migration = 0;
 
@@ -68,14 +64,18 @@ static struct ft_fd_list ftfd_list = {
 	.list = LIST_HEAD_INIT(ftfd_list.list)
 };
 
-u_int16_t fd_pipe_cnt = 0;
+u_int32_t fd_pipe_cnt = 0;
 u_int16_t empty_pipe = 0;
 u_int16_t empty_pbuffer = 0;
 u_int16_t last_error = 0;
 
+u_int16_t ipc_fd = 0;
+
 struct gctl_ipc gctl_ipc;
 
 int pb_event = 0;
+int trace_cnt = 0;
+int flush_cnt = 0;
 
 #if ENABLE_TIME_MEASURE_EPOLL
 struct timeval time_tepoll;
@@ -85,10 +85,10 @@ unsigned long tepoll_time;
 
 #if ENABLE_TIME_MEASURE
 struct timeval time_poll;
+
 struct timeval time_recv;
 struct timeval time_recv_end;
-struct timeval time_send;
-struct timeval time_send_end;
+unsigned long time_in_recv = 0;	
 
 struct timeval time_release;
 struct timeval time_release_end;
@@ -97,6 +97,30 @@ unsigned long release_time = 0;
 struct timeval time_loop;
 struct timeval time_loop_end;
 unsigned long loop_time = 0;	
+
+struct timeval time_send;
+struct timeval time_send_end;
+unsigned long time_in_send = 0;	
+
+struct timeval time_sicsp;
+struct timeval time_sicsp_end;
+unsigned long time_in_sicsp = 0;	
+
+struct timeval time_sicsio_send;
+struct timeval time_sicsio_send_end;
+unsigned long time_in_sicsio_send = 0;
+
+struct timeval time_sicsio_recv;
+struct timeval time_sicsio_recv_end;
+unsigned long time_in_sicsio_recv = 0;
+
+struct timeval time_sicsp_send;
+struct timeval time_sicsp_send_end;
+unsigned long time_in_sicsp_send = 0;
+
+struct timeval time_sicsp_int;
+struct timeval time_sicsp_int_end;
+unsigned long time_in_sicsp_int = 0;
 #endif
 	
 #if FAKE_CUJU_ID
@@ -154,7 +178,7 @@ REGPRM1 static inline unsigned long tv_to_us(struct timeval *tv)
 }
 #else
 /** Convert to micro-seconds */
-static inline __u64 tv_to_us(const struct timeval* tv) 
+__u64 tv_to_us(const struct timeval* tv) 
 {
         __u64 us = tv->tv_usec;
         us += (__u64)tv->tv_sec * (__u64)1000000;
@@ -241,12 +265,6 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_prev = NULL;
 
-#if ENABLE_TIME_MEASURE	
-	struct timeval time_close;
-	struct timeval time_close_end;
-	unsigned long close_time = 0;		
-#endif
-
 	if (pipe->pipe_nxt)
 	{
 		/* search pipe_next is empty insert new incoming to the pipe buffer tail */
@@ -266,18 +284,14 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 
 			pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
 
-			//if () {
-
-				ft_clean_pipe(pipe_trace->pipe_dup);
-				put_pipe(pipe_trace->pipe_dup);
-					
-				ft_clean_pipe(pipe_trace);				
-				put_pipe(pipe_trace);
-				(*pipe_cnt)-=2;	
-				printf("release pipe 2 total:%d\n", (*pipe_cnt));
-
-			//}
-			
+			ft_clean_pipe(pipe_trace->pipe_dup);
+			put_pipe(pipe_trace->pipe_dup);
+				
+			ft_clean_pipe(pipe_trace);				
+			put_pipe(pipe_trace);
+			(*pipe_cnt)-=2;	
+			printf("release pipe 2 total:%d\n", (*pipe_cnt));
+		
 			pipe_trace = pipe_prev->pipe_nxt;
 		}
 	}
@@ -290,22 +304,10 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_prev = NULL;
 
-#if ENABLE_TIME_MEASURE
-	trace_cnt = 0;
-	flush_cnt = 0;
-	
-	struct timeval time_close;
-	struct timeval time_close_end;
-	unsigned long close_time = 0;	
-#endif
-
 	//printf("%s  %d\n", __func__, *total_pipe_cnt);
 
 	if (pipe->pipe_nxt) {
 
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_loop, NULL);
-#endif		
 		/* search next is empty insert new incoming to the pipe buffer tail */
 		while (1) {
 			if (pipe_trace == NULL) {
@@ -323,16 +325,10 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 			pipe_prev = pipe_trace;
 			pipe_trace = pipe_trace->pipe_nxt;
 
-#if ENABLE_TIME_MEASURE			
-			trace_cnt++;
-#endif
 			//printf("Current pipe_trace: %p\n", pipe_trace);
 
 			/* TODO: consider overflow */
 			if (pipe_trace->flush_id < flush_id) {
-#if ENABLE_TIME_MEASURE				
-				gettimeofday(&time_release, NULL);
-#endif
 				//printf("pipe_trace->transfered: %p %p\n", pipe_trace->pipe_dup, pipe_trace);
 
 				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
@@ -344,32 +340,16 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 				
 				ft_clean_pipe(pipe_trace);				
 				put_pipe(pipe_trace);
-
-#if ENABLE_TIME_MEASURE				
-				flush_cnt++;
-#endif				
+	
 				(*pipe_cnt)-=2;
 				(*total_pipe_cnt)-=2;
 
 				printf("release pipe 2 total:%d\n", (*total_pipe_cnt));
 
 				pipe_trace = pipe_prev->pipe_nxt;
-
-#if ENABLE_TIME_MEASURE
-				gettimeofday(&time_release_end, NULL);
-				release_time = tv_to_us(&time_release_end) - tv_to_us(&time_release);
-#endif
-				//printf("[Flush]release_time time:%lu\n", release_time);
 			}
 		}
-#if ENABLE_TIME_MEASURE		
-		gettimeofday(&time_loop_end, NULL);
-#endif	
 	}
-#if ENABLE_TIME_MEASURE	
-	loop_time = tv_to_us(&time_loop_end) - tv_to_us(&time_loop);
-#endif
-	//printf("Flush trace count:%d flush:%d  loop:%lu\n", trace_cnt, flush_cnt, loop_time);
 
 	return ret;
 }
@@ -472,7 +452,7 @@ int cuju_process(struct conn_stream *cs)
 	u_int32_t guest_ip_db = 0;
 	struct guest_ip_list* guest_info = NULL;
 
-	//printf("%s\n", __func__);
+	CJIDRPRINTF("%s data:%zu\n", __func__, ic->buf.data);
 
 	/* area may be zero */
 	*(((char *)ic->buf.area) + ic->buf.data) = '\0';
@@ -481,28 +461,35 @@ int cuju_process(struct conn_stream *cs)
 		return -1;
 	}
 
-	//printf("%s data:%zu\n", __func__, ic->buf.data);
-
 	ipc_ptr = (struct proto_ipc *)ic->buf.area;
 	
 	if((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) && 
 	   (ipc_ptr->conn_count <= DEFAULT_CONN_CNT)) {
-		if (ic->buf.data != DEFAULT_IPC_ARRAY) {
-			return -1;
-		}
 
-		dynamic_ipc = (MAC_LENGTH * ipc_ptr->nic_count) + (CONNECTION_LENGTH * ipc_ptr->conn_count);
+#if 0		
+		if (ic->buf.data != DEFAULT_IPC_ARRAY) {
+			printf("Unexpected IPC Data\n");
+			assert(0); 
+		}
+#endif
+
+		dynamic_ipc = (IP_LENGTH * ipc_ptr->nic_count) + (CONNECTION_LENGTH * ipc_ptr->conn_count);
 		dynamic_array = (u_int8_t*)ic->buf.area + sizeof(struct proto_ipc);
 	}
 	else {
 		if (ic->buf.data != sizeof(struct proto_ipc) + dynamic_ipc) {
-			return -1;
+			printf("Unexpected IPC Data Not Default Value\n");
+			assert(0); 
 		}
 	}
 
 	//if ((ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) || (ipc_ptr->cuju_ft_arp)) {
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
 		//printf ("VM NIC CNT: %d\n", ipc_ptr->nic_count);
+
+		ipc_fd = conn->handle.fd;
+
+		printf("[%s]FD:%d!!!!!\n", __func__, ipc_fd);
 
 		if (ipc_ptr->nic_count) {
 			for(int idx = 0; idx < ipc_ptr->nic_count; idx++) {
@@ -769,4 +756,36 @@ u_int8_t add_ft_fd(u_int16_t ftfd)
 	return 1;
 }
 
+
+uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t* dir)
+{
+	struct proto_ipc* ptr = ipt_target;
+	unsigned int idx = 0;
+
+	if (ipt_target->nic_count) {
+		for (idx = 0; idx < SUPPORT_VM_CNT; idx++) {
+			if (ntohl((ptr+idx)->nic[0]) == source) {
+				*dir = DIR_DEST_CLIENT;;
+				return idx;
+			}
+			if (ntohl((ptr+idx)->nic[0]) == dest) {
+				*dir = DIR_DEST_GUEST;;
+				return idx;
+			}
+
+#if 0			
+			if (*(u_int32_t*)((struct proto_ipc*)(ipt_target + idx)->nic[1]) == source) {
+				*dir = DIR_DEST_CLIENT;;
+				return idx;
+			}
+
+			if (*(u_int32_t*)((struct proto_ipc*)(ipt_target + idx)->nic[1]) == dest) {
+				*dir = DIR_DEST_GUEST;;
+				return idx;
+			}
+#endif	
+		}
+	}
+	return 0;
+}
 #endif

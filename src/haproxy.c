@@ -49,6 +49,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <syslog.h>
+#include <sys/shm.h>
 #include <grp.h>
 #ifdef USE_CPU_AFFINITY
 #include <sched.h>
@@ -128,6 +129,8 @@
 #include <proto/vars.h>
 #include <proto/ssl_sock.h>
 
+#define DEBUG_SHM_IPC 0
+
 /* array of init calls for older platforms */
 DECLARE_INIT_STAGES;
 
@@ -137,6 +140,8 @@ int  pid;			/* current process id */
 int  relative_pid = 1;		/* process id starting at 1 */
 unsigned long pid_bit = 1;      /* bit corresponding to the process id */
 unsigned long all_proc_mask = 1; /* mask of all processes */
+
+struct proto_ipc *ipt_target = NULL; 
 
 volatile unsigned long sleeping_thread_mask; /* Threads that are about to sleep in poll() */
 /* global options */
@@ -2695,6 +2700,8 @@ int main(int argc, char **argv)
 	struct rlimit limit;
 	char errmsg[100];
 	int pidfd = -1;
+	int shm_id = 0;
+
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -2707,6 +2714,28 @@ int main(int argc, char **argv)
 			 LONGBITS, MAX_PROCS);
 		exit(1);
 	}
+	
+    shm_id = shmget((key_t)KEY_SHM_CUJU_IPC, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)), 0666 | IPC_CREAT);
+    if (shm_id == -1) {
+        perror("shmget error");
+        exit(EXIT_FAILURE);
+    }
+    
+    /* attach shared memory */
+    ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
+    if (ipt_target == (void *)-1) {
+        perror("shmget error");
+        exit(EXIT_FAILURE);
+    }
+
+#if DEBUG_SHM_IPC
+	while(1) {
+        printf("Epoch ID:%d\n", ipt_target->epoch_id);
+        printf("Flush ID:%d\n", ipt_target->flush_id);
+        printf("NICCount:%d\n", ipt_target->nic_count);
+
+	}
+#endif
 
 	/* take a copy of initial limits before we possibly change them */
 	getrlimit(RLIMIT_NOFILE, &limit);

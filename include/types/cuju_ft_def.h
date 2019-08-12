@@ -16,6 +16,12 @@
 #define ENABLE_LIST_ADD_TAIL        1
 #endif
 
+#define KEY_SHM_CUJU_IPC     0x0500
+#define SUPPORT_VM_CNT       100
+
+#define USING_SHM_IPC   1
+
+
 struct gctl_ipc
 {
     /* INDEX */

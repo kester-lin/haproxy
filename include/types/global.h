@@ -34,7 +34,7 @@
 #include <types/task.h>
 #include <types/vars.h>
 
-#if 0
+#if 1
 #define ENABLE_EPOLL
 #define USE_ACCEPT4
 #define TPROXY

@@ -370,13 +370,6 @@ gettimeofday(&time_recv_end, NULL);
 	return (ret);
 }
 
-static inline __u64 tv_to_us(const struct timeval* tv) 
-{
-        __u64 us = tv->tv_usec;
-        us += (__u64)tv->tv_sec * (__u64)1000000;
-        return us;
-}
-
 static int mux_pt_snd_pipe(struct conn_stream *cs, struct pipe *pipe)
 {
 #if 0
@@ -398,26 +391,14 @@ static int mux_pt_snd_pipe(struct conn_stream *cs, struct pipe *pipe)
 	if (!pb_event) {
 		tepoll_time = tv_to_us(&time_tepoll_end) - tv_to_us(&time_tepoll);
 
-		printf("Total Time(epoll):  %lu\n", tepoll_time);
+		//printf("Total Time(epoll):  %lu\n", tepoll_time);
 	}
 #endif
 
 #if ENABLE_TIME_MEASURE	
 	gettimeofday(&time_send_end, NULL);
 
-	send_time = tv_to_us(&time_send_end) - tv_to_us(&time_send);
-	send_time_ms = __tv_to_ms(&time_send_end) - __tv_to_ms(&time_send);
-
-    printf("SEND in MUX %lu  %lu\n", send_time, send_time_ms);
-	printf("Flush trace count:%d flush:%d  loop time:%lu Used:%d\n", trace_cnt, flush_cnt, loop_time, fd_pipe_cnt);
-	printf("ft_release_pipe_by_flush time: %lu\n", flush_time);
-	printf("Flush Clock Time: %f \n", time_taken);
-	printf("Pipe NXT Cnt:%d time:%lu\n", next_pipe_cnt++, dup_time);
-    printf("Real Transfer Time:%lu Cnt:%d Data:%d\n", transfer_time, transfer_cnt, transfer_data_cnt);	
-	printf("Release Pipe by Transfer time: %lu\n", rpbt_time);
-	printf("TimeA:%lu TimeB:%lu TimeC:%lu TimeD:%lu GetPipe:%lu DupPipe:%lu AOther:%lu CZ_other:%lu\n", 
-	       time_azone, time_bzone, time_czone, time_dzone, 
-		   get_pipe_time, dup_pipe_time, a_other_time, cz_other_time);
+	time_in_send = tv_to_us(&time_send_end) - tv_to_us(&time_send);
 #endif
 
 	return (ret);

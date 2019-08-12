@@ -1827,6 +1827,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	struct stream_interface *si_f, *si_b;
 	unsigned int rate;
 
+	//printf("[%s:] Enter ID:%d\n", __func__, pthread_self());
+
 	activity[tid].stream++;
 
 	req = &s->req;

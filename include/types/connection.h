@@ -471,13 +471,13 @@ struct connection {
 	uint16_t backend_pipecnt;
 	uint16_t frontend_pipecnt;
 	struct timeval recv_time;
-	uint8_t pending_recv;
 	struct pipe* pipe_buf_tail;
 
 	struct pipe* sent_pipe;
 	struct pipe* sent_pipe_tail;
 	uint32_t last_flush_id; 
 
+	uint16_t shm_idx;
 #endif
 };
 enum dir_mode {

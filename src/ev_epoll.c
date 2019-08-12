@@ -32,6 +32,13 @@
 #include <types/cuju_ft.h>
 #include <types/cuju_ft_def.h>
 
+#define DEBUG_EPOLL 0
+#if DEBUG_EPOLL
+#define EPOLLPRINTF(x...) printf(x)
+#else
+#define EPOLLPRINTF(x...)
+#endif
+
 /* private data */
 static THREAD_LOCAL struct epoll_event *epoll_events = NULL;
 static int epoll_fd[MAX_THREADS]; // per-thread epoll_fd
@@ -184,7 +191,7 @@ REGPRM3 static void _do_poll(struct poller *p, int exp, int wake)
 #if ENABLE_EPOLL_MIGRATION
 		if (pb_event) {
 			pb_cnt++;
-			//printf("PB EPOLL Event Get\n");
+			EPOLLPRINTF("PB EPOLL Event Get\n");
 			break;
 		}
 #endif
@@ -211,7 +218,7 @@ REGPRM3 static void _do_poll(struct poller *p, int exp, int wake)
 			activity[tid].poll_dead++;
 			continue;
 		}
-		//printf("EPOLL Event (%d) Get FD:%d\n", status, fd);	
+		EPOLLPRINTF("Get Event (%d/%d) FD:%d Pipe:%d\n", count, status, fd, fd_pipe_cnt);	
 
 		if (!(fdtab[fd].thread_mask & tid_bit)) {
 			/* FD has been migrated */
