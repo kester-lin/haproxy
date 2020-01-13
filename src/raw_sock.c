@@ -143,7 +143,9 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	int ret;
 	int retval = 0;
 	struct in_addr ipv4_to;
+	in_port_t ipv4_to_port;
 	struct in_addr ipv4_from;
+	in_port_t ipv4_from_port;
 	struct guest_ip_list* guest_info = NULL;
 	//uint32_t epoch_id = 0;
 	//uint32_t flush_id = 0;
@@ -182,6 +184,11 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
+	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;	
+
+	//printf("NETLINK IP:%08x Port:%04x\n", ntohl(ipv4_to.s_addr), ntohs(ipv4_to_port));
+
 
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
@@ -651,7 +658,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #if 1
 		//printf ("Last Flush ID:%d Current Flsuh ID:%d\n", conn->last_flush_id, curr_flush_id);
 		if (conn->last_flush_id != curr_flush_id) {
-			printf("fd_pipe_cnt:%d\n", fd_pipe_cnt);
+			DSRPRINTF("fd_pipe_cnt:%d\n", fd_pipe_cnt);
 			pipe_loop = conn->sent_pipe ;
 			loop_cnt = 0;
 			conn->last_flush_id = curr_flush_id;
@@ -906,6 +913,11 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 {
 	ssize_t ret;
 	size_t try, done = 0;
+	struct in_addr ipv4_to;
+	in_port_t ipv4_to_port;
+	struct in_addr ipv4_from;
+	in_port_t ipv4_from_port;
+	int nl_ret = 0;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -930,6 +942,53 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 		}
 	}
 
+	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
+	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+
+	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
+	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;
+
+#if USING_SHM_IPC
+	if (!conn->shm_idx) {
+		conn->shm_idx = getshmid(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+	}
+
+    SHMFPRINTF("IPC Epoch ID:%d\n", (ipt_target + conn->shm_idx)->epoch_id);
+	SHMFPRINTF("IPC Flush ID:%d\n", (ipt_target + conn->shm_idx)->flush_id);
+	SHMFPRINTF("DIRECTION :%d\n", conn->direction);
+
+	if (conn->direction == DIR_DEST_GUEST) {
+    	nl_ipc.epoch_id = 0x0;
+        nl_ipc.flush_id = 0x0;
+        nl_ipc.cuju_ft_mode = NL_TARGET_ADD_IN;
+        nl_ipc.nic_count = 0;
+		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
+		nl_ipc.conn_port = ntohs(ipv4_to_port);
+	}
+	else {
+		/* DIR_DEST_CLIENT */ 
+    	nl_ipc.epoch_id = 0x0;
+        nl_ipc.flush_id = 0x0;
+        nl_ipc.cuju_ft_mode = NL_TARGET_ADD_OUT;
+        nl_ipc.nic_count = 0;
+		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
+		nl_ipc.conn_port = ntohs(ipv4_from_port);
+	}
+
+	memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
+
+	printf("[%s] NETLINK IP:%08x Port:%04x\n", __func__, nl_ipc.conn_ip, nl_ipc.conn_port);
+
+	nl_ret = sendmsg(nl_sock_fd, &nl_msg, 0);
+
+	if (nl_ret < 0) {
+		perror("send msg failed!\n");
+		close(nl_sock_fd);
+		return 0;
+	}
+	printf("[%s] NETLINK Result:%d\n", __func__, nl_ret);
+
+#endif	
 	/* read the largest possible block. For this, we perform only one call
 	 * to recv() unless the buffer wraps and we exactly fill the first hunk,
 	 * in which case we accept to do it once again. A new attempt is made on

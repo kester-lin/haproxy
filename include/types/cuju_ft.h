@@ -3,6 +3,7 @@
 
 #include <types/cuju_ft_def.h>
 #include <proto/pipe.h>
+#include <linux/netlink.h>
 
 extern int pb_event;
 
@@ -31,6 +32,12 @@ extern u_int16_t ipc_fd;
 
 extern int trace_cnt;
 extern int flush_cnt;
+
+/* NETLINK */
+extern int nl_sock_fd;
+extern struct msghdr nl_msg;
+extern struct netlink_ipc nl_ipc;
+extern struct nlmsghdr *nlh;
 
 #if ENABLE_TIME_MEASURE_EPOLL	
 extern struct timeval time_tepoll;
@@ -92,6 +99,13 @@ extern unsigned long time_in_sicsp_int;
 #define COPY_PIPE_COPY 0
 #define COPY_PIPE_CLEAN 1
 
+/* Netlink FT action */
+#define NL_TARGET_ADD_IN  0xFFFF
+#define NL_TARGET_DEL_IN  0xEEEE  
+#define NL_TARGET_ADD_OUT 0xDDDD
+#define NL_TARGET_DEL_OUT 0xCCCC  
+
+
 /* cuju_ft_mode */
 enum CUJU_FT_MODE
 {
@@ -139,6 +153,17 @@ struct ft_fd_list
 {
     u_int16_t ft_fd;
     struct list list;
+};
+
+struct netlink_ipc 
+{
+    u_int32_t epoch_id;
+    u_int32_t flush_id;
+    u_int16_t cuju_ft_mode;
+    u_int16_t nic_count;
+    unsigned int nic[TOTAL_NIC];
+    u_int32_t conn_ip;
+    u_int16_t conn_port; 
 };
 
 #endif /* End of ENABLE_CUJU_IPC*/

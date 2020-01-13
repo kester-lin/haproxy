@@ -129,6 +129,8 @@
 #include <proto/vars.h>
 #include <proto/ssl_sock.h>
 
+#define MAX_PAYLOAD 384
+
 #define DEBUG_SHM_IPC 0
 
 /* array of init calls for older platforms */
@@ -2702,6 +2704,82 @@ int main(int argc, char **argv)
 	int pidfd = -1;
 	int shm_id = 0;
 
+    struct sockaddr_nl src_addr;
+    struct sockaddr_nl dest_addr;
+    struct iovec iov;
+    
+	int sock_fd = 0;
+	
+
+    nl_sock_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
+    if (nl_sock_fd < 0) {
+        perror("create socket failed!\n");
+        return -1;
+    }
+
+	printf("Netlink Socket ID:%d\n", nl_sock_fd);
+   
+    memset(&src_addr, 0, sizeof(struct sockaddr_nl));
+    src_addr.nl_family = AF_NETLINK;
+    src_addr.nl_pid = getpid();
+    src_addr.nl_groups = 0;
+ 
+    if (bind(nl_sock_fd, (struct sockaddr *)&src_addr, sizeof(struct sockaddr)) < 0) {
+        perror("bind socket failed!\n");
+        close(nl_sock_fd);
+        return -1;
+    }
+
+    memset(&dest_addr, 0, sizeof(struct sockaddr_nl));
+    dest_addr.nl_family = AF_NETLINK;
+    dest_addr.nl_pid = 0;
+    dest_addr.nl_groups = 0;
+    
+    nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
+    if (nlh == NULL) {
+        perror("malloc nlmsghdr failed!\n");
+        close(nl_sock_fd);
+        return -1;
+    } 
+    memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+    nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
+    nlh->nlmsg_pid = getpid();
+    nlh->nlmsg_flags = 0;
+
+    iov.iov_base = (void *)nlh;
+    iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+
+	memset(&nl_msg, 0, sizeof(struct msghdr));
+    nl_msg.msg_name = (void *)&dest_addr;
+    nl_msg.msg_namelen = sizeof(struct sockaddr_nl);
+    nl_msg.msg_iov = &iov;
+    nl_msg.msg_iovlen = 1;
+
+#if 1	
+/* Netlink FT action */
+//#define NL_TARGET_ADD_IN  0xFFFF
+//#define NL_TARGET_DEL_IN  0xEEEE  
+
+ 
+#else
+    strcpy(NLMSG_DATA(nlh), "Hello kernel!");
+
+    iov.iov_base = (void *)nlh;
+    iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+
+    memset(&msg, 0, sizeof(struct msghdr));
+    msg.msg_name = (void *)&dest_addr;
+    msg.msg_namelen = sizeof(struct sockaddr_nl);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+ 
+    if (sendmsg(sock_fd, &msg, 0) < 0) {
+        perror("send msg failed!\n");
+        free(nlh);
+        close(sock_fd);
+        return -1;
+    }
+#endif
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 

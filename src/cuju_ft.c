@@ -77,6 +77,12 @@ int pb_event = 0;
 int trace_cnt = 0;
 int flush_cnt = 0;
 
+/* NETLINK */
+int nl_sock_fd = 0;
+struct msghdr nl_msg;
+struct netlink_ipc nl_ipc;	
+struct nlmsghdr *nlh = NULL;
+
 #if ENABLE_TIME_MEASURE_EPOLL
 struct timeval time_tepoll;
 struct timeval time_tepoll_end;
