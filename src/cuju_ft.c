@@ -232,10 +232,8 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 				ret = 0;
 				continue;
 			}
-
 			return ret;
 		}
-
 		break;
 	}
 
@@ -525,14 +523,18 @@ int cuju_process(struct conn_stream *cs)
 	}
 	
 	/* Set GCTL */
+	printf("Cuju FT mode Check\n");
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_RUN) {
 		guest_info->gctl_ipc.epoch_id = ipc_ptr->epoch_id;
-		CJIDRPRINTF("Epoch ID:%u\n", ipc_ptr->epoch_id);
+		CJIDRPRINTF("[%s] Epoch ID:%u\n", __func__, ipc_ptr->epoch_id);
 	}
-
-	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
+	else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
 		guest_info->gctl_ipc.flush_id =	ipc_ptr->epoch_id;
-		CJIDRPRINTF("Flush ID:%u\n", ipc_ptr->epoch_id);
+		CJIDRPRINTF("[%s] Flush ID:%u\n", __func__, ipc_ptr->epoch_id);
+	}
+	else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_HANDOVER) {
+		printf("[%s] Failover:%u\n", __func__, ipc_ptr->epoch_id);
+		CJIDRPRINTF("[%s] Failover:%u\n", __func__, ipc_ptr->epoch_id);
 	}
 
 	//printf("cuju_ft_mode is %d\n", ipc_ptr->cuju_ft_mode);
@@ -768,13 +770,15 @@ uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t* dir)
 	struct proto_ipc* ptr = ipt_target;
 	unsigned int idx = 0;
 
-	if (ipt_target->nic_count) {
+	//if (ipt_target->nic_count) {
 		for (idx = 0; idx < SUPPORT_VM_CNT; idx++) {
-			if (ntohl((ptr+idx)->nic[0]) == source) {
+			if ((source != 0) && (ntohl((ptr+idx)->nic[0]) == source)) {
+				printf("[%s] DIR_DEST_CLIENT\n", __func__);
 				*dir = DIR_DEST_CLIENT;;
 				return idx;
 			}
-			if (ntohl((ptr+idx)->nic[0]) == dest) {
+			if ((dest != 0) && (ntohl((ptr+idx)->nic[0]) == dest)) {
+				printf("[%s] DIR_DEST_GUEST\n", __func__);
 				*dir = DIR_DEST_GUEST;;
 				return idx;
 			}
@@ -791,7 +795,7 @@ uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t* dir)
 			}
 #endif	
 		}
-	}
+	//}
 	return 0;
 }
 #endif

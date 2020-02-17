@@ -193,6 +193,10 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
 		conn->shm_idx = getshmid(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+	
+		if (conn->shm_idx == 0) {
+			SHMFPRINTF("IPC SHM ID is zero\n");
+		}
 	}
 
     SHMFPRINTF("IPC Epoch ID:%d\n", (ipt_target + conn->shm_idx)->epoch_id);
@@ -353,6 +357,10 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
 		conn->shm_idx = getshmid(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+		
+		if (conn->shm_idx == 0) {
+			SHMFPRINTF("IPC SHM ID is zero\n");
+		}
 	}
 
     SHMFPRINTF("IPC Epoch ID:%d\n", (ipt_target + conn->shm_idx)->epoch_id);
@@ -408,7 +416,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			DSRPRINTF("Create pipe 2 total:%d\n", fd_pipe_cnt);
 			conn->backend_pipecnt+=2;
 		}
-		else {
+		else if (conn->direction == DIR_DEST_CLIENT) {
 			DSRPRINTF("DIR_DEST_CLIENT\n");
 
 			pipe_buf = get_pipe();
@@ -429,6 +437,10 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 			DSRPRINTF("Create pipe 1 total:%d\n", fd_pipe_cnt);
 			conn->frontend_pipecnt++;
+		}
+		else {
+			printf("No Direction/ No FT mode\n");
+
 		}
 	}
 	else {
@@ -951,6 +963,10 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
 		conn->shm_idx = getshmid(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
+	
+		if (conn->shm_idx == 0) {
+			SHMFPRINTF("IPC SHM ID is zero\n");
+		}	
 	}
 
     SHMFPRINTF("IPC Epoch ID:%d\n", (ipt_target + conn->shm_idx)->epoch_id);
@@ -964,8 +980,21 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
         nl_ipc.nic_count = 0;
 		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
 		nl_ipc.conn_port = ntohs(ipv4_to_port);
+		
+		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
+
+		printf("[%s] NETLINK IP:%08x Port:%04x\n", __func__, nl_ipc.conn_ip, nl_ipc.conn_port);
+
+		nl_ret = sendmsg(nl_sock_fd, &nl_msg, 0);
+
+		if (nl_ret < 0) {
+			perror("send msg failed!\n");
+			close(nl_sock_fd);
+			return 0;
+		}
+		printf("[%s] NETLINK Result:%d\n", __func__, nl_ret);
 	}
-	else {
+	else if (conn->direction == DIR_DEST_CLIENT) {
 		/* DIR_DEST_CLIENT */ 
     	nl_ipc.epoch_id = 0x0;
         nl_ipc.flush_id = 0x0;
@@ -973,20 +1002,25 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
         nl_ipc.nic_count = 0;
 		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
 		nl_ipc.conn_port = ntohs(ipv4_from_port);
+
+		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
+
+		printf("[%s] NETLINK IP:%08x Port:%04x\n", __func__, nl_ipc.conn_ip, nl_ipc.conn_port);
+
+		nl_ret = sendmsg(nl_sock_fd, &nl_msg, 0);
+
+		if (nl_ret < 0) {
+			perror("send msg failed!\n");
+			close(nl_sock_fd);
+			return 0;
+		}
+		printf("[%s] NETLINK Result:%d\n", __func__, nl_ret);
+	}
+	else {
+		SHMFPRINTF("IPC SHM ID is zero and no netlink\n");
 	}
 
-	memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
 
-	printf("[%s] NETLINK IP:%08x Port:%04x\n", __func__, nl_ipc.conn_ip, nl_ipc.conn_port);
-
-	nl_ret = sendmsg(nl_sock_fd, &nl_msg, 0);
-
-	if (nl_ret < 0) {
-		perror("send msg failed!\n");
-		close(nl_sock_fd);
-		return 0;
-	}
-	printf("[%s] NETLINK Result:%d\n", __func__, nl_ret);
 
 #endif	
 	/* read the largest possible block. For this, we perform only one call

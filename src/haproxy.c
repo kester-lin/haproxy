@@ -2807,11 +2807,11 @@ int main(int argc, char **argv)
     }
 
 #if DEBUG_SHM_IPC
+	
 	while(1) {
-        printf("Epoch ID:%d\n", ipt_target->epoch_id);
-        printf("Flush ID:%d\n", ipt_target->flush_id);
-        printf("NICCount:%d\n", ipt_target->nic_count);
-
+        printf("Epoch ID:%d\n", (ipt_target+1)->epoch_id);
+        printf("Flush ID:%d\n", (ipt_target+1)->flush_id);
+        printf("NICCount:%d\n", (ipt_target+1)->nic_count);
 	}
 #endif
 
