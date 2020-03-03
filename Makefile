@@ -56,6 +56,7 @@
 #   USE_SYSTEMD          : enable sd_notify() support.
 #   USE_OBSOLETE_LINKER  : use when the linker fails to emit __start_init/__stop_init
 #   USE_THREAD_DUMP      : use the more advanced thread state dump system. Automatic.
+#   USE_SOCCR			 : use TCP_REPAIR socket option library
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
 # "USE_xxx=" (empty string). The list of enabled and disabled options for a
@@ -226,7 +227,7 @@ TRACE =
 #### Additional include and library dirs
 # Redefine this if you want to add some special PATH to include/libs
 ADDINC =
-ADDLIB =
+ADDLIB = 
 
 #### Specific macro definitions
 # Use DEFINE=-Dxxx to set any tunable macro. Anything declared here will appear
@@ -291,7 +292,7 @@ use_opts = USE_EPOLL USE_KQUEUE USE_MY_EPOLL USE_MY_SPLICE USE_NETFILTER      \
            USE_GETADDRINFO USE_OPENSSL USE_LUA USE_FUTEX USE_ACCEPT4          \
            USE_MY_ACCEPT4 USE_ZLIB USE_SLZ USE_CPU_AFFINITY USE_TFO USE_NS    \
            USE_DL USE_RT USE_DEVICEATLAS USE_51DEGREES USE_WURFL USE_SYSTEMD  \
-           USE_OBSOLETE_LINKER USE_PRCTL USE_THREAD_DUMP USE_EVPORTS
+           USE_OBSOLETE_LINKER USE_PRCTL USE_THREAD_DUMP USE_EVPORTS USE_SOCCR
 
 #### Target system options
 # Depending on the target platform, some options are set, as well as some
@@ -605,6 +606,11 @@ ifneq ($(USE_SYSTEMD),)
 OPTIONS_LDFLAGS += -lsystemd
 endif
 
+ifeq ($(USE_SOCCR),)
+#OPTIONS_LDFLAGS += -L./soccr -lsoccr libsoccr.a -lnet
+OPTIONS_LDFLAGS += -L./soccr -lsoccr ./soccr/libsoccr.a -lnet
+endif
+
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
 ifneq ($(USE_PCRE2)$(USE_STATIC_PCRE2)$(USE_PCRE2_JIT),)
 $(error cannot compile both PCRE and PCRE2 support)
@@ -778,7 +784,7 @@ OBJS = src/proto_http.o src/cfgparse-listen.o src/proto_htx.o src/stream.o    \
        src/protocol.o src/arg.o src/hpack-huff.o src/hdr_idx.o src/base64.o   \
        src/hash.o src/mailers.o src/activity.o src/http_msg.o src/version.o   \
        src/mworker.o src/mworker-prog.o src/debug.o src/wdt.o src/dict.o      \
-       src/xprt_handshake.o src/cuju_ft.o
+       src/xprt_handshake.o src/cuju_ft.o src/tcp_repair.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o $(EBTREE_DIR)/eb32sctree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \

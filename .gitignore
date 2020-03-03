@@ -25,7 +25,6 @@
 !/debian
 !/scripts
 !/reg-tests
-!/cuju_ipc
 # Reject some generic files
 *.o
 *~

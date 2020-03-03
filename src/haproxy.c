@@ -2707,9 +2707,12 @@ int main(int argc, char **argv)
     struct sockaddr_nl src_addr;
     struct sockaddr_nl dest_addr;
     struct iovec iov;
+
+	pthread_t ipc;
+	pthread_create(&ipc, NULL, ipc_handler, "Child");
     
+#if USING_NETLINK	
 	int sock_fd = 0;
-	
 
     nl_sock_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
     if (nl_sock_fd < 0) {
@@ -2754,32 +2757,30 @@ int main(int argc, char **argv)
     nl_msg.msg_namelen = sizeof(struct sockaddr_nl);
     nl_msg.msg_iov = &iov;
     nl_msg.msg_iovlen = 1;
-
-#if 1	
-/* Netlink FT action */
-//#define NL_TARGET_ADD_IN  0xFFFF
-//#define NL_TARGET_DEL_IN  0xEEEE  
-
- 
-#else
-    strcpy(NLMSG_DATA(nlh), "Hello kernel!");
-
-    iov.iov_base = (void *)nlh;
-    iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
-
-    memset(&msg, 0, sizeof(struct msghdr));
-    msg.msg_name = (void *)&dest_addr;
-    msg.msg_namelen = sizeof(struct sockaddr_nl);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
- 
-    if (sendmsg(sock_fd, &msg, 0) < 0) {
-        perror("send msg failed!\n");
-        free(nlh);
-        close(sock_fd);
-        return -1;
-    }
 #endif
+
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x20);
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x40);
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x60);
+	
+	show_target_rule(&vm_head.vm_list);
+	printf("\n");
+
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
+	
+	show_target_rule(&vm_head.vm_list);
+
+
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
+	show_target_rule(&vm_head.vm_list);
+
+
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
+	show_target_rule(&vm_head.vm_list);
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 

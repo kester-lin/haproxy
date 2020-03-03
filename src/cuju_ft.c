@@ -13,7 +13,12 @@
 #include <proto/stream_interface.h>
 #include <sys/sendfile.h>
 
-
+#include <sys/shm.h>
+#include <fcntl.h> 
+#include <libs/soccr.h>
+#include <types/tcp_repair.h>
+#include <common/libnet-structures.h>
+#include <common/libnet-macros.h>
 #ifdef DEBUG_FULL
 #include <assert.h>
 #endif
@@ -55,6 +60,22 @@ static struct guest_ip_list gip_list = {
 #else
 #define CJIDRPRINTF(x...)
 #endif
+
+
+#define DEBUG_MSG 0
+#if DEBUG_MSG
+#define MSG_PRINTF(x...) printf(x)
+#else
+#define MSG_PRINTF(x...)
+#endif
+
+#define DEBUG_IPC 0
+#if DEBUG_IPC
+#define IPC_PRINTF(x...) printf(x)
+#else
+#define IPC_PRINTF(x...)
+#endif
+
 
 #define SUPPORT_VM_CNT       100
 
@@ -128,7 +149,11 @@ struct timeval time_sicsp_int;
 struct timeval time_sicsp_int_end;
 unsigned long time_in_sicsp_int = 0;
 #endif
-	
+
+#if USING_SNAPSHOT_THREAD
+
+#endif
+
 #if FAKE_CUJU_ID
 /* FAKE */
 unsigned long flush_count = 1;
@@ -173,6 +198,12 @@ unsigned long ft_get_epochcnt()
 
 
 #define MAX_SPLICE_AT_ONCE	(1<<30)
+
+
+#define MAX_PAYLOAD 384
+unsigned int total_ipc_idx = 1;
+void *ipc_connection_handler(void *socket_desc);
+
 #if 0
 REGPRM1 static inline unsigned long tv_to_us(struct timeval *tv)
 {
@@ -799,3 +830,731 @@ uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t* dir)
 	return 0;
 }
 #endif
+
+struct vm_list vm_head = {
+	.vm_list = LIST_HEAD_INIT(vm_head.vm_list)
+	//.skid_head = LIST_HEAD_INIT(vm_head.skid_head)
+};
+
+struct vm_list* target_in_table(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
+{
+    /* search and insert */  
+    struct vm_list* target;
+    struct vmsk_list* target_sk;
+
+    list_for_each_entry(target, table, vm_list) {
+        if (target->vm_ip == vm_ip) {
+            list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
+                if (target_sk->socket_id == socket_id) {
+                    /* already exist */
+                    return target;
+                }    
+            }                
+        }
+    }
+
+    return NULL;
+}
+
+
+int add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
+{
+    struct vm_list * new_vm = NULL;
+    struct vmsk_list * new_sk = NULL;
+
+    if (LIST_ISEMPTY(table)) {
+        new_vm = (struct vm_list *)malloc(sizeof(struct vm_list));
+
+        if (new_vm == NULL) {
+            return -1;
+        }
+
+        new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+       
+        if (new_sk == NULL) {
+            free(new_vm);
+            return -1;
+        }
+
+        new_vm->vm_ip = vm_ip;
+        new_sk->socket_id = socket_id;
+        //LIST_HEAD_INIT(&new_vm->skid_head);
+        //list_add_tail(&new_sk->skid_list, &new_vm->skid_head);
+        //list_add_tail(&new_vm->vm_list, table);
+		new_vm->skid_head.skid_list.n = &new_vm->skid_head.skid_list;
+		new_vm->skid_head.skid_list.p = &new_vm->skid_head.skid_list;
+		//new_vm->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+
+		LIST_ADDQ(&new_vm->skid_head.skid_list, &new_sk->skid_list);
+		LIST_ADDQ(&vm_head.vm_list, &new_vm->vm_list);
+
+        return 0;
+    }
+    else {
+        /* search and insert */  
+        struct vm_list * target = NULL;
+        struct vmsk_list * target_sk = NULL;
+
+        list_for_each_entry(target, table, vm_list) {
+            if (target->vm_ip == vm_ip) {
+                /* insert new port to target IP */ 
+                list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
+                    if (target_sk->socket_id == socket_id) {
+                        /* already exist */
+                        return 0;
+                    }    
+                }
+                
+                new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+       
+                if (new_sk == NULL) {
+                    return -1;
+                }
+                new_sk->socket_id = socket_id;
+
+				LIST_ADDQ(&target->skid_head.skid_list, &new_sk->skid_list);
+
+                return 0;
+            }
+        }
+    
+        new_vm = (struct vm_list *)malloc(sizeof(struct vm_list));
+
+        if (new_vm == NULL) {
+            return -1;
+        }
+
+        new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+       
+        if (new_sk == NULL) {
+            free(new_vm);
+            return -1;
+        }
+
+        new_vm->vm_ip = vm_ip;
+        new_sk->socket_id = socket_id;
+
+		new_vm->skid_head.skid_list.n = &new_vm->skid_head.skid_list;
+		new_vm->skid_head.skid_list.p = &new_vm->skid_head.skid_list;
+		//new_vm->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+
+		LIST_ADDQ(&new_vm->skid_head.skid_list, &new_sk->skid_list);
+		LIST_ADDQ(&vm_head.vm_list, &new_vm->vm_list);
+
+        return 0;
+
+    }
+
+    /* Can't find the target IP */
+    return -1; 
+}
+
+
+int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
+{
+    /* search and insert */  
+    struct vm_list* target = NULL;
+    struct vm_list* t_temp = NULL;
+    struct vmsk_list* target_sk = NULL;
+    struct vmsk_list* sk_temp = NULL;
+
+    list_for_each_entry_safe(target, t_temp, table, vm_list) {
+        printf("\t\tFind IP in delete:%08x\n", target->vm_ip);
+
+        if (target->vm_ip == vm_ip) {
+            list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
+                 if (target_sk->socket_id == socket_id) {
+                    printf("\t\tRemove SK:%08x\n", target_sk->socket_id);
+                    LIST_DEL(&target_sk->skid_list);
+                    free(target_sk);
+                }
+            }
+
+            if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
+                LIST_DEL(&target->vm_list);
+                free(target);
+            }
+            break;
+        }
+    }
+
+    return 0;
+}
+
+int show_target_rule(struct list *table)
+{
+    struct vm_list* target;
+    struct vmsk_list* target_sk;
+
+    printf("========================= START =========================\n");
+
+    list_for_each_entry(target, table, vm_list) {
+        printf( "IP:%08x:", target->vm_ip);
+        list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
+            printf("\tSocket ID:%08x\n", target_sk->socket_id);
+        }
+    }
+    printf("========================= END =========================\n");
+
+    return 0;
+}
+
+int clean_target_list(struct list *table)
+{
+    struct vm_list* target = NULL;
+    struct vm_list* t_temp = NULL;
+    struct vmsk_list* target_sk = NULL;
+    struct vmsk_list* sk_temp = NULL;
+
+    list_for_each_entry_safe(target, t_temp, table, vm_list) {
+        printf("\t\tFind IP in clean list:%08x\n", target->vm_ip);
+
+        if (target != NULL) {
+
+            list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
+                 if (target_sk != NULL) {
+                    printf("\t\tRemove socket ID in clean list:%08x\n", target_sk->socket_id);
+                    LIST_DEL(&target_sk->skid_list);
+                    free(target_sk);
+                }
+            }
+
+            if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
+				LIST_DEL(&target->vm_list);
+                free(target);
+            }
+        }
+    }
+
+    return 0;    
+}
+
+/**
+ * #################################################### ipc_handler ####################################################
+ */
+
+#if 1
+
+struct fo_list fo_head = {
+	.fo_list = LIST_HEAD_INIT(fo_head.fo_list)
+};
+
+struct fo_list* pop_failover(unsigned int nic)
+{
+    struct fo_list* target = NULL;
+    struct fo_list* out_temp = NULL;
+
+    IPC_PRINTF("Pop targte:%08x\n", nic);
+
+    list_for_each_entry_safe(target, out_temp, &fo_head.fo_list, fo_list) {
+        IPC_PRINTF("List target: %08x\n", target->nic); 
+        if (target->nic == nic) {
+            IPC_PRINTF("\tRemove failover list\n");
+            LIST_DEL(&target->fo_list);
+            return target;
+        }
+    }
+    return NULL;
+}
+
+void* ipc_handler(void)
+{
+    int shm_id = 0;
+    struct proto_ipc *ipt_target = NULL; 
+    //socket的建立
+ 
+    int sockfd = 0; 
+    int forClientSockfd = 0;       
+    struct sockaddr_in serverInfo;
+    struct sockaddr_in clientInfo;
+    int addrlen = sizeof(clientInfo);
+    pthread_t thread_id;
+    struct thread_data thread_data;
+
+#if USING_NETLINK
+    int netlink_sock_fd = 0;  
+    struct sockaddr_nl src_addr;
+#endif 
+  
+
+    IPC_PRINTF("Start\n\n");
+
+    /* get the ID of shared memory */
+    shm_id = shmget((key_t)KEY_SHM_CUJU_IPC, SUPPORT_VM_CNT*(sizeof(struct proto_ipc)), 0666|IPC_CREAT);
+    
+    if (shm_id == -1) {
+        perror("shmget error\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    /* attach shared memory */
+    ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
+    if (ipt_target == (void *)-1) {
+        perror("shmget error");
+        exit(EXIT_FAILURE);
+    }
+
+    IPC_PRINTF("Shared Memory Ok\n");
+
+    memset(ipt_target, 0x00, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
+
+    IPC_PRINTF("share memory start:%p total max:%lu\n", ipt_target, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
+
+#if USING_NETLINK
+    netlink_sock_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
+    if (netlink_sock_fd <= 0) {
+        perror("create socket failed!\n");
+        return -1;
+    }
+
+    printf("Netlink Socket ID:%d\n", netlink_sock_fd);
+   
+    memset(&src_addr, 0, sizeof(struct sockaddr_nl));
+    src_addr.nl_family = AF_NETLINK;
+    src_addr.nl_pid = getpid();
+    src_addr.nl_groups = 0;
+ 
+    if (bind(netlink_sock_fd, (struct sockaddr *)&src_addr, sizeof(struct sockaddr)) < 0) {
+        perror("bind socket failed!\n");
+        close (netlink_sock_fd);
+        return -1;
+    }
+#endif
+
+#if 0//DEBUG_SHM
+    while(1) {
+        ipt_target->epoch_id++;
+        usleep(5000);
+    } 
+#else 
+    sockfd = socket(AF_INET , SOCK_STREAM , 0);
+
+    if (sockfd == -1){
+        perror("Fail to create a socket.\n");
+    }
+
+    //socket的連線
+    bzero(&serverInfo, sizeof(serverInfo));
+
+    serverInfo.sin_family = PF_INET;
+    serverInfo.sin_addr.s_addr = INADDR_ANY;
+    serverInfo.sin_port = htons(1200);
+
+    bind(sockfd, (struct sockaddr *)&serverInfo, sizeof(serverInfo));
+    
+    listen(sockfd, 5);
+	
+    IPC_PRINTF("Wait accepted\n");
+
+    while((forClientSockfd = accept(sockfd, (struct sockaddr *)&clientInfo, (socklen_t*)&addrlen)) > 0 )
+    {
+        IPC_PRINTF("Connection accepted:%d\n", forClientSockfd);
+
+        thread_data.th_idx = total_ipc_idx++;
+        thread_data.th_sock = forClientSockfd;
+#if 0
+        if (list_empty(&failover_list)){
+            printf("list is empty\n");
+            thread_data.th_sock = forClientSockfd;
+        }
+        else {
+            printf("list is not empty\n");
+            thread_data.th_sock = 0;
+        }
+#endif
+        thread_data.ipt_base = ipt_target;
+        ////thread_data.netlink_sock = netlink_sock_fd;
+
+        if(pthread_create(&thread_id, NULL, ipc_connection_handler, (void*) &thread_data) < 0)
+        {
+            perror("could not create thread");
+            goto func_error;
+        }
+         
+        //Now join the thread , so that we dont terminate before the thread
+        //pthread_join( thread_id , NULL);
+        IPC_PRINTF("Handler assigned\n");
+    }
+
+    IPC_PRINTF("Close\n");
+#endif
+
+    /* detach shared memory */
+    if (shmdt(ipt_target) == -1) {
+        perror("shmdt");
+        goto func_error;
+    }
+    
+    /* destroy shared memory */
+    if (shmctl(shm_id, IPC_RMID, 0) == -1) {
+        perror("shmctl");
+        goto func_error;
+    }
+func_error:    
+    pthread_exit(NULL);
+}
+/*
+ * This will handle connection for each client
+ * */
+void *ipc_connection_handler(void *socket_desc)
+{
+    //Get the socket descriptor
+    int sock = ((struct thread_data*)socket_desc)->th_sock;
+    int shm_idx = ((struct thread_data*)socket_desc)->th_idx;
+    int primary_shm_idx = 0;
+    struct proto_ipc * ipt_addr = NULL;
+    //struct proto_ipc * ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
+
+    int read_size = 0;
+    unsigned char client_message[sizeof(struct proto_ipc)];
+    struct proto_ipc* ipc_ptr = NULL;
+    //u_int32_t guest_ip_db = 0; 
+    unsigned int base_nic = 0x0;
+    struct fo_list* fo_temp = NULL;
+
+#if USING_NETLINK	
+	int sock_fd = ((struct thread_data*)socket_desc)->netlink_sock;
+    struct sockaddr_nl dest_addr;
+    struct nlmsghdr *nlh = NULL;
+    struct iovec iov;
+    struct msghdr msg;
+    struct netlink_ipc nl_ipc;
+ 
+    memset(&dest_addr, 0, sizeof(struct sockaddr_nl));
+    dest_addr.nl_family = AF_NETLINK;
+    dest_addr.nl_pid = 0;
+    dest_addr.nl_groups = 0;
+    
+	nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
+    if (nlh == NULL) {
+        perror("malloc nlmsghdr failed!\n");
+        close(sock_fd);
+        return 0;
+    } 
+    memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+    nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
+    nlh->nlmsg_pid = getpid();
+    nlh->nlmsg_flags = 0;
+ 
+    iov.iov_base = (void *)nlh;
+    iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+
+    memset(&msg, 0, sizeof(struct msghdr));
+    msg.msg_name = (void *)&dest_addr;
+    msg.msg_namelen = sizeof(struct sockaddr_nl);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    
+	MSG_PRINTF("[%s]\n", __func__); 
+#endif
+    //if (shm_idx != 0) {
+    //    ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
+    //}
+
+
+    while(read_size == recv(sock, client_message, 2000, 0))
+    {
+        //end of string marker
+		//client_message[read_size] = '\0';
+#if 0
+        printf("Size:%d\n", read_size); 
+      
+        for (int idx = 0; idx < read_size; idx++) {
+            printf("%02x ", *(client_message + idx));
+
+            if (idx % 8 == 7)
+                printf("\n");    
+        }
+        printf("\n"); 
+#endif
+        ipc_ptr = (struct proto_ipc*)client_message;
+
+        //printf("NIC: %08x\n", ipc_ptr->nic[0]);
+
+        IPC_PRINTF("shm_idx:%d p_shm_idx:%d True:%d\n", shm_idx, primary_shm_idx, !LIST_ISEMPTY(&fo_head.fo_list));
+
+        //if (shm_idx == 0 && primary_shm_idx == 0 && !list_empty(&failover_list)) {
+            
+        fo_temp = pop_failover((ipc_ptr->nic[0]));
+  
+        if (fo_temp != NULL) {
+            IPC_PRINTF("failover list not empty\n");
+            primary_shm_idx = fo_temp->socket_id;
+            ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + primary_shm_idx;
+            free(fo_temp);
+        }
+        else {
+            IPC_PRINTF("failover list is empty!!!\n");
+            ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
+        }
+
+        //MSG_PRINTF("ipt_addr:%p  ipc_ptr:%p\n", ipt_addr, ipc_ptr); 
+
+        ipt_addr->epoch_id = ipc_ptr->epoch_id;
+        ipt_addr->flush_id = ipc_ptr->flush_id;
+        ipt_addr->nic_count = ipc_ptr->nic_count;
+        ipt_addr->nic[0] = ipc_ptr->nic[0];
+        base_nic = ipc_ptr->nic[0];
+        ipt_addr->cuju_ft_mode = ipc_ptr->cuju_ft_mode;
+        
+        IPC_PRINTF("FT mode:%d\n", ipc_ptr->cuju_ft_mode);
+        IPC_PRINTF("E/F ID:%d\n", ipc_ptr->epoch_id);
+        IPC_PRINTF("NICCount:%d\n", ipc_ptr->nic_count);
+
+        if (ipc_ptr->epoch_id != ipc_ptr->flush_id) {
+            IPC_PRINTF("Match\n");
+        }
+
+		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_SNAPSHOT) {
+			IPC_PRINTF("FT mode is CUJU_FT_TRANSACTION_SNAPSHOT\n");
+		}
+
+#if USING_SNAPSHOT_THREAD
+		if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
+			IPC_PRINTF("FT mode is CUJU_FT_INIT\n");
+			/* create new thread for snapshot */
+			pthread_t thread_snapshot;
+		}
+#endif 
+
+
+#if USING_NETLINK		
+        nl_ipc.epoch_id = ipc_ptr->epoch_id;
+        nl_ipc.flush_id = ipc_ptr->flush_id;
+        nl_ipc.cuju_ft_mode = ipc_ptr->cuju_ft_mode;
+        nl_ipc.nic_count = ipc_ptr->nic_count;
+
+        memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
+
+        //strcpy(NLMSG_DATA(nlh), (void *)&nl_ipc);
+    
+        if (sendmsg(sock_fd, &msg, 0) < 0) {
+            perror("send msg failed!\n");
+            free(nlh);
+            close(sock_fd);
+            goto error_handle;
+        }        
+#endif
+
+        //MSG_PRINTF("NIC Cnt:%d\n", ipc_ptr->nic_count);
+        //MSG_PRINTF("CONN Cnt:%d\n", ipc_ptr->conn_count);
+        //MSG_PRINTF("IP:%08x\n", *(u_int32_t*)ipc_ptr->nic[0]);
+#if 0 
+		if (ipc_ptr->nic_count) {
+			for(int idx = 0; idx < ipc_ptr->nic_count; idx++) {
+				guest_ip_db = ntohl(*((u_int32_t*)(client_message + sizeof(struct proto_ipc)) + idx));
+
+                ((u_int32_t*)ipt_addr + sizeof(struct proto_ipc) + idx) 
+				MSG_PRINTF("Find IP String %08x\n", guest_ip_db);
+				
+    		}
+		}
+#endif
+        
+		//clear the message buffer
+		memset(client_message, 0, sizeof(struct proto_ipc));
+        read_size = 0;
+    }
+     
+    if(read_size == 0)
+    {
+        IPC_PRINTF("Client disconnected\n");
+
+        if (shm_idx != 0) {
+            IPC_PRINTF("insert shm id\n");
+            struct fo_list* new = malloc(sizeof(struct fo_list));
+            new->nic = base_nic;
+            new->socket_id = shm_idx;
+            LIST_ADDQ(&fo_head.fo_list, &new->fo_list);
+            total_ipc_idx--;
+        }
+
+        fflush(stdout);
+        goto error_handle;
+    }
+    else if(read_size == -1)
+    {
+        perror("recv failed");
+    }
+
+error_handle:
+    free(nlh);
+    close(sock);
+    IPC_PRINTF("Close Thread\n");
+    return 0;
+} 
+
+void* ipc_snapshot_in(void* data) 
+{
+
+	printf("[%s]\n", __func__);	
+
+
+func_error:    
+    pthread_exit(NULL);	
+}
+
+#endif 
+
+#if USING_TCP_REPAIR
+
+void release_sk(struct libsoccr_sk *sk)
+{
+
+	free(sk->recv_queue);
+	free(sk->send_queue);
+	//free(sk->src_addr);	// the addr is local pointer, so needn't free.
+	//free(sk->dst_addr);
+	free(sk);
+}
+
+void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
+{
+    union libsoccr_addr sa_src, sa_dst;
+    struct sockaddr_in src_addr, dst_addr;
+
+	struct in_addr ipv4_to;
+	struct in_addr ipv4_from;
+	in_port_t ipv4_to_port;
+	in_port_t ipv4_from_port;	
+
+	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
+	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
+
+	ipv4_to.s_addr = ((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr;
+	ipv4_from.s_addr = ((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr;
+
+	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
+	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;
+
+	src_addr.sin_addr.s_addr = ipv4_from.s_addr;
+	dst_addr.sin_addr.s_addr = ipv4_to.s_addr;
+
+	if (restore_sockaddr(&sa_src,
+				AF_INET, ipv4_from_port,
+				&src_addr.sin_addr.s_addr, 0) < 0)
+		return;
+	
+	if (restore_sockaddr(&sa_dst,
+				AF_INET, ipv4_to_port,
+				&dst_addr.sin_addr.s_addr, 0) < 0)
+		return;
+
+	libsoccr_set_addr(socr, 1, &sa_src, 0);
+	libsoccr_set_addr(socr, 0, &sa_dst, 0);
+}
+
+
+
+int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data* data, struct connection *conn)
+{
+    //char sk_header[8];
+    int ret;
+	
+	//uint32_t src_addr;
+	//uint16_t src_port;
+	
+	//struct libsoccr_sk *socr = calloc(1, sizeof(struct libsoccr_sk));
+	struct libsoccr_sk *socr = malloc(sizeof(struct libsoccr_sk));
+
+
+    if (tcp_repair_on(fd) < 0) {
+        printf("tcp_repair_on fail.\n");
+		return -1;
+	}
+
+
+	socr->fd = fd;
+    set_addr_port_conn(socr, conn);
+	
+	//src_addr = socr->src_addr->v4.sin_addr.s_addr;
+    //src_port = socr->src_addr->v4.sin_port;                                                                               
+
+	ret = libsoccr_save(socr, data, sizeof(*data));
+    //socr->src_addr->v4.sin_addr.s_addr = src_addr;
+    //socr->src_addr->v4.sin_port = src_port;
+
+	if (ret < 0) {
+		printf("libsoccr_save() failed with %d\n", ret);
+		return ret;
+	}
+	if (ret != sizeof(*data)) {
+		printf("This libsocr is not supported (%d vs %d)\n",
+				ret, (int)sizeof(*data));
+		return ret;
+	}
+
+	if (tcp_repair_off(fd) < 0) {
+        printf("tcp_repair_off fail.\n");
+		return -1;
+	}
+    
+    //if 連線數量達預期..開始存sk queue data.
+#if 0
+    save_sk_header(buf, 1);
+    save_sk_data(data,socr, buf);
+    int len = buf->header_size + buf->queue_size;
+    char *send_data = final_save_data(buf);
+	free(send_data);
+#endif
+
+	return ret;
+}
+
+/******************************** REPAIR RESTORE ********************************/
+#if 1
+
+
+
+static int restore_tcp_conn_state_conn(int fd, struct libsoccr_sk *socr, struct sk_data_info* data)
+{
+	//int aux;
+	union libsoccr_addr sa_src, sa_dst;
+	//print_info(data);
+	
+	//struct sockaddr_in clinetaddr, serveraddr;
+	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
+	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
+
+	if (restore_sockaddr(&sa_src,
+				AF_INET, data->sk_addr.src_port,
+				&data->sk_addr.src_addr, 0) < 0)
+		goto err;
+	if (restore_sockaddr(&sa_dst,
+				AF_INET, data->sk_addr.dst_port,
+				&data->sk_addr.dst_addr, 0) < 0)
+		goto err;
+
+	libsoccr_set_addr(socr, 1, &sa_src, 0);
+	libsoccr_set_addr(socr, 0, &sa_dst, 0);
+
+
+	if (libsoccr_restore_conn(socr, data, sizeof(*data)))
+		goto err;
+
+	return 0;
+
+err:
+	return -1;
+}
+
+int restore_one_tcp_conn(int fd, struct sk_data_info* data)
+{
+	struct libsoccr_sk *sk;
+
+	printf("Restoring TCP connection\n");
+
+	sk = libsoccr_pause(fd);
+	if (!sk)
+		return -1;
+
+	if (restore_tcp_conn_state_conn(fd, sk, data)) {
+		libsoccr_release(sk);
+		return -1;
+	}
+	release_sk(sk);
+	return 0;
+}
+#endif
+
+#endif /* USING_TCP_REPAIR */

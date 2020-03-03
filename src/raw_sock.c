@@ -41,6 +41,7 @@
 
 #include <types/global.h>
 #include <types/cuju_ft.h>
+#include <libs/soccr.h>
 
 #if defined(USE_LINUX_SPLICE)
 #include <common/splice.h>
@@ -131,6 +132,25 @@ unsigned long a_other_time;
 struct timeval time_cz_other;
 struct timeval time_cz_other_end;
 unsigned long cz_other_time;
+
+struct timeval time_tdump;
+struct timeval time_tdump_end;
+unsigned long tdump_time;	
+
+static struct timeval timeval_current(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv;
+}
+
+static double timeval_elapsed(struct timeval *tv)
+{
+	struct timeval tv2 = timeval_current();
+	return (tv2.tv_sec - tv->tv_sec) + 
+	       (tv2.tv_usec - tv->tv_usec)*1.0e-6;
+}
+
 
 /* Returns :
  *   -1 if splice() is not supported
@@ -333,6 +353,9 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	u_int32_t curr_flush_id;
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
+	in_port_t ipv4_to_port;
+	in_port_t ipv4_from_port;	
+
 	struct guest_ip_list* guest_info = NULL;
 
 	struct pipe *pipe_loop = NULL;
@@ -340,6 +363,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	int loop_cnt = 0;
 	struct proto_ipc *ipc_ptr = NULL;
 #endif
+
+	static struct libsoccr_sk_data sk_data;
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -353,6 +378,9 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
+	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;
+
 
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
@@ -374,6 +402,13 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		guest_info = conn->conn_gipl;
 	}
 #endif
+
+#if USING_TCP_REPAIR
+ 	time_tdump = timeval_current();
+	dump_tcp_conn_state_conn(conn->handle.fd, &sk_data, conn);
+	printf("Time of %f\n", timeval_elapsed(&time_tdump));
+#endif
+
 
 #if ENABLE_CUJU_FT	
 	pipe->out_fd = conn->handle.fd;
@@ -546,7 +581,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		curr_flush_id = guest_info->gctl_ipc.flush_id;
 #endif	
 		pipe_trans->flush_id = curr_flush_id;
-#endif		
+#endif	
+
 
 		transfer_cnt = 0;
 		transfer_data_cnt = 0;
@@ -648,6 +684,10 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				break;
 			}
 		}
+
+
+
+
 #if DEBUG_RS_LIST
 		pipe_loop = conn->sent_pipe ;
 		loop_cnt = 0;
@@ -887,6 +927,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	
 after_send:
 
+
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
@@ -973,7 +1014,9 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 	SHMFPRINTF("IPC Flush ID:%d\n", (ipt_target + conn->shm_idx)->flush_id);
 	SHMFPRINTF("DIRECTION :%d\n", conn->direction);
 
+#if USING_NETLINK
 	if (conn->direction == DIR_DEST_GUEST) {
+
     	nl_ipc.epoch_id = 0x0;
         nl_ipc.flush_id = 0x0;
         nl_ipc.cuju_ft_mode = NL_TARGET_ADD_IN;
@@ -1019,7 +1062,7 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 	else {
 		SHMFPRINTF("IPC SHM ID is zero and no netlink\n");
 	}
-
+#endif
 
 
 #endif	

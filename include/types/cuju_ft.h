@@ -4,6 +4,8 @@
 #include <types/cuju_ft_def.h>
 #include <proto/pipe.h>
 #include <linux/netlink.h>
+#include <libs/soccr.h>
+#include <types/tcp_repair.h>
 
 extern int pb_event;
 
@@ -33,11 +35,13 @@ extern u_int16_t ipc_fd;
 extern int trace_cnt;
 extern int flush_cnt;
 
+#if USING_NETLINK
 /* NETLINK */
 extern int nl_sock_fd;
 extern struct msghdr nl_msg;
 extern struct netlink_ipc nl_ipc;
 extern struct nlmsghdr *nlh;
+#endif
 
 #if ENABLE_TIME_MEASURE_EPOLL	
 extern struct timeval time_tepoll;
@@ -168,6 +172,37 @@ struct netlink_ipc
 
 #endif /* End of ENABLE_CUJU_IPC*/
 
+
+struct vmsk_list 
+{
+    u_int32_t socket_id;
+    struct list skid_list;
+};
+
+struct vm_list 
+{
+    u_int32_t vm_ip; /* using main NIC address nic[0] */
+    unsigned int nic[TOTAL_NIC];
+    struct vmsk_list skid_head;
+    struct list vm_list;
+};
+
+struct fo_list {
+  unsigned int nic;
+  int socket_id;
+  struct list fo_list;
+};
+
+struct thread_data 
+{  
+    int th_idx;
+    int th_sock;
+    int netlink_sock;
+    struct proto_ipc* ipt_base;
+};
+
+extern struct vm_list vm_head;
+
 unsigned long ft_get_flushcnt();
 unsigned long ft_get_epochcnt();
 int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean);
@@ -186,6 +221,18 @@ struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* d
 u_int8_t add_ft_fd(u_int16_t ftfd);
 u_int16_t get_ft_fd(void);
 __u64 tv_to_us(const struct timeval* tv);
+
+
+
+struct vm_list* target_in_table(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
+int add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
+int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
+int show_target_rule(struct list *table);
+int clean_target_list(struct list *table);
+void release_sk(struct libsoccr_sk *sk);
+
+void* ipc_handler(void);
+void* ipc_snapshot_in(void* data);
 #endif
 
 #endif
