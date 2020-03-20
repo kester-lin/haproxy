@@ -153,6 +153,7 @@ struct guest_ip_list
     struct list list;
 };
 
+
 struct ft_fd_list
 {
     u_int16_t ft_fd;
@@ -173,18 +174,38 @@ struct netlink_ipc
 #endif /* End of ENABLE_CUJU_IPC*/
 
 
+struct snapshot_data 
+{
+    u_int32_t vm_ip;
+    u_int32_t epoch_id;
+
+    /*保證存取操作的原子性 互斥性*/
+    pthread_mutex_t locker;
+    /*是否可讀*/
+    pthread_cond_t cond;
+};
 struct vmsk_list 
 {
     u_int32_t socket_id;
+    struct connection *conn;
+    struct libsoccr_sk soccr;
+    struct sk_data_info sk_data;
     struct list skid_list;
 };
 
 struct vm_list 
 {
     u_int32_t vm_ip; /* using main NIC address nic[0] */
-    unsigned int nic[TOTAL_NIC];
+    u_int32_t nic[TOTAL_NIC];
+
+    u_int8_t fault_enable;
+    u_int8_t failovered;
+
+    u_int32_t socket_count;
     struct vmsk_list skid_head;
     struct list vm_list;
+
+    struct snapshot_data ss_data;
 };
 
 struct fo_list {
@@ -202,6 +223,8 @@ struct thread_data
 };
 
 extern struct vm_list vm_head;
+
+
 
 unsigned long ft_get_flushcnt();
 unsigned long ft_get_epochcnt();
@@ -221,11 +244,12 @@ struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* d
 u_int8_t add_ft_fd(u_int16_t ftfd);
 u_int16_t get_ft_fd(void);
 __u64 tv_to_us(const struct timeval* tv);
-
+uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t *dir);
 
 
 struct vm_list* target_in_table(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
-int add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
+struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id, struct connection *conn);
+struct vm_list* vm_in_table(struct list *table, u_int32_t vm_ip);
 int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
 int show_target_rule(struct list *table);
 int clean_target_list(struct list *table);

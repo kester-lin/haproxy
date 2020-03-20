@@ -725,7 +725,7 @@ int si_cs_send(struct conn_stream *cs)
 #if 1 /* FIXED */
 		if (!oc->pipe->data && !oc->pipe->pipe_nxt) {
 			ft_clean_pipe(oc->pipe);				
-			put_pipe(oc->pipe);
+			////put_pipe(oc->pipe);
 			oc->pipe = NULL;
 		}
 #endif

@@ -14,22 +14,23 @@
 #include <sys/sendfile.h>
 
 #include <sys/shm.h>
-#include <fcntl.h> 
+#include <fcntl.h>
 #include <libs/soccr.h>
 #include <types/tcp_repair.h>
 #include <common/libnet-structures.h>
 #include <common/libnet-macros.h>
+#include <pthread.h>
+
 #ifdef DEBUG_FULL
 #include <assert.h>
 #endif
-
 
 #if ENABLE_CUJU_FT
 #define FAKE_CUJU_ID 0
 
 #if FAKE_CUJU_ID
 u_int32_t guest_ip_db = 0xd47ea8c0;
-#else 
+#else
 
 //u_int32_t guest_ip_db = 0xd47ea8c0;
 
@@ -53,14 +54,12 @@ static struct guest_ip_list gip_list = {
 #define CJIRPRINTF(x...)
 #endif
 
-
 #define DEBUG_CUJU_IPC_ID 0
 #if DEBUG_CUJU_IPC_ID
 #define CJIDRPRINTF(x...) printf(x)
 #else
 #define CJIDRPRINTF(x...)
 #endif
-
 
 #define DEBUG_MSG 0
 #if DEBUG_MSG
@@ -76,8 +75,14 @@ static struct guest_ip_list gip_list = {
 #define IPC_PRINTF(x...)
 #endif
 
+#define DEBUG_IPC_THREAD 0
+#if DEBUG_IPC_THREAD
+#define IPC_TH_PRINTF(x...) printf(x)
+#else
+#define IPC_TH_PRINTF(x...)
+#endif
 
-#define SUPPORT_VM_CNT       100
+#define SUPPORT_VM_CNT 10
 
 u_int16_t fd_list_migration = 0;
 
@@ -101,13 +106,13 @@ int flush_cnt = 0;
 /* NETLINK */
 int nl_sock_fd = 0;
 struct msghdr nl_msg;
-struct netlink_ipc nl_ipc;	
+struct netlink_ipc nl_ipc;
 struct nlmsghdr *nlh = NULL;
 
 #if ENABLE_TIME_MEASURE_EPOLL
 struct timeval time_tepoll;
 struct timeval time_tepoll_end;
-unsigned long tepoll_time;	
+unsigned long tepoll_time;
 #endif
 
 #if ENABLE_TIME_MEASURE
@@ -115,23 +120,23 @@ struct timeval time_poll;
 
 struct timeval time_recv;
 struct timeval time_recv_end;
-unsigned long time_in_recv = 0;	
+unsigned long time_in_recv = 0;
 
 struct timeval time_release;
 struct timeval time_release_end;
-unsigned long release_time = 0;	
+unsigned long release_time = 0;
 
 struct timeval time_loop;
 struct timeval time_loop_end;
-unsigned long loop_time = 0;	
+unsigned long loop_time = 0;
 
 struct timeval time_send;
 struct timeval time_send_end;
-unsigned long time_in_send = 0;	
+unsigned long time_in_send = 0;
 
 struct timeval time_sicsp;
 struct timeval time_sicsp_end;
-unsigned long time_in_sicsp = 0;	
+unsigned long time_in_sicsp = 0;
 
 struct timeval time_sicsio_send;
 struct timeval time_sicsio_send_end;
@@ -153,6 +158,7 @@ unsigned long time_in_sicsp_int = 0;
 #if USING_SNAPSHOT_THREAD
 
 #endif
+
 
 #if FAKE_CUJU_ID
 /* FAKE */
@@ -196,9 +202,7 @@ unsigned long ft_get_epochcnt()
 
 #endif
 
-
-#define MAX_SPLICE_AT_ONCE	(1<<30)
-
+#define MAX_SPLICE_AT_ONCE (1 << 30)
 
 #define MAX_PAYLOAD 384
 unsigned int total_ipc_idx = 1;
@@ -215,11 +219,11 @@ REGPRM1 static inline unsigned long tv_to_us(struct timeval *tv)
 }
 #else
 /** Convert to micro-seconds */
-__u64 tv_to_us(const struct timeval* tv) 
+__u64 tv_to_us(const struct timeval *tv)
 {
-        __u64 us = tv->tv_usec;
-        us += (__u64)tv->tv_sec * (__u64)1000000;
-        return us;
+	__u64 us = tv->tv_usec;
+	us += (__u64)tv->tv_sec * (__u64)1000000;
+	return us;
 }
 #endif
 
@@ -251,9 +255,8 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 	while (1) {
 		if (clean == COPY_PIPE_CLEAN) {
 			ret = splice(source->cons, NULL, dest->prod, NULL,
-						 source->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-		}
-		else {
+				     source->data, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+		} else {
 			ret = tee(source->cons, dest->prod, source->data, SPLICE_F_NONBLOCK);
 		}
 
@@ -288,32 +291,28 @@ int ft_dup_pipe(struct pipe *source, struct pipe *dest, int clean)
 			source->flush_id = 0;
 			source->flush_idx = 0;
 		}
-	}	
+	}
 
 	return ret;
 }
 
-
-int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
+int ft_close_pipe(struct pipe *pipe, int *pipe_cnt)
 {
 	int ret = 0;
 	struct pipe *pipe_trace = pipe;
 	struct pipe *pipe_prev = NULL;
 
-	if (pipe->pipe_nxt)
-	{
+	if (pipe->pipe_nxt) {
 		/* search pipe_next is empty insert new incoming to the pipe buffer tail */
-		while (1)
-		{
-			if (pipe_trace == NULL)
-			{
+		while (1) {
+			if (pipe_trace == NULL) {
 				break;
 			}
 
 			if (pipe_trace->pipe_nxt == NULL) {
 				break;
 			}
-			
+
 			pipe_prev = pipe_trace;
 			pipe_trace = pipe_trace->pipe_nxt;
 
@@ -321,19 +320,20 @@ int ft_close_pipe(struct pipe *pipe, int* pipe_cnt)
 
 			ft_clean_pipe(pipe_trace->pipe_dup);
 			put_pipe(pipe_trace->pipe_dup);
-				
-			ft_clean_pipe(pipe_trace);				
+
+			ft_clean_pipe(pipe_trace);
 			put_pipe(pipe_trace);
-			(*pipe_cnt)-=2;	
+			(*pipe_cnt) -= 2;
 			printf("release pipe 2 total:%d\n", (*pipe_cnt));
-		
+
 			pipe_trace = pipe_prev->pipe_nxt;
 		}
 	}
 	return ret;
 }
 
-int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* total_pipe_cnt ,uint16_t* pipe_cnt)
+int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id,
+			     uint16_t *total_pipe_cnt, uint16_t *pipe_cnt)
 {
 	int ret = 0;
 	struct pipe *pipe_trace = pipe;
@@ -356,7 +356,7 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 			}
 
 			//printf("pipe_trace: %p\n", pipe_trace);
-			
+
 			pipe_prev = pipe_trace;
 			pipe_trace = pipe_trace->pipe_nxt;
 
@@ -367,17 +367,17 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 				//printf("pipe_trace->transfered: %p %p\n", pipe_trace->pipe_dup, pipe_trace);
 
 				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
-				
-				if(pipe_trace->pipe_dup) {
+
+				if (pipe_trace->pipe_dup) {
 					ft_clean_pipe(pipe_trace->pipe_dup);
 					put_pipe(pipe_trace->pipe_dup);
 				}
-				
-				ft_clean_pipe(pipe_trace);				
+
+				ft_clean_pipe(pipe_trace);
 				put_pipe(pipe_trace);
-	
-				(*pipe_cnt)-=2;
-				(*total_pipe_cnt)-=2;
+
+				(*pipe_cnt) -= 2;
+				(*total_pipe_cnt) -= 2;
 
 				printf("release pipe 2 total:%d\n", (*total_pipe_cnt));
 
@@ -389,7 +389,8 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id, uint16_t* tot
 	return ret;
 }
 
-int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , uint16_t* pipe_cnt)
+int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t *total_pipe_cnt,
+				uint16_t *pipe_cnt)
 {
 	int ret = 0;
 	struct pipe *pipe_trace = pipe;
@@ -400,13 +401,10 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 
 	//printf("%s  %d\n", __func__, *total_pipe_cnt);
 
-	if (pipe->pipe_nxt)
-	{
+	if (pipe->pipe_nxt) {
 		/* search pipe_nxt is empty insert new incoming to the pipe buffer tail */
-		while (1)
-		{
-			if (pipe_trace == NULL)
-			{
+		while (1) {
+			if (pipe_trace == NULL) {
 				//printf("pipe_trace NULL\n");
 				break;
 			}
@@ -415,10 +413,10 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 				//printf("pipe_trace->pipe_nxt NULL\n");
 				break;
 			}
-			
+
 			//printf("pipe_trace: %p\n", pipe_trace);
 
-			pipe_prev = pipe_trace;	
+			pipe_prev = pipe_trace;
 			pipe_trace = pipe_trace->pipe_nxt;
 
 			//printf("Current pipe_trace: %p\n", pipe_trace);
@@ -426,28 +424,26 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 			trace_cnt++;
 
 			/* TODO: consider overflow */
-			if (pipe_trace->transfered)
-			{
+			if (pipe_trace->transfered) {
 				pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
-				
+
 				//printf("pipe_trace->transfered: %p %p\n", pipe_trace->pipe_dup, pipe_trace);
 				//printf("pipe_trace->transfered: %p\n", pipe_trace);
 
 				//ft_clean_pipe(pipe_trace->pipe_dup);
 				//put_pipe(pipe_trace->pipe_dup);
-				
-				ft_clean_pipe(pipe_trace);				
+
+				ft_clean_pipe(pipe_trace);
 				put_pipe(pipe_trace);
-				
+
 				printf("release pipe 1 total:%d\n", (*total_pipe_cnt));
-				
+
 				transfer_cnt++;
 				(*pipe_cnt)--;
 				(*total_pipe_cnt)--;
 
 				pipe_trace = pipe_prev->pipe_nxt;
-			}
-			else {
+			} else {
 				printf("Transfered End\n");
 				break;
 			}
@@ -461,18 +457,22 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t* total_pipe_cnt , ui
 
 void ft_clean_pipe(struct pipe *pipe)
 {
-	pipe->pipe_dup = NULL;
-	pipe->flush_id = 0;
-	pipe->flush_idx = 0;
-	pipe->epoch_id = 0;
-	pipe->epoch_idx = 0;	
-	pipe->in_fd = 0;
-	pipe->out_fd = 0;
-	pipe->trans_suspend = 0;
-	pipe->transfer_cnt = 0;
-	pipe->transfered = 0;
-	pipe->pipe_nxt = NULL;
-}	
+	if (pipe) {
+		pipe->pipe_dup = NULL;
+		pipe->flush_id = 0;
+		pipe->flush_idx = 0;
+		pipe->epoch_id = 0;
+		pipe->epoch_idx = 0;
+		pipe->in_fd = 0;
+		pipe->out_fd = 0;
+		pipe->trans_suspend = 0;
+		pipe->transfer_cnt = 0;
+		pipe->transfered = 0;
+		pipe->pipe_nxt = NULL;
+
+		put_pipe(pipe);
+	}
+}
 
 int cuju_process(struct conn_stream *cs)
 {
@@ -483,9 +483,9 @@ int cuju_process(struct conn_stream *cs)
 	//unsigned int idx = 0;
 	struct proto_ipc *ipc_ptr = NULL;
 	u_int32_t dynamic_ipc = 0;
-	u_int8_t* dynamic_array = NULL;
+	u_int8_t *dynamic_array = NULL;
 	u_int32_t guest_ip_db = 0;
-	struct guest_ip_list* guest_info = NULL;
+	struct guest_ip_list *guest_info = NULL;
 
 	CJIDRPRINTF("%s data:%zu\n", __func__, ic->buf.data);
 
@@ -497,24 +497,24 @@ int cuju_process(struct conn_stream *cs)
 	}
 
 	ipc_ptr = (struct proto_ipc *)ic->buf.area;
-	
-	if((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) && 
-	   (ipc_ptr->conn_count <= DEFAULT_CONN_CNT)) {
 
-#if 0		
+	if ((ipc_ptr->nic_count <= DEFAULT_NIC_CNT) &&
+	    (ipc_ptr->conn_count <= DEFAULT_CONN_CNT)) {
+
+#if 0
 		if (ic->buf.data != DEFAULT_IPC_ARRAY) {
 			printf("Unexpected IPC Data\n");
-			assert(0); 
+			assert(0);
 		}
 #endif
 
-		dynamic_ipc = (IP_LENGTH * ipc_ptr->nic_count) + (CONNECTION_LENGTH * ipc_ptr->conn_count);
-		dynamic_array = (u_int8_t*)ic->buf.area + sizeof(struct proto_ipc);
-	}
-	else {
+		dynamic_ipc = (IP_LENGTH * ipc_ptr->nic_count) + (CONNECTION_LENGTH *
+				ipc_ptr->conn_count);
+		dynamic_array = (u_int8_t *)ic->buf.area + sizeof(struct proto_ipc);
+	} else {
 		if (ic->buf.data != sizeof(struct proto_ipc) + dynamic_ipc) {
 			printf("Unexpected IPC Data Not Default Value\n");
-			assert(0); 
+			assert(0);
 		}
 	}
 
@@ -527,16 +527,15 @@ int cuju_process(struct conn_stream *cs)
 		printf("[%s]FD:%d!!!!!\n", __func__, ipc_fd);
 
 		if (ipc_ptr->nic_count) {
-			for(int idx = 0; idx < ipc_ptr->nic_count; idx++) {
-				guest_ip_db = ntohl(*(((u_int32_t*)dynamic_array) + idx));
+			for (int idx = 0; idx < ipc_ptr->nic_count; idx++) {
+				guest_ip_db = ntohl(*(((u_int32_t *)dynamic_array) + idx));
 
 				printf("Find IP String %08x\n", guest_ip_db);
-				
+
 				if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
-					if (guest_info) {	
+					if (guest_info) {
 						/* add 2nd ip to original */
-					}
-					else {
+					} else {
 						guest_info = add_guestip(guest_ip_db);
 						if (!guest_info)
 							assert(1);
@@ -545,25 +544,23 @@ int cuju_process(struct conn_stream *cs)
 			}
 		}
 	}
-	
+
 	if (ipc_ptr->cuju_ft_mode != CUJU_FT_INIT) {
-		guest_ip_db = ntohl(*((u_int32_t*)dynamic_array));
+		guest_ip_db = ntohl(*((u_int32_t *)dynamic_array));
 		guest_info = find_guestip_ptr(guest_ip_db);
 		if (!guest_info)
 			assert(1);
 	}
-	
+
 	/* Set GCTL */
 	printf("Cuju FT mode Check\n");
 	if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_RUN) {
 		guest_info->gctl_ipc.epoch_id = ipc_ptr->epoch_id;
 		CJIDRPRINTF("[%s] Epoch ID:%u\n", __func__, ipc_ptr->epoch_id);
-	}
-	else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
-		guest_info->gctl_ipc.flush_id =	ipc_ptr->epoch_id;
+	} else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
+		guest_info->gctl_ipc.flush_id = ipc_ptr->epoch_id;
 		CJIDRPRINTF("[%s] Flush ID:%u\n", __func__, ipc_ptr->epoch_id);
-	}
-	else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_HANDOVER) {
+	} else if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_HANDOVER) {
 		printf("[%s] Failover:%u\n", __func__, ipc_ptr->epoch_id);
 		CJIDRPRINTF("[%s] Failover:%u\n", __func__, ipc_ptr->epoch_id);
 	}
@@ -586,33 +583,34 @@ int cuju_process(struct conn_stream *cs)
 
 char *arp_get_ip(const char *req_mac)
 {
-    FILE           *proc;
-	 char ip[16];
-	 char mac[18];
-	 char * reply = NULL;
- 
-    if (!(proc = fopen("/proc/net/arp", "r"))) {
-        return NULL;
-    }
- 
-    /* Skip first line */
-	 while (!feof(proc) && fgetc(proc) != '\n');
- 
-	 /* Find ip, copy mac in reply */
-	 reply = NULL;
-    while (!feof(proc) && (fscanf(proc, " %15[0-9.] %*s %*s %17[A-Fa-f0-9:] %*s %*s", ip, mac) == 2)) {
-		  if (strcmp(mac, req_mac) == 0) {
-				//reply = safe_strdup(ip);
-				reply = strdup(ip);
-				break;
-		  }
-    }
- 
-    fclose(proc);
- 
-    return reply;
-}
+	FILE *proc;
+	char ip[16];
+	char mac[18];
+	char *reply = NULL;
 
+	if (!(proc = fopen("/proc/net/arp", "r"))) {
+		return NULL;
+	}
+
+	/* Skip first line */
+	while (!feof(proc) && fgetc(proc) != '\n')
+		;
+
+	/* Find ip, copy mac in reply */
+	reply = NULL;
+	while (!feof(proc) &&
+	       (fscanf(proc, " %15[0-9.] %*s %*s %17[A-Fa-f0-9:] %*s %*s", ip, mac) == 2)) {
+		if (strcmp(mac, req_mac) == 0) {
+			//reply = safe_strdup(ip);
+			reply = strdup(ip);
+			break;
+		}
+	}
+
+	fclose(proc);
+
+	return reply;
+}
 
 REGPRM1 static inline unsigned long tv_to_us_show(struct timeval *tv)
 {
@@ -626,15 +624,15 @@ unsigned long max_recv_time = 0;
 
 void show_ft_time(void)
 {
-#if ENABLE_TIME_MEASURE	
+#if ENABLE_TIME_MEASURE
 	unsigned long send_time = 0;
 	unsigned long recv_time = 0;
 #endif
 #if 0
 	printf("\n");
-	printf("%lx   %lx    %lx    %lx    %lx\n", 
-		   tv_to_us(&time_poll), tv_to_us(&time_recv), tv_to_us(&time_recv_end),
-		   tv_to_us(&time_send), tv_to_us(&time_send_end));
+	printf("%lx   %lx    %lx    %lx    %lx\n",
+	       tv_to_us(&time_poll), tv_to_us(&time_recv), tv_to_us(&time_recv_end),
+	       tv_to_us(&time_send), tv_to_us(&time_send_end));
 #endif
 #if 1
 
@@ -649,8 +647,7 @@ void show_ft_time(void)
 #endif
 #if ENABLE_TIME_MEASURE
 	send_time = tv_to_us(&time_send_end) - tv_to_us(&time_send);
-	recv_time = tv_to_us(&time_recv_end)- tv_to_us(&time_recv);
-
+	recv_time = tv_to_us(&time_recv_end) - tv_to_us(&time_recv);
 
 	if (recv_time > max_recv_time) {
 		max_recv_time = recv_time;
@@ -665,16 +662,15 @@ void show_ft_time(void)
 #endif
 #if 0
 	if (pb_event) {
-		printf("%lu %lu\n\n", 
-			   tv_to_us(&time_send)- tv_to_us(&time_poll),
-			   tv_to_us(&time_send_end) - tv_to_us(&time_send));
-	}
-	else {
-		printf("%lu    %lu    %lu    %lu\n\n", 
-			tv_to_us(&time_recv) - tv_to_us(&time_poll), 
-			tv_to_us(&time_recv_end) - tv_to_us(&time_recv),
-			tv_to_us(&time_send) - tv_to_us(&time_recv_end), 
-			tv_to_us(&time_send_end) - tv_to_us(&time_send));
+		printf("%lu %lu\n\n",
+		       tv_to_us(&time_send) - tv_to_us(&time_poll),
+		       tv_to_us(&time_send_end) - tv_to_us(&time_send));
+	} else {
+		printf("%lu    %lu    %lu    %lu\n\n",
+		       tv_to_us(&time_recv) - tv_to_us(&time_poll),
+		       tv_to_us(&time_recv_end) - tv_to_us(&time_recv),
+		       tv_to_us(&time_send) - tv_to_us(&time_recv_end),
+		       tv_to_us(&time_send_end) - tv_to_us(&time_send));
 	}
 #endif
 }
@@ -705,7 +701,7 @@ u_int8_t find_guestip_exist(u_int32_t guest_ip)
 	return 0;
 }
 
-struct guest_ip_list* add_guestip(u_int32_t guest_ip)
+struct guest_ip_list *add_guestip(u_int32_t guest_ip)
 {
 	struct guest_ip_list *gipl;
 
@@ -737,7 +733,7 @@ u_int8_t del_guestip(u_int32_t guest_ip)
 	return 0;
 }
 
-struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* dir)
+struct guest_ip_list *check_guestip(u_int32_t source, u_int32_t dest, uint8_t *dir)
 {
 	struct guest_ip_list *gipl;
 
@@ -760,8 +756,8 @@ struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* d
 u_int16_t get_ft_fd(void)
 {
 	u_int16_t tmp_fd = 0;
-	struct ft_fd_list* ftfdl;
-	struct ft_fd_list* def ;
+	struct ft_fd_list *ftfdl;
+	struct ft_fd_list *def;
 
 	list_for_each_entry_safe(ftfdl, def, &ftfd_list.list, list) {
 		if (ftfdl->ft_fd != 0) {
@@ -795,37 +791,40 @@ u_int8_t add_ft_fd(u_int16_t ftfd)
 	return 1;
 }
 
-
-uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t* dir)
+uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t *dir)
 {
-	struct proto_ipc* ptr = ipt_target;
+	struct proto_ipc *ptr = ipt_target;
 	unsigned int idx = 0;
 
+	printf("[%s] ipt_target:%p  source:%08x dest:%08x\n", __func__, ipt_target, source, dest);
+	printf("[%s] base:%p base+1:%p\n", __func__, ptr, (ptr + 1));
 	//if (ipt_target->nic_count) {
-		for (idx = 0; idx < SUPPORT_VM_CNT; idx++) {
-			if ((source != 0) && (ntohl((ptr+idx)->nic[0]) == source)) {
-				printf("[%s] DIR_DEST_CLIENT\n", __func__);
-				*dir = DIR_DEST_CLIENT;;
-				return idx;
-			}
-			if ((dest != 0) && (ntohl((ptr+idx)->nic[0]) == dest)) {
-				printf("[%s] DIR_DEST_GUEST\n", __func__);
-				*dir = DIR_DEST_GUEST;;
-				return idx;
-			}
+	for (idx = 0; idx < SUPPORT_VM_CNT; idx++) {
+		printf("IDX:%d IP:%08x\n", idx, (ptr + idx)->nic[0]);
 
-#if 0			
-			if (*(u_int32_t*)((struct proto_ipc*)(ipt_target + idx)->nic[1]) == source) {
-				*dir = DIR_DEST_CLIENT;;
-				return idx;
-			}
-
-			if (*(u_int32_t*)((struct proto_ipc*)(ipt_target + idx)->nic[1]) == dest) {
-				*dir = DIR_DEST_GUEST;;
-				return idx;
-			}
-#endif	
+		if ((source != 0) && ((ptr + idx)->nic[0] == source)) {
+			printf("[%s] DIR_DEST_CLIENT\n", __func__);
+			*dir = DIR_DEST_CLIENT;
+			return idx;
 		}
+		if ((dest != 0) && ((ptr + idx)->nic[0] == dest)) {
+			printf("[%s] DIR_DEST_GUEST\n", __func__);
+			*dir = DIR_DEST_GUEST;
+			return idx;
+		}
+
+#if 0
+		if (*(u_int32_t *)((struct proto_ipc *)(ipt_target + idx)->nic[1]) == source) {
+			*dir = DIR_DEST_CLIENT;;
+			return idx;
+		}
+
+		if (*(u_int32_t *)((struct proto_ipc *)(ipt_target + idx)->nic[1]) == dest) {
+			*dir = DIR_DEST_GUEST;;
+			return idx;
+		}
+#endif
+	}
 	//}
 	return 0;
 }
@@ -836,197 +835,219 @@ struct vm_list vm_head = {
 	//.skid_head = LIST_HEAD_INIT(vm_head.skid_head)
 };
 
-struct vm_list* target_in_table(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
+struct vm_list *vm_in_table(struct list *table, u_int32_t vm_ip)
 {
-    /* search and insert */  
-    struct vm_list* target;
-    struct vmsk_list* target_sk;
+	/* search and insert */
+	struct vm_list *target;
 
-    list_for_each_entry(target, table, vm_list) {
-        if (target->vm_ip == vm_ip) {
-            list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
-                if (target_sk->socket_id == socket_id) {
-                    /* already exist */
-                    return target;
-                }    
-            }                
-        }
-    }
+	list_for_each_entry(target, table, vm_list) {
+		if (target->vm_ip == vm_ip) {
+			return target;
+		}
+	}
 
-    return NULL;
+	return NULL;
 }
 
-
-int add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
+struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id,
+			      struct connection *conn)
 {
-    struct vm_list * new_vm = NULL;
-    struct vmsk_list * new_sk = NULL;
+	struct vm_list *target = NULL;
+	struct vmsk_list *target_sk = NULL;
+	//u_int32_t vm_ip = ntohl(vmip);
 
-    if (LIST_ISEMPTY(table)) {
-        new_vm = (struct vm_list *)malloc(sizeof(struct vm_list));
+	if (LIST_ISEMPTY(table)) {
+#if 0
+		struct vm_list *new_vm = NULL;
+		struct vmsk_list *new_sk = NULL;
 
-        if (new_vm == NULL) {
-            return -1;
-        }
+		new_vm = (struct vm_list *)malloc(sizeof(struct vm_list));
 
-        new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
-       
-        if (new_sk == NULL) {
-            free(new_vm);
-            return -1;
-        }
+		if (new_vm == NULL) {
+			return NULL;
+		}
 
-        new_vm->vm_ip = vm_ip;
-        new_sk->socket_id = socket_id;
-        //LIST_HEAD_INIT(&new_vm->skid_head);
-        //list_add_tail(&new_sk->skid_list, &new_vm->skid_head);
-        //list_add_tail(&new_vm->vm_list, table);
-		new_vm->skid_head.skid_list.n = &new_vm->skid_head.skid_list;
-		new_vm->skid_head.skid_list.p = &new_vm->skid_head.skid_list;
-		//new_vm->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+		new_vm->vm_ip = vm_ip;
 
-		LIST_ADDQ(&new_vm->skid_head.skid_list, &new_sk->skid_list);
+		if (socket_id) {
+			new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+
+			if (new_sk == NULL) {
+				free(new_vm);
+				return NULL;
+			}
+
+			new_sk->socket_id = socket_id;
+			new_vm->skid_head.skid_list.n = &new_vm->skid_head.skid_list;
+			new_vm->skid_head.skid_list.p = &new_vm->skid_head.skid_list;
+			//new_vm->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+
+			//new_vm->ss_data.locker = PTHREAD_MUTEX_INITIALIZER;
+			//new_vm->ss_data.cond = PTHREAD_COND_INITIALIZER;
+
+			LIST_ADDQ(&new_vm->skid_head.skid_list, &new_sk->skid_list);
+		}
+		//LIST_HEAD_INIT(&new_vm->skid_head);
+		//list_add_tail(&new_sk->skid_list, &new_vm->skid_head);
+		//list_add_tail(&new_vm->vm_list, table);
+
 		LIST_ADDQ(&vm_head.vm_list, &new_vm->vm_list);
 
-        return 0;
-    }
-    else {
-        /* search and insert */  
-        struct vm_list * target = NULL;
-        struct vmsk_list * target_sk = NULL;
+		return new_vm;
+#else
+		goto create_newvm;
+#endif
+	} else {
+		/* search and insert */
 
-        list_for_each_entry(target, table, vm_list) {
-            if (target->vm_ip == vm_ip) {
-                /* insert new port to target IP */ 
-                list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
-                    if (target_sk->socket_id == socket_id) {
-                        /* already exist */
-                        return 0;
-                    }    
-                }
-                
-                new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
-       
-                if (new_sk == NULL) {
-                    return -1;
-                }
-                new_sk->socket_id = socket_id;
+		list_for_each_entry(target, table, vm_list) {
+			if (target->vm_ip == vm_ip) {
+				/* insert new port to target IP */
+				if (socket_id) {
+					list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
+						if (target_sk->socket_id == socket_id) {
+							/* already exist */
+							return target;
+						}
+					}
 
-				LIST_ADDQ(&target->skid_head.skid_list, &new_sk->skid_list);
+					target_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
 
-                return 0;
-            }
-        }
-    
-        new_vm = (struct vm_list *)malloc(sizeof(struct vm_list));
+					if (target_sk == NULL) {
+						return NULL;
+					}
+					target_sk->socket_id = socket_id;
+					target->socket_count++;
+					target_sk->conn = conn;
 
-        if (new_vm == NULL) {
-            return -1;
-        }
+					LIST_ADDQ(&target->skid_head.skid_list, &target_sk->skid_list);
+				}
+				return target;
+			}
+		}
 
-        new_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
-       
-        if (new_sk == NULL) {
-            free(new_vm);
-            return -1;
-        }
+create_newvm:
 
-        new_vm->vm_ip = vm_ip;
-        new_sk->socket_id = socket_id;
+		target = (struct vm_list *)malloc(sizeof(struct vm_list));
 
-		new_vm->skid_head.skid_list.n = &new_vm->skid_head.skid_list;
-		new_vm->skid_head.skid_list.p = &new_vm->skid_head.skid_list;
-		//new_vm->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+		if (target == NULL) {
+			return NULL;
+		}
+		target->vm_ip = vm_ip;
+		printf("[%s] new vm %p and ip %08x\n", __func__, target, vm_ip);
 
-		LIST_ADDQ(&new_vm->skid_head.skid_list, &new_sk->skid_list);
-		LIST_ADDQ(&vm_head.vm_list, &new_vm->vm_list);
+		if (socket_id) {
+			target_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
 
-        return 0;
+			if (target_sk == NULL) {
+				free(target);
+				return NULL;
+			}
 
-    }
+			target_sk->socket_id = socket_id;
+			target_sk->conn = conn;
+			target->socket_count++;
+			target->skid_head.skid_list.n = &target->skid_head.skid_list;
+			target->skid_head.skid_list.p = &target->skid_head.skid_list;
+			//target->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
+			LIST_ADDQ(&target->skid_head.skid_list, &target_sk->skid_list);
+		} else {
+			target->skid_head.skid_list.n = &target->skid_head.skid_list;
+			target->skid_head.skid_list.p = &target->skid_head.skid_list;
+		}
 
-    /* Can't find the target IP */
-    return -1; 
+		LIST_ADDQ(&vm_head.vm_list, &target->vm_list);
+
+		return target;
+	}
+
+	/* Can't find the target IP */
+	return NULL;
 }
-
 
 int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
 {
-    /* search and insert */  
-    struct vm_list* target = NULL;
-    struct vm_list* t_temp = NULL;
-    struct vmsk_list* target_sk = NULL;
-    struct vmsk_list* sk_temp = NULL;
+	/* search and insert */
+	struct vm_list *target = NULL;
+	struct vm_list *t_temp = NULL;
+	struct vmsk_list *target_sk = NULL;
+	struct vmsk_list *sk_temp = NULL;
 
-    list_for_each_entry_safe(target, t_temp, table, vm_list) {
-        printf("\t\tFind IP in delete:%08x\n", target->vm_ip);
+	list_for_each_entry_safe(target, t_temp, table, vm_list) {
+		printf("\t\tFind IP in delete:%08x\n", target->vm_ip);
 
-        if (target->vm_ip == vm_ip) {
-            list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
-                 if (target_sk->socket_id == socket_id) {
-                    printf("\t\tRemove SK:%08x\n", target_sk->socket_id);
-                    LIST_DEL(&target_sk->skid_list);
-                    free(target_sk);
-                }
-            }
+		if (target->vm_ip == vm_ip) {
+			list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
+				if (target_sk->socket_id == socket_id) {
+					printf("\t\tRemove SK:%08x\n", target_sk->socket_id);
+					target->socket_count--;
+					LIST_DEL(&target_sk->skid_list);
 
-            if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
-                LIST_DEL(&target->vm_list);
-                free(target);
-            }
-            break;
-        }
-    }
+					free(target_sk);
+				}
+			}
 
-    return 0;
+			if (!target->fault_enable) {
+				if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
+					LIST_DEL(&target->vm_list);
+					free(target);
+				}
+			}
+			break;
+		}
+	}
+
+	return 0;
 }
 
 int show_target_rule(struct list *table)
 {
-    struct vm_list* target;
-    struct vmsk_list* target_sk;
+	struct vm_list *target;
+	struct vmsk_list *target_sk;
 
-    printf("========================= START =========================\n");
+	printf("========================= START =========================\n");
 
-    list_for_each_entry(target, table, vm_list) {
-        printf( "IP:%08x:", target->vm_ip);
-        list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
-            printf("\tSocket ID:%08x\n", target_sk->socket_id);
-        }
-    }
-    printf("========================= END =========================\n");
+	list_for_each_entry(target, table, vm_list) {
+		printf("IP:%08x  Count:%d\n", target->vm_ip, target->socket_count);
+		if (target->socket_count) {
+			list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
+				printf("\tSocket ID:%08x\n", target_sk->socket_id);
+			}
+		}
+	}
+	printf("========================= END =========================\n");
 
-    return 0;
+	return 0;
 }
 
 int clean_target_list(struct list *table)
 {
-    struct vm_list* target = NULL;
-    struct vm_list* t_temp = NULL;
-    struct vmsk_list* target_sk = NULL;
-    struct vmsk_list* sk_temp = NULL;
+	struct vm_list *target = NULL;
+	struct vm_list *t_temp = NULL;
+	struct vmsk_list *target_sk = NULL;
+	struct vmsk_list *sk_temp = NULL;
 
-    list_for_each_entry_safe(target, t_temp, table, vm_list) {
-        printf("\t\tFind IP in clean list:%08x\n", target->vm_ip);
+	list_for_each_entry_safe(target, t_temp, table, vm_list) {
+		printf("\t\tFind IP in clean list:%08x\n", target->vm_ip);
 
-        if (target != NULL) {
+		if (target != NULL) {
 
-            list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
-                 if (target_sk != NULL) {
-                    printf("\t\tRemove socket ID in clean list:%08x\n", target_sk->socket_id);
-                    LIST_DEL(&target_sk->skid_list);
-                    free(target_sk);
-                }
-            }
+			list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
+				if (target_sk != NULL) {
+					printf("\t\tRemove socket ID in clean list:%08x\n", target_sk->socket_id);
+					LIST_DEL(&target_sk->skid_list);
+					free(target_sk);
+				}
+			}
 
-            if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
+			if (LIST_ISEMPTY(&target->skid_head.skid_list)) {
 				LIST_DEL(&target->vm_list);
-                free(target);
-            }
-        }
-    }
+				free(target);
+			}
+		}
+	}
 
-    return 0;    
+	return 0;
 }
 
 /**
@@ -1039,362 +1060,500 @@ struct fo_list fo_head = {
 	.fo_list = LIST_HEAD_INIT(fo_head.fo_list)
 };
 
-struct fo_list* pop_failover(unsigned int nic)
+struct fo_list *pop_failover(unsigned int nic)
 {
-    struct fo_list* target = NULL;
-    struct fo_list* out_temp = NULL;
+	struct fo_list *target = NULL;
+	struct fo_list *out_temp = NULL;
 
-    IPC_PRINTF("Pop targte:%08x\n", nic);
+	IPC_PRINTF("Pop targte:%08x\n", nic);
 
-    list_for_each_entry_safe(target, out_temp, &fo_head.fo_list, fo_list) {
-        IPC_PRINTF("List target: %08x\n", target->nic); 
-        if (target->nic == nic) {
-            IPC_PRINTF("\tRemove failover list\n");
-            LIST_DEL(&target->fo_list);
-            return target;
-        }
-    }
-    return NULL;
+	list_for_each_entry_safe(target, out_temp, &fo_head.fo_list, fo_list) {
+		IPC_PRINTF("List target: %08x\n", target->nic);
+		if (target->nic == nic) {
+			IPC_PRINTF("\tRemove failover list\n");
+			LIST_DEL(&target->fo_list);
+			return target;
+		}
+	}
+	return NULL;
 }
 
-void* ipc_handler(void)
+void *ipc_handler(void)
 {
-    int shm_id = 0;
-    struct proto_ipc *ipt_target = NULL; 
-    //socket的建立
- 
-    int sockfd = 0; 
-    int forClientSockfd = 0;       
-    struct sockaddr_in serverInfo;
-    struct sockaddr_in clientInfo;
-    int addrlen = sizeof(clientInfo);
-    pthread_t thread_id;
-    struct thread_data thread_data;
+	int shm_id = 0;
+
+	//socket的建立
+
+	int sockfd = 0;
+	int forClientSockfd = 0;
+	struct sockaddr_in serverInfo;
+	struct sockaddr_in clientInfo;
+	int addrlen = sizeof(clientInfo);
+	pthread_t thread_id;
+	struct thread_data thread_data;
 
 #if USING_NETLINK
-    int netlink_sock_fd = 0;  
-    struct sockaddr_nl src_addr;
-#endif 
-  
-
-    IPC_PRINTF("Start\n\n");
-
-    /* get the ID of shared memory */
-    shm_id = shmget((key_t)KEY_SHM_CUJU_IPC, SUPPORT_VM_CNT*(sizeof(struct proto_ipc)), 0666|IPC_CREAT);
-    
-    if (shm_id == -1) {
-        perror("shmget error\n");
-        exit(EXIT_FAILURE);
-    }
-    
-    /* attach shared memory */
-    ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
-    if (ipt_target == (void *)-1) {
-        perror("shmget error");
-        exit(EXIT_FAILURE);
-    }
-
-    IPC_PRINTF("Shared Memory Ok\n");
-
-    memset(ipt_target, 0x00, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
-
-    IPC_PRINTF("share memory start:%p total max:%lu\n", ipt_target, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
-
-#if USING_NETLINK
-    netlink_sock_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
-    if (netlink_sock_fd <= 0) {
-        perror("create socket failed!\n");
-        return -1;
-    }
-
-    printf("Netlink Socket ID:%d\n", netlink_sock_fd);
-   
-    memset(&src_addr, 0, sizeof(struct sockaddr_nl));
-    src_addr.nl_family = AF_NETLINK;
-    src_addr.nl_pid = getpid();
-    src_addr.nl_groups = 0;
- 
-    if (bind(netlink_sock_fd, (struct sockaddr *)&src_addr, sizeof(struct sockaddr)) < 0) {
-        perror("bind socket failed!\n");
-        close (netlink_sock_fd);
-        return -1;
-    }
+	int netlink_sock_fd = 0;
+	struct sockaddr_nl src_addr;
 #endif
 
-#if 0//DEBUG_SHM
-    while(1) {
-        ipt_target->epoch_id++;
-        usleep(5000);
-    } 
-#else 
-    sockfd = socket(AF_INET , SOCK_STREAM , 0);
+	IPC_PRINTF("Start\n\n");
 
-    if (sockfd == -1){
-        perror("Fail to create a socket.\n");
-    }
+	/* get the ID of shared memory */
+	shm_id = shmget((key_t)KEY_SHM_CUJU_IPC, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)),
+			0666 | IPC_CREAT);
 
-    //socket的連線
-    bzero(&serverInfo, sizeof(serverInfo));
+	if (shm_id == -1) {
+		perror("shmget error\n");
+		exit(EXIT_FAILURE);
+	}
 
-    serverInfo.sin_family = PF_INET;
-    serverInfo.sin_addr.s_addr = INADDR_ANY;
-    serverInfo.sin_port = htons(1200);
+	/* attach shared memory */
+	ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
+	if (ipt_target == (void *) - 1) {
+		perror("shmget error");
+		exit(EXIT_FAILURE);
+	}
 
-    bind(sockfd, (struct sockaddr *)&serverInfo, sizeof(serverInfo));
-    
-    listen(sockfd, 5);
-	
-    IPC_PRINTF("Wait accepted\n");
+	IPC_PRINTF("Shared Memory Ok\n");
 
-    while((forClientSockfd = accept(sockfd, (struct sockaddr *)&clientInfo, (socklen_t*)&addrlen)) > 0 )
-    {
-        IPC_PRINTF("Connection accepted:%d\n", forClientSockfd);
+	memset(ipt_target, 0x00, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
 
-        thread_data.th_idx = total_ipc_idx++;
-        thread_data.th_sock = forClientSockfd;
+	IPC_PRINTF("share memory start:%p total max:%lu\n", ipt_target,
+		   SUPPORT_VM_CNT * (sizeof(struct proto_ipc)));
+
+#if USING_NETLINK
+	netlink_sock_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
+	if (netlink_sock_fd <= 0) {
+		perror("create socket failed!\n");
+		return -1;
+	}
+
+	printf("Netlink Socket ID:%d\n", netlink_sock_fd);
+
+	memset(&src_addr, 0, sizeof(struct sockaddr_nl));
+	src_addr.nl_family = AF_NETLINK;
+	src_addr.nl_pid = getpid();
+	src_addr.nl_groups = 0;
+
+	if (bind(netlink_sock_fd, (struct sockaddr *)&src_addr, sizeof(struct sockaddr)) < 0) {
+		perror("bind socket failed!\n");
+		close(netlink_sock_fd);
+		return -1;
+	}
+#endif
+
+#if 0 //DEBUG_SHM
+	while (1) {
+		ipt_target->epoch_id++;
+		usleep(5000);
+	}
+#else
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (sockfd == -1) {
+		perror("Fail to create a socket.\n");
+	}
+
+	//socket的連線
+	bzero(&serverInfo, sizeof(serverInfo));
+
+	serverInfo.sin_family = PF_INET;
+	serverInfo.sin_addr.s_addr = INADDR_ANY;
+	serverInfo.sin_port = htons(1200);
+
+	bind(sockfd, (struct sockaddr *)&serverInfo, sizeof(serverInfo));
+
+	listen(sockfd, 5);
+
+	IPC_PRINTF("Wait accepted\n");
+
+	while ((forClientSockfd = accept(sockfd, (struct sockaddr *)&clientInfo,
+					 (socklen_t *)&addrlen)) > 0) {
+		IPC_PRINTF("Connection accepted:%d\n", forClientSockfd);
+
+		thread_data.th_idx = total_ipc_idx++;
+		thread_data.th_sock = forClientSockfd;
 #if 0
-        if (list_empty(&failover_list)){
-            printf("list is empty\n");
-            thread_data.th_sock = forClientSockfd;
-        }
-        else {
-            printf("list is not empty\n");
-            thread_data.th_sock = 0;
-        }
+		if (list_empty(&failover_list)) {
+			printf("list is empty\n");
+			thread_data.th_sock = forClientSockfd;
+		} else {
+			printf("list is not empty\n");
+			thread_data.th_sock = 0;
+		}
 #endif
-        thread_data.ipt_base = ipt_target;
-        ////thread_data.netlink_sock = netlink_sock_fd;
+		thread_data.ipt_base = ipt_target;
+		////thread_data.netlink_sock = netlink_sock_fd;
+		printf("Thread IPT base address %p\n", ipt_target);
 
-        if(pthread_create(&thread_id, NULL, ipc_connection_handler, (void*) &thread_data) < 0)
-        {
-            perror("could not create thread");
-            goto func_error;
-        }
-         
-        //Now join the thread , so that we dont terminate before the thread
-        //pthread_join( thread_id , NULL);
-        IPC_PRINTF("Handler assigned\n");
-    }
+		if (pthread_create(&thread_id, NULL, ipc_connection_handler, (void *)&thread_data) < 0) {
+			perror("could not create thread");
+			goto func_error;
+		}
 
-    IPC_PRINTF("Close\n");
+		//Now join the thread , so that we dont terminate before the thread
+		//pthread_join( thread_id , NULL);
+		IPC_PRINTF("Handler assigned\n");
+	}
+
+	IPC_PRINTF("Close\n");
 #endif
 
-    /* detach shared memory */
-    if (shmdt(ipt_target) == -1) {
-        perror("shmdt");
-        goto func_error;
-    }
-    
-    /* destroy shared memory */
-    if (shmctl(shm_id, IPC_RMID, 0) == -1) {
-        perror("shmctl");
-        goto func_error;
-    }
-func_error:    
-    pthread_exit(NULL);
+	/* detach shared memory */
+	if (shmdt(ipt_target) == -1) {
+		perror("shmdt");
+		goto func_error;
+	}
+
+	/* destroy shared memory */
+	if (shmctl(shm_id, IPC_RMID, 0) == -1) {
+		perror("shmctl");
+		goto func_error;
+	}
+func_error:
+	pthread_exit(NULL);
 }
 /*
  * This will handle connection for each client
  * */
 void *ipc_connection_handler(void *socket_desc)
 {
-    //Get the socket descriptor
-    int sock = ((struct thread_data*)socket_desc)->th_sock;
-    int shm_idx = ((struct thread_data*)socket_desc)->th_idx;
-    int primary_shm_idx = 0;
-    struct proto_ipc * ipt_addr = NULL;
-    //struct proto_ipc * ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
+	//Get the socket descriptor
+	int sock = ((struct thread_data *)socket_desc)->th_sock;
+	int shm_idx = ((struct thread_data *)socket_desc)->th_idx;
+	int primary_shm_idx = 0;
+	struct proto_ipc *ipt_addr = NULL;
+	//struct proto_ipc * ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
 
-    int read_size = 0;
-    unsigned char client_message[sizeof(struct proto_ipc)];
-    struct proto_ipc* ipc_ptr = NULL;
-    //u_int32_t guest_ip_db = 0; 
-    unsigned int base_nic = 0x0;
-    struct fo_list* fo_temp = NULL;
+	int read_size = 0;
+	unsigned char client_message[sizeof(struct proto_ipc)];
+	struct proto_ipc *ipc_ptr = NULL;
+	//u_int32_t guest_ip_db = 0;
+	unsigned int base_nic = 0x0;
+	struct fo_list *fo_temp = NULL;
+	struct vm_list *target_vm = NULL;
 
-#if USING_NETLINK	
-	int sock_fd = ((struct thread_data*)socket_desc)->netlink_sock;
-    struct sockaddr_nl dest_addr;
-    struct nlmsghdr *nlh = NULL;
-    struct iovec iov;
-    struct msghdr msg;
-    struct netlink_ipc nl_ipc;
- 
-    memset(&dest_addr, 0, sizeof(struct sockaddr_nl));
-    dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = 0;
-    dest_addr.nl_groups = 0;
-    
+#if USING_NETLINK
+	int sock_fd = ((struct thread_data *)socket_desc)->netlink_sock;
+	struct sockaddr_nl dest_addr;
+	struct nlmsghdr *nlh = NULL;
+	struct iovec iov;
+	struct msghdr msg;
+	struct netlink_ipc nl_ipc;
+
+	memset(&dest_addr, 0, sizeof(struct sockaddr_nl));
+	dest_addr.nl_family = AF_NETLINK;
+	dest_addr.nl_pid = 0;
+	dest_addr.nl_groups = 0;
+
 	nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
-    if (nlh == NULL) {
-        perror("malloc nlmsghdr failed!\n");
-        close(sock_fd);
-        return 0;
-    } 
-    memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
-    nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
-    nlh->nlmsg_pid = getpid();
-    nlh->nlmsg_flags = 0;
- 
-    iov.iov_base = (void *)nlh;
-    iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+	if (nlh == NULL) {
+		perror("malloc nlmsghdr failed!\n");
+		close(sock_fd);
+		return 0;
+	}
+	memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
+	nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
+	nlh->nlmsg_pid = getpid();
+	nlh->nlmsg_flags = 0;
 
-    memset(&msg, 0, sizeof(struct msghdr));
-    msg.msg_name = (void *)&dest_addr;
-    msg.msg_namelen = sizeof(struct sockaddr_nl);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    
-	MSG_PRINTF("[%s]\n", __func__); 
+	iov.iov_base = (void *)nlh;
+	iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+
+	memset(&msg, 0, sizeof(struct msghdr));
+	msg.msg_name = (void *)&dest_addr;
+	msg.msg_namelen = sizeof(struct sockaddr_nl);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	MSG_PRINTF("[%s]\n", __func__);
 #endif
-    //if (shm_idx != 0) {
-    //    ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
-    //}
+	//if (shm_idx != 0) {
+	//    ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
+	//}
 
-
-    while(read_size == recv(sock, client_message, 2000, 0))
-    {
-        //end of string marker
+	while (read_size = recv(sock, client_message, 2000, 0)) {
+		//end of string marker
 		//client_message[read_size] = '\0';
-#if 0
-        printf("Size:%d\n", read_size); 
-      
-        for (int idx = 0; idx < read_size; idx++) {
-            printf("%02x ", *(client_message + idx));
+#if DEBUG_IPC
+		printf("Size:%d\n", read_size);
 
-            if (idx % 8 == 7)
-                printf("\n");    
-        }
-        printf("\n"); 
+		for (int idx = 0; idx < read_size; idx++) {
+			printf("%02x ", *(client_message + idx));
+
+			if (idx % 8 == 7)
+				printf("\n");
+		}
+		printf("\n");
 #endif
-        ipc_ptr = (struct proto_ipc*)client_message;
+		ipc_ptr = (struct proto_ipc *)client_message;
 
-        //printf("NIC: %08x\n", ipc_ptr->nic[0]);
+		//printf("NIC: %08x\n", ipc_ptr->nic[0]);
 
-        IPC_PRINTF("shm_idx:%d p_shm_idx:%d True:%d\n", shm_idx, primary_shm_idx, !LIST_ISEMPTY(&fo_head.fo_list));
+		IPC_PRINTF("shm_idx:%d p_shm_idx:%d True:%d\n", shm_idx, primary_shm_idx,
+			   !LIST_ISEMPTY(&fo_head.fo_list));
 
-        //if (shm_idx == 0 && primary_shm_idx == 0 && !list_empty(&failover_list)) {
-            
-        fo_temp = pop_failover((ipc_ptr->nic[0]));
-  
-        if (fo_temp != NULL) {
-            IPC_PRINTF("failover list not empty\n");
-            primary_shm_idx = fo_temp->socket_id;
-            ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + primary_shm_idx;
-            free(fo_temp);
-        }
-        else {
-            IPC_PRINTF("failover list is empty!!!\n");
-            ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
-        }
+		//if (shm_idx == 0 && primary_shm_idx == 0 && !list_empty(&failover_list)) {
 
-        //MSG_PRINTF("ipt_addr:%p  ipc_ptr:%p\n", ipt_addr, ipc_ptr); 
+		base_nic = ipc_ptr->nic[0];
 
-        ipt_addr->epoch_id = ipc_ptr->epoch_id;
-        ipt_addr->flush_id = ipc_ptr->flush_id;
-        ipt_addr->nic_count = ipc_ptr->nic_count;
-        ipt_addr->nic[0] = ipc_ptr->nic[0];
-        base_nic = ipc_ptr->nic[0];
-        ipt_addr->cuju_ft_mode = ipc_ptr->cuju_ft_mode;
-        
-        IPC_PRINTF("FT mode:%d\n", ipc_ptr->cuju_ft_mode);
-        IPC_PRINTF("E/F ID:%d\n", ipc_ptr->epoch_id);
-        IPC_PRINTF("NICCount:%d\n", ipc_ptr->nic_count);
+		/* this may occur after CUJU_FT_TRANSACTION_SNAPSHOT */
 
-        if (ipc_ptr->epoch_id != ipc_ptr->flush_id) {
-            IPC_PRINTF("Match\n");
-        }
+		IPC_PRINTF("[%s] POP_FAILOVER %08x\n", __func__, ipc_ptr->nic[0]);
+		fo_temp = pop_failover((ipc_ptr->nic[0]));
+
+		if (fo_temp != NULL) {
+			IPC_PRINTF("failover list not empty\n");
+			printf("failover list not empty\n");
+			primary_shm_idx = fo_temp->socket_id;
+			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + primary_shm_idx;
+			free(fo_temp);
+
+			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
+			if (!target_vm) {
+				printf("ERROR\n");
+				assert(0);
+			}
+
+			target_vm->failovered = 1;
+			IPC_PRINTF("[FT_FAILOVER] vm_data: %p\n", target_vm);
+
+			pthread_cond_signal(&target_vm->ss_data.cond);
+
+		} else {
+			IPC_PRINTF("failover list is empty!!!\n");
+			printf("failover list is empty!!!\n");
+			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + shm_idx;
+			printf("ipt_addr %p IDX:%d\n", ipt_addr, shm_idx);
+		}
+
+		//MSG_PRINTF("ipt_addr:%p  ipc_ptr:%p\n", ipt_addr, ipc_ptr);
+
+		ipt_addr->epoch_id = ipc_ptr->epoch_id;
+		ipt_addr->flush_id = ipc_ptr->flush_id;
+		ipt_addr->nic_count = ipc_ptr->nic_count;
+		ipt_addr->nic[0] = ipc_ptr->nic[0];
+		ipt_addr->cuju_ft_mode = ipc_ptr->cuju_ft_mode;
+
+		IPC_PRINTF("FT mode:%d\n", ipc_ptr->cuju_ft_mode);
+		IPC_PRINTF("E/F ID:%d\n", ipc_ptr->epoch_id);
+		IPC_PRINTF("NICCount:%d\n", ipc_ptr->nic_count);
+
+
+		printf("NIC IP1:%08x\n", ipt_addr->nic[0]);
+		if (ipc_ptr->epoch_id != ipc_ptr->flush_id) {
+			IPC_PRINTF("Match\n");
+		}
 
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_SNAPSHOT) {
 			IPC_PRINTF("FT mode is CUJU_FT_TRANSACTION_SNAPSHOT\n");
+			//printf("FT mode is SNAPSHOT from %08x\n", ipc_ptr->nic[0]);
+			//pthread_cond_signal();
+
+			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
+			if (!target_vm) {
+				printf("ERROR\n");
+				assert(0);
+			}
+
+			target_vm->nic[1]++;
+			IPC_PRINTF("[FT_SNAPSHOT]vm_data: %p\n", target_vm);
+
+			pthread_cond_signal(&target_vm->ss_data.cond);
 		}
 
 #if USING_SNAPSHOT_THREAD
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
-			IPC_PRINTF("FT mode is CUJU_FT_INIT\n");
-			/* create new thread for snapshot */
+
 			pthread_t thread_snapshot;
+			struct vm_list *vm_data = NULL;
+
+			IPC_PRINTF("FT mode is CUJU_FT_INIT from %08x\n", base_nic);
+			/* create new thread for snapshot */
+
+			vm_data = add_vm_target(&vm_head.vm_list, base_nic, 0x0, NULL);
+			if (!vm_data) {
+				perror("could not create snapshot data");
+				goto error_handle;
+			}
+
+			vm_data->fault_enable = 1;
+			vm_data->nic[0] = base_nic;
+			printf("[FT_INIT] vm_data: %p\n", vm_data);
+
+			if (pthread_create(&thread_snapshot, NULL, ipc_snapshot_in, (void *)vm_data) < 0) {
+				perror("could not create snapshot thread");
+				goto error_handle;
+			}
 		}
-#endif 
-
-
-#if USING_NETLINK		
-        nl_ipc.epoch_id = ipc_ptr->epoch_id;
-        nl_ipc.flush_id = ipc_ptr->flush_id;
-        nl_ipc.cuju_ft_mode = ipc_ptr->cuju_ft_mode;
-        nl_ipc.nic_count = ipc_ptr->nic_count;
-
-        memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
-
-        //strcpy(NLMSG_DATA(nlh), (void *)&nl_ipc);
-    
-        if (sendmsg(sock_fd, &msg, 0) < 0) {
-            perror("send msg failed!\n");
-            free(nlh);
-            close(sock_fd);
-            goto error_handle;
-        }        
 #endif
 
-        //MSG_PRINTF("NIC Cnt:%d\n", ipc_ptr->nic_count);
-        //MSG_PRINTF("CONN Cnt:%d\n", ipc_ptr->conn_count);
-        //MSG_PRINTF("IP:%08x\n", *(u_int32_t*)ipc_ptr->nic[0]);
-#if 0 
+#if USING_NETLINK
+		nl_ipc.epoch_id = ipc_ptr->epoch_id;
+		nl_ipc.flush_id = ipc_ptr->flush_id;
+		nl_ipc.cuju_ft_mode = ipc_ptr->cuju_ft_mode;
+		nl_ipc.nic_count = ipc_ptr->nic_count;
+
+		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
+
+		//strcpy(NLMSG_DATA(nlh), (void *)&nl_ipc);
+
+		if (sendmsg(sock_fd, &msg, 0) < 0) {
+			perror("send msg failed!\n");
+			free(nlh);
+			close(sock_fd);
+			goto error_handle;
+		}
+#endif
+
+		//MSG_PRINTF("NIC Cnt:%d\n", ipc_ptr->nic_count);
+		//MSG_PRINTF("CONN Cnt:%d\n", ipc_ptr->conn_count);
+		//MSG_PRINTF("IP:%08x\n", *(u_int32_t*)ipc_ptr->nic[0]);
+#if 0
 		if (ipc_ptr->nic_count) {
-			for(int idx = 0; idx < ipc_ptr->nic_count; idx++) {
-				guest_ip_db = ntohl(*((u_int32_t*)(client_message + sizeof(struct proto_ipc)) + idx));
+			for (int idx = 0; idx < ipc_ptr->nic_count; idx++) {
+				guest_ip_db = ntohl(*((u_int32_t *)(client_message + sizeof(struct proto_ipc)) + idx));
 
-                ((u_int32_t*)ipt_addr + sizeof(struct proto_ipc) + idx) 
+				((u_int32_t *)ipt_addr + sizeof(struct proto_ipc) + idx)
 				MSG_PRINTF("Find IP String %08x\n", guest_ip_db);
-				
-    		}
+
+			}
 		}
 #endif
-        
+
 		//clear the message buffer
 		memset(client_message, 0, sizeof(struct proto_ipc));
-        read_size = 0;
-    }
-     
-    if(read_size == 0)
-    {
-        IPC_PRINTF("Client disconnected\n");
+		read_size = 0;
 
-        if (shm_idx != 0) {
-            IPC_PRINTF("insert shm id\n");
-            struct fo_list* new = malloc(sizeof(struct fo_list));
-            new->nic = base_nic;
-            new->socket_id = shm_idx;
-            LIST_ADDQ(&fo_head.fo_list, &new->fo_list);
-            total_ipc_idx--;
-        }
+		printf("NIC IP2:%08x\n", ipt_addr->nic[0]);
+	}
 
-        fflush(stdout);
-        goto error_handle;
-    }
-    else if(read_size == -1)
-    {
-        perror("recv failed");
-    }
+	if (read_size == 0) {
+		IPC_PRINTF("Client disconnected\n");
+
+		if (shm_idx != 0) {
+			struct fo_list *new = malloc(sizeof(struct fo_list));
+			IPC_PRINTF("insert shm id\n");
+			new->nic = base_nic;
+			new->socket_id = shm_idx;
+			LIST_ADDQ(&fo_head.fo_list, &new->fo_list);
+			total_ipc_idx--;
+		}
+
+		fflush(stdout);
+		goto error_handle;
+	} else if (read_size == -1) {
+		perror("recv failed");
+	}
 
 error_handle:
-    free(nlh);
-    close(sock);
-    IPC_PRINTF("Close Thread\n");
-    return 0;
-} 
+	free(nlh);
+	close(sock);
+	IPC_PRINTF("Close Thread\n");
+	return 0;
+}
+#if USING_SNAPSHOT_THREAD
 
-void* ipc_snapshot_in(void* data) 
+int ipc_dump_tcp(struct vm_list *vm_target)
 {
+	struct vm_list *target;
+	struct vmsk_list *target_sk;
 
-	printf("[%s]\n", __func__);	
+	IPC_TH_PRINTF("========================= START =========================\n");
 
 
-func_error:    
-    pthread_exit(NULL);	
+	if (vm_target->socket_count) {
+		printf("IP:%08x:\n", vm_target->vm_ip);
+
+		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
+			printf("\tSocket ID:%08x\n", target_sk->socket_id);
+
+			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data.sk_data),
+						 target_sk->conn);
+
+		}
+	}
+
+	IPC_TH_PRINTF("========================= END =========================\n");
+
+	return 0;
 }
 
-#endif 
+int ipc_restore_tcp(struct vm_list *vm_target)
+{
+	struct vm_list *target;
+	struct vmsk_list *target_sk;
+
+	IPC_TH_PRINTF("========================= START =========================\n");
+
+
+	if (vm_target->socket_count) {
+		printf("IP:%08x:\n", vm_target->vm_ip);
+
+		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
+			printf("\tSocket ID:%08x\n", target_sk->socket_id);
+
+			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data.sk_data),
+						 target_sk->conn);
+
+		}
+	}
+
+	IPC_TH_PRINTF("========================= END =========================\n");
+
+	return 0;
+}
+
+void *ipc_snapshot_in(void *data)
+{
+	struct vm_list *vm_target = (struct vm_list *)data;
+	u_int32_t socket_count;
+
+	printf("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
+
+	while (1) {
+		pthread_mutex_lock(&vm_target->ss_data.locker);
+		pthread_cond_wait(&vm_target->ss_data.cond, &vm_target->ss_data.locker);
+
+		IPC_TH_PRINTF("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
+		IPC_TH_PRINTF("[%s] fake socket:%d\n\n\n", __func__, vm_target->nic[1]);
+		IPC_TH_PRINTF("[%s] real socker count:%d\n\n\n", __func__, vm_target->socket_count);
+
+		/*
+				socket_count = vm_target->socket_count;
+				for (int idx = 0; idx < socket_count; idx++)
+			    {
+
+				}
+		*/
+
+		if (vm_target->failovered) {
+			printf("[%s] failovered:%d\n", __func__, vm_target->failovered);
+
+			//restore_one_tcp_conn();
+		} else {
+			if (vm_target->socket_count) {
+				printf("[%s] real socket count:%d\n\n\n", __func__, vm_target->socket_count);
+				ipc_dump_tcp(vm_target);
+			}
+		}
+		//show_target_rule(&vm_head.vm_list);
+
+		/* send end of snapshot to Cuju */
+
+
+		pthread_mutex_unlock(&vm_target->ss_data.locker);
+	}
+
+
+	printf("[%s]\n", __func__);
+
+func_error:
+	pthread_exit(NULL);
+}
+#endif
+#endif
 
 #if USING_TCP_REPAIR
 
@@ -1410,13 +1569,13 @@ void release_sk(struct libsoccr_sk *sk)
 
 void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
 {
-    union libsoccr_addr sa_src, sa_dst;
-    struct sockaddr_in src_addr, dst_addr;
+	union libsoccr_addr sa_src, sa_dst;
+	struct sockaddr_in src_addr, dst_addr;
 
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
 	in_port_t ipv4_to_port;
-	in_port_t ipv4_from_port;	
+	in_port_t ipv4_from_port;
 
 	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
 	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
@@ -1431,48 +1590,45 @@ void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
 	dst_addr.sin_addr.s_addr = ipv4_to.s_addr;
 
 	if (restore_sockaddr(&sa_src,
-				AF_INET, ipv4_from_port,
-				&src_addr.sin_addr.s_addr, 0) < 0)
+			     AF_INET, ipv4_from_port,
+			     &src_addr.sin_addr.s_addr, 0) < 0)
 		return;
-	
+
 	if (restore_sockaddr(&sa_dst,
-				AF_INET, ipv4_to_port,
-				&dst_addr.sin_addr.s_addr, 0) < 0)
+			     AF_INET, ipv4_to_port,
+			     &dst_addr.sin_addr.s_addr, 0) < 0)
 		return;
 
 	libsoccr_set_addr(socr, 1, &sa_src, 0);
 	libsoccr_set_addr(socr, 0, &sa_dst, 0);
 }
 
-
-
-int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data* data, struct connection *conn)
+int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data *data,
+			     struct connection *conn)
 {
-    //char sk_header[8];
-    int ret;
-	
+	//char sk_header[8];
+	int ret;
+
 	//uint32_t src_addr;
 	//uint16_t src_port;
-	
+
 	//struct libsoccr_sk *socr = calloc(1, sizeof(struct libsoccr_sk));
 	struct libsoccr_sk *socr = malloc(sizeof(struct libsoccr_sk));
 
-
-    if (tcp_repair_on(fd) < 0) {
-        printf("tcp_repair_on fail.\n");
+	if (tcp_repair_on(fd) < 0) {
+		printf("tcp_repair_on fail.\n");
 		return -1;
 	}
 
-
 	socr->fd = fd;
-    set_addr_port_conn(socr, conn);
-	
+	set_addr_port_conn(socr, conn);
+
 	//src_addr = socr->src_addr->v4.sin_addr.s_addr;
-    //src_port = socr->src_addr->v4.sin_port;                                                                               
+	//src_port = socr->src_addr->v4.sin_port;
 
 	ret = libsoccr_save(socr, data, sizeof(*data));
-    //socr->src_addr->v4.sin_addr.s_addr = src_addr;
-    //socr->src_addr->v4.sin_port = src_port;
+	//socr->src_addr->v4.sin_addr.s_addr = src_addr;
+	//socr->src_addr->v4.sin_port = src_port;
 
 	if (ret < 0) {
 		printf("libsoccr_save() failed with %d\n", ret);
@@ -1480,21 +1636,21 @@ int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data* data, struct conne
 	}
 	if (ret != sizeof(*data)) {
 		printf("This libsocr is not supported (%d vs %d)\n",
-				ret, (int)sizeof(*data));
+		       ret, (int)sizeof(*data));
 		return ret;
 	}
 
 	if (tcp_repair_off(fd) < 0) {
-        printf("tcp_repair_off fail.\n");
+		printf("tcp_repair_off fail.\n");
 		return -1;
 	}
-    
-    //if 連線數量達預期..開始存sk queue data.
+
+	//if 連線數量達預期..開始存sk queue data.
 #if 0
-    save_sk_header(buf, 1);
-    save_sk_data(data,socr, buf);
-    int len = buf->header_size + buf->queue_size;
-    char *send_data = final_save_data(buf);
+	save_sk_header(buf, 1);
+	save_sk_data(data, socr, buf);
+	int len = buf->header_size + buf->queue_size;
+	char *send_data = final_save_data(buf);
 	free(send_data);
 #endif
 
@@ -1502,32 +1658,29 @@ int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data* data, struct conne
 }
 
 /******************************** REPAIR RESTORE ********************************/
-#if 1
 
-
-
-static int restore_tcp_conn_state_conn(int fd, struct libsoccr_sk *socr, struct sk_data_info* data)
+static int restore_tcp_conn_state_conn(int fd, struct libsoccr_sk *socr,
+				       struct sk_data_info *data)
 {
 	//int aux;
 	union libsoccr_addr sa_src, sa_dst;
 	//print_info(data);
-	
+
 	//struct sockaddr_in clinetaddr, serveraddr;
 	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
 	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
 
 	if (restore_sockaddr(&sa_src,
-				AF_INET, data->sk_addr.src_port,
-				&data->sk_addr.src_addr, 0) < 0)
+			     AF_INET, data->sk_addr.src_port,
+			     &data->sk_addr.src_addr, 0) < 0)
 		goto err;
 	if (restore_sockaddr(&sa_dst,
-				AF_INET, data->sk_addr.dst_port,
-				&data->sk_addr.dst_addr, 0) < 0)
+			     AF_INET, data->sk_addr.dst_port,
+			     &data->sk_addr.dst_addr, 0) < 0)
 		goto err;
 
 	libsoccr_set_addr(socr, 1, &sa_src, 0);
 	libsoccr_set_addr(socr, 0, &sa_dst, 0);
-
 
 	if (libsoccr_restore_conn(socr, data, sizeof(*data)))
 		goto err;
@@ -1538,7 +1691,7 @@ err:
 	return -1;
 }
 
-int restore_one_tcp_conn(int fd, struct sk_data_info* data)
+int restore_one_tcp_conn(int fd, struct sk_data_info *data)
 {
 	struct libsoccr_sk *sk;
 
@@ -1555,6 +1708,5 @@ int restore_one_tcp_conn(int fd, struct sk_data_info* data)
 	release_sk(sk);
 	return 0;
 }
-#endif
 
 #endif /* USING_TCP_REPAIR */

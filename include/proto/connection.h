@@ -147,6 +147,8 @@ static inline void conn_ctrl_init(struct connection *conn)
 
 		conn->flags |= CO_FL_CTRL_READY;
 
+		
+
 #if USING_TCP_REPAIR
 		/* add the new fd to TCP MAP */
 #endif 	
@@ -163,6 +165,22 @@ static inline void conn_ctrl_close(struct connection *conn)
 		/* Cuju-IPC delete the socket from the list */
 #endif		
 		fd_delete(conn->handle.fd);
+
+#if USING_TCP_REPAIR
+		/* add the new fd to TCP MAP */
+
+		////int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
+	if (conn->direction == DIR_DEST_CLIENT) {
+		del_target(&vm_head.vm_list, conn->addr_from, conn->handle.fd);
+	}
+	else if (conn->direction == DIR_DEST_GUEST) {
+		del_target(&vm_head.vm_list, conn->addr_to, conn->handle.fd);
+	}
+	else {
+
+	}
+
+#endif 
 		conn->handle.fd = DEAD_FD_MAGIC;
 		conn->flags &= ~CO_FL_CTRL_READY;
 	}

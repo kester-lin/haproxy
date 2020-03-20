@@ -202,10 +202,11 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 		}
 	}
 	
-	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
-	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
-	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
-	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;	
+	ipv4_to.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr);
+	ipv4_from.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr);
+
+	ipv4_to_port = ntohs(((struct sockaddr_in *)&conn->addr.to)->sin_port);
+	ipv4_from_port = ntohs(((struct sockaddr_in *)&conn->addr.from)->sin_port);	
 
 	//printf("NETLINK IP:%08x Port:%04x\n", ntohl(ipv4_to.s_addr), ntohs(ipv4_to_port));
 
@@ -366,6 +367,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	static struct libsoccr_sk_data sk_data;
 
+	printf("Send ID %d\n", conn->handle.fd);
+
 	if (!conn_ctrl_ready(conn))
 		return 0;
 
@@ -376,11 +379,17 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	DSRPRINTF("%s: %p\n", __func__, pipe);
 
+#if 0
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
 	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
 	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
 	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;
+#endif
 
+	ipv4_to.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr);
+	ipv4_from.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr);
+	ipv4_to_port = ntohs(((struct sockaddr_in *)&conn->addr.to)->sin_port);
+	ipv4_from_port = ntohs(((struct sockaddr_in *)&conn->addr.from)->sin_port);	
 
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
@@ -403,13 +412,13 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	}
 #endif
 
-#if USING_TCP_REPAIR
+#if 0 //USING_TCP_REPAIR
  	time_tdump = timeval_current();
 	dump_tcp_conn_state_conn(conn->handle.fd, &sk_data, conn);
 	printf("Time of %f\n", timeval_elapsed(&time_tdump));
 #endif
 
-
+	printf("conn->handle.fd: %d\n", conn->handle.fd);
 #if ENABLE_CUJU_FT	
 	pipe->out_fd = conn->handle.fd;
 
@@ -528,7 +537,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	else {
 		DSRPRINTF("Pipe Have NO NXT\n");		
 		pipe->pipe_nxt = pipe_buf;
-		pipe->pipe_nxt->pipe_dup = pipe_dup;
+		//if (pipe->pipe_nxt)
+			//pipe->pipe_nxt->pipe_dup = pipe_dup;
 		conn->pipe_buf_tail = pipe->pipe_nxt;
 	}
 	
@@ -729,10 +739,10 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				if (pipe_idx && pipe_idx->transfered && (curr_flush_id >= pipe_idx->flush_id)) {
 					RSLPRINTF("!!!Release: %p Loop:%d\n", pipe_idx, loop_cnt);
 					ft_clean_pipe(pipe_idx->pipe_dup);
-					put_pipe(pipe_idx->pipe_dup);
+					////put_pipe(pipe_idx->pipe_dup);
 
 					ft_clean_pipe(pipe_idx);
-					put_pipe(pipe_idx);
+					////put_pipe(pipe_idx);
 
 					fd_pipe_cnt-=2; 
 
@@ -844,7 +854,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 						conn->pipe_buf_tail = NULL;
 					}
 					ft_clean_pipe(pipe_release);				
-					put_pipe(pipe_release);
+					////put_pipe(pipe_release);
 					
 				}
 #else
@@ -859,7 +869,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 						conn->pipe_buf_tail = NULL;
 					}					
 					ft_clean_pipe(pipe_trans);				
-					put_pipe(pipe_trans);
+					////put_pipe(pipe_trans);
 
 					pipe->pipe_nxt = NULL;
 				}				
@@ -995,8 +1005,8 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 		}
 	}
 
-	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
-	ipv4_from = ((struct sockaddr_in *)&conn->addr.from)->sin_addr;
+	ipv4_to.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr);
+	ipv4_from.s_addr = ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr);
 
 	ipv4_to_port = ((struct sockaddr_in *)&conn->addr.to)->sin_port;
 	ipv4_from_port = ((struct sockaddr_in *)&conn->addr.from)->sin_port;
@@ -1021,7 +1031,7 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
         nl_ipc.flush_id = 0x0;
         nl_ipc.cuju_ft_mode = NL_TARGET_ADD_IN;
         nl_ipc.nic_count = 0;
-		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
+		nl_ipc.conn_ip = ipv4_to.s_addr;
 		nl_ipc.conn_port = ntohs(ipv4_to_port);
 		
 		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
@@ -1043,7 +1053,7 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
         nl_ipc.flush_id = 0x0;
         nl_ipc.cuju_ft_mode = NL_TARGET_ADD_OUT;
         nl_ipc.nic_count = 0;
-		nl_ipc.conn_ip = ntohl(ipv4_to.s_addr);
+		nl_ipc.conn_ip = ipv4_to.s_addr;
 		nl_ipc.conn_port = ntohs(ipv4_from_port);
 
 		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));

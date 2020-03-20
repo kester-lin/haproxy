@@ -468,6 +468,8 @@ struct connection {
 	unsigned int cujuipc_idx;
 	struct guest_ip_list* conn_gipl;
 	uint8_t direction;  /* 1 means that dest. is client application, 2 means that dest. is Guest. */
+	uint32_t addr_from;
+	uint32_t addr_to;
 	uint16_t backend_pipecnt;
 	uint16_t frontend_pipecnt;
 	struct timeval recv_time;

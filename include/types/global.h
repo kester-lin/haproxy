@@ -34,7 +34,7 @@
 #include <types/task.h>
 #include <types/vars.h>
 
-#if 0
+#if 1
 #define ENABLE_EPOLL
 #define USE_ACCEPT4
 #define TPROXY
@@ -46,8 +46,8 @@
 
 #define USING_NETLINK	0
 
-#define USING_TCP_REPAIR 0
-#define USING_SNAPSHOT_THREAD 0
+#define USING_TCP_REPAIR 1
+#define USING_SNAPSHOT_THREAD 1
 
 
 #ifndef UNIX_MAX_PATH

@@ -2759,28 +2759,44 @@ int main(int argc, char **argv)
     nl_msg.msg_iovlen = 1;
 #endif
 
+#if 0
 	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x20);
 	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x40);
 	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x60);
-	
+	show_target_rule(&vm_head.vm_list);
+	printf("\n");
+
+
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x0);
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
+	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
+	show_target_rule(&vm_head.vm_list);
+	printf("\n");
+
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
+	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
+	show_target_rule(&vm_head.vm_list);
+	printf("\n");
+	del_target(&vm_head.vm_list, 0xFFFFCCCC, 0x20);
+	del_target(&vm_head.vm_list, 0xFFFFCCCC, 0x40);
+	del_target(&vm_head.vm_list, 0xFFFFCCCC, 0x60);
+	show_target_rule(&vm_head.vm_list);
+	printf("\n");
+
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x20);
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x40);
+	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x60);
 	show_target_rule(&vm_head.vm_list);
 	printf("\n");
 
 	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
 	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
 	add_vm_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
-	
 	show_target_rule(&vm_head.vm_list);
-
-
-	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x20);
-	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
-	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x60);
-	show_target_rule(&vm_head.vm_list);
-
-
-	del_target(&vm_head.vm_list, 0xAAAAAAAA, 0x40);
-	show_target_rule(&vm_head.vm_list);
+	printf("#################################################\n");
+#endif
 
 	setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -2808,7 +2824,6 @@ int main(int argc, char **argv)
     }
 
 #if DEBUG_SHM_IPC
-	
 	while(1) {
         printf("Epoch ID:%d\n", (ipt_target+1)->epoch_id);
         printf("Flush ID:%d\n", (ipt_target+1)->flush_id);
