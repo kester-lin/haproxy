@@ -147,8 +147,6 @@ static inline void conn_ctrl_init(struct connection *conn)
 
 		conn->flags |= CO_FL_CTRL_READY;
 
-		
-
 #if USING_TCP_REPAIR
 		/* add the new fd to TCP MAP */
 #endif 	

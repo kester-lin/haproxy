@@ -105,7 +105,7 @@ int set_queue_seq(struct libsoccr_sk *sk, int queue, __u32 seq)
 	return 0;
 }
 
-int libsoccr_restore_queue_HA(struct libsoccr_sk *sk, dt_info *data, unsigned data_size,
+int libsoccr_restore_queue_HA(struct libsoccr_sk *sk, struct sk_data_info *data, unsigned data_size,
 		int queue, char *buf)
 {
 	if (!buf)
@@ -183,7 +183,7 @@ int restore_fin_in_snd_queue(int sk, int acked)
 	return ret;
 }
 
-int send_fin_HA(struct libsoccr_sk *sk, dt_info *data,
+int send_fin_HA(struct libsoccr_sk *sk, struct sk_data_info *data,
 		unsigned data_size, uint8_t flags)
 {
 	uint32_t src_v4 = sk->src_addr->v4.sin_addr.s_addr;
@@ -392,10 +392,12 @@ int libsoccr_set_sk_data_noq_conn(struct libsoccr_sk *sk,
 	else
 		addr_size = sizeof(sk->src_addr->v6);
 
+#if 0
 	if (bind(sk->fd, &sk->src_addr->sa, addr_size)) {
 		printf("Can't bind inet socket back");
 		return -1;
 	}
+#endif	
 
 	if (mstate & (RCVQ_FIRST_FIN | RCVQ_SECOND_FIN))
 		data->sk_data.inq_seq--;
@@ -479,20 +481,19 @@ int libsoccr_set_sk_data_noq_conn(struct libsoccr_sk *sk,
 	return 0;
 }
 
-int libsoccr_restore_conn(struct libsoccr_sk *sk,
-						  struct sk_data_info* data, 
+int libsoccr_restore_conn(struct sk_data_info* data, 
 						  unsigned int data_size)
 {
 	int mstate = 1 << data->sk_data.state;
 
-	if (libsoccr_set_sk_data_noq_conn(sk, data, data_size))
+	if (libsoccr_set_sk_data_noq_conn(data->libsoccr_sk, data, data_size))
 		return -1;
 
 
-	if (libsoccr_restore_queue_HA(sk, data, sizeof(*data), TCP_RECV_QUEUE, data->recv_queue))
+	if (libsoccr_restore_queue_HA(data->libsoccr_sk, data, sizeof(*data), TCP_RECV_QUEUE, data->libsoccr_sk->recv_queue))
 		return -1;
 
-	if (libsoccr_restore_queue_HA(sk, data, sizeof(*data), TCP_SEND_QUEUE, data->send_queue))
+	if (libsoccr_restore_queue_HA(data->libsoccr_sk, data, sizeof(*data), TCP_SEND_QUEUE, data->libsoccr_sk->send_queue))
 		return -1;
 
 	if (data->sk_data.flags & SOCCR_FLAGS_WINDOW) {
@@ -509,7 +510,7 @@ int libsoccr_restore_conn(struct libsoccr_sk *sk,
 			wopt.rcv_wnd++;
 		}
 
-		if (setsockopt(sk->fd, SOL_TCP, TCP_REPAIR_WINDOW, &wopt, sizeof(wopt))) {
+		if (setsockopt(data->libsoccr_sk->fd, SOL_TCP, TCP_REPAIR_WINDOW, &wopt, sizeof(wopt))) {
 			logerr("Unable to set window parameters");
 			return -1;
 		}
@@ -522,22 +523,22 @@ int libsoccr_restore_conn(struct libsoccr_sk *sk,
 	 * in the recv queue.
 	 */
 	if (mstate & SNDQ_FIRST_FIN)
-		restore_fin_in_snd_queue(sk->fd, mstate & SNDQ_FIN_ACKED);
+		restore_fin_in_snd_queue(data->libsoccr_sk->fd, mstate & SNDQ_FIN_ACKED);
 
 	/* Send a fin packet to the socket to restore it in a receive queue. */
 	if (mstate & (RCVQ_FIRST_FIN | RCVQ_SECOND_FIN))
-		if (send_fin_HA(sk, data, data_size, TH_ACK | TH_FIN) < 0)
+		if (send_fin_HA(data->libsoccr_sk, data, data_size, TH_ACK | TH_FIN) < 0)
 			return -1;
 
 	if (mstate & SNDQ_SECOND_FIN)
-		restore_fin_in_snd_queue(sk->fd, mstate & SNDQ_FIN_ACKED);
+		restore_fin_in_snd_queue(data->libsoccr_sk->fd, mstate & SNDQ_FIN_ACKED);
 
 	if (mstate & RCVQ_FIN_ACKED)
 		data->sk_data.inq_seq++;
 
 	if (mstate & SNDQ_FIN_ACKED) {
 		data->sk_data.outq_seq++;
-		if (send_fin_HA(sk, data, data_size, TH_ACK) < 0)
+		if (send_fin_HA(data->libsoccr_sk, data, data_size, TH_ACK) < 0)
 			return -1;
 	}
 

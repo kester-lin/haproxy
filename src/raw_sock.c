@@ -367,7 +367,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	static struct libsoccr_sk_data sk_data;
 
-	printf("Send ID %d\n", conn->handle.fd);
+	//printf("Send ID %d\n", conn->handle.fd);
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -418,7 +418,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	printf("Time of %f\n", timeval_elapsed(&time_tdump));
 #endif
 
-	printf("conn->handle.fd: %d\n", conn->handle.fd);
+	////printf("conn->handle.fd: %d\n", conn->handle.fd);
 #if ENABLE_CUJU_FT	
 	pipe->out_fd = conn->handle.fd;
 

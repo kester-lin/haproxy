@@ -202,6 +202,9 @@ struct vm_list
     u_int8_t failovered;
 
     u_int32_t socket_count;
+    pthread_mutex_t socket_metux;
+
+    u_int32_t ipc_socket;
     struct vmsk_list skid_head;
     struct list vm_list;
 
@@ -257,6 +260,12 @@ void release_sk(struct libsoccr_sk *sk);
 
 void* ipc_handler(void);
 void* ipc_snapshot_in(void* data);
+
+void ipc_snapshot_lock();
+void ipc_snapshot_unlock();
+void ipc_snapshot_trylock();
+void ipc_snapshot_tryunlock();
+
 #endif
 
 #endif

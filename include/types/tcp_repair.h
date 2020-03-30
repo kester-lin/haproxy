@@ -85,6 +85,29 @@ enum {
 #define SOCR_DATA_MIN_SIZE	(17 * sizeof(__u32))
 
 
+#if 0
+struct libsoccr_sk_data {
+	uint32_t	state;
+	uint32_t	inq_len;
+	uint32_t	inq_seq;
+	uint32_t	outq_len;
+	uint32_t	outq_seq;
+	uint32_t	unsq_len;
+	uint32_t	opt_mask;
+	uint32_t	mss_clamp;
+	uint32_t	snd_wscale;
+	uint32_t	rcv_wscale;
+	uint32_t	timestamp;
+
+	uint32_t	flags; /* SOCCR_FLAGS_... below */
+	uint32_t	snd_wl1;
+	uint32_t	snd_wnd;
+	uint32_t	max_window;
+	uint32_t	rcv_wnd;
+	uint32_t	rcv_wup;
+};
+#endif
+
 struct libsoccr_sk {
 	int fd;
 	unsigned flags;
@@ -102,32 +125,29 @@ struct sk_addr{
     uint16_t dst_port;
 };
 
-typedef struct sk_data_info
+struct sk_data_info
 {
     struct sk_addr sk_addr;
     struct libsoccr_sk_data sk_data;
-    char* send_queue;
-    char* recv_queue;
-}dt_info;
+	struct libsoccr_sk *libsoccr_sk;
+};
 
 int restore_sockaddr(union libsoccr_addr *sa,
 		int family, u32 pb_port, u32 *pb_addr, u32 ifindex);
 int tcp_repair_on(int fd);
 int tcp_repair_off(int fd);
 int set_queue_seq(struct libsoccr_sk *sk, int queue, __u32 seq);
-int libsoccr_restore_queue_HA(struct libsoccr_sk *sk, dt_info *data, unsigned data_size,
+int libsoccr_restore_queue_HA(struct libsoccr_sk *sk, struct sk_data_info *data, unsigned data_size,
 		int queue, char *buf);
 int restore_fin_in_snd_queue(int sk, int acked);
-int send_fin_HA(struct libsoccr_sk *sk, dt_info *data,
+int send_fin_HA(struct libsoccr_sk *sk, struct sk_data_info *data,
 		unsigned data_size, uint8_t flags);
 int send_queue(struct libsoccr_sk *sk, int queue, char *buf, __u32 len);
 int __send_queue(struct libsoccr_sk *sk, int queue, char *buf, __u32 len);
 int ipv6_addr_mapped(union libsoccr_addr *addr);
 int libsoccr_set_sk_data_noq_conn(struct libsoccr_sk *sk,
 		struct sk_data_info *data, unsigned int data_size);
-int libsoccr_restore_conn(struct libsoccr_sk *sk,
-						  struct sk_data_info* data, 
-						  unsigned int data_size);
+int libsoccr_restore_conn(struct sk_data_info* data, unsigned int data_size);
 
 
 

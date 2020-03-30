@@ -904,6 +904,8 @@ struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t soc
 			if (target->vm_ip == vm_ip) {
 				/* insert new port to target IP */
 				if (socket_id) {
+					pthread_mutex_lock(&(target->socket_metux));	
+
 					list_for_each_entry(target_sk, &target->skid_head.skid_list, skid_list) {
 						if (target_sk->socket_id == socket_id) {
 							/* already exist */
@@ -921,6 +923,7 @@ struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t soc
 					target_sk->conn = conn;
 
 					LIST_ADDQ(&target->skid_head.skid_list, &target_sk->skid_list);
+					pthread_mutex_unlock(&(target->socket_metux));	
 				}
 				return target;
 			}
@@ -936,7 +939,11 @@ create_newvm:
 		target->vm_ip = vm_ip;
 		printf("[%s] new vm %p and ip %08x\n", __func__, target, vm_ip);
 
+		pthread_mutex_init(&(target->socket_metux), NULL);
+
 		if (socket_id) {
+			pthread_mutex_lock(&(target->socket_metux));
+
 			target_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
 
 			if (target_sk == NULL) {
@@ -980,10 +987,14 @@ int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id)
 			list_for_each_entry_safe(target_sk, sk_temp, &target->skid_head.skid_list, skid_list) {
 				if (target_sk->socket_id == socket_id) {
 					printf("\t\tRemove SK:%08x\n", target_sk->socket_id);
+					pthread_mutex_lock(&(target->socket_metux));	
+
 					target->socket_count--;
 					LIST_DEL(&target_sk->skid_list);
 
 					free(target_sk);
+
+					pthread_mutex_unlock(&(target->socket_metux));	
 				}
 			}
 
@@ -1065,7 +1076,7 @@ struct fo_list *pop_failover(unsigned int nic)
 	struct fo_list *target = NULL;
 	struct fo_list *out_temp = NULL;
 
-	IPC_PRINTF("Pop targte:%08x\n", nic);
+	IPC_PRINTF("Pop target:%08x\n", nic);
 
 	list_for_each_entry_safe(target, out_temp, &fo_head.fo_list, fo_list) {
 		IPC_PRINTF("List target: %08x\n", target->nic);
@@ -1192,9 +1203,13 @@ void *ipc_handler(void)
 			goto func_error;
 		}
 
+		////////
+		//pthread_join(thread_id, NULL);
+
 		//Now join the thread , so that we dont terminate before the thread
 		//pthread_join( thread_id , NULL);
 		IPC_PRINTF("Handler assigned\n");
+		printf("Handler assigned\n");
 	}
 
 	IPC_PRINTF("Close\n");
@@ -1212,7 +1227,10 @@ void *ipc_handler(void)
 		goto func_error;
 	}
 func_error:
+
+	printf("[%s] Close Thread\n", __func__);
 	pthread_exit(NULL);
+	//return NULL; 
 }
 /*
  * This will handle connection for each client
@@ -1233,6 +1251,7 @@ void *ipc_connection_handler(void *socket_desc)
 	unsigned int base_nic = 0x0;
 	struct fo_list *fo_temp = NULL;
 	struct vm_list *target_vm = NULL;
+	pthread_t thread_snapshot;
 
 #if USING_NETLINK
 	int sock_fd = ((struct thread_data *)socket_desc)->netlink_sock;
@@ -1276,7 +1295,9 @@ void *ipc_connection_handler(void *socket_desc)
 	while (read_size = recv(sock, client_message, 2000, 0)) {
 		//end of string marker
 		//client_message[read_size] = '\0';
-#if DEBUG_IPC
+		printf("Size:%d\n", read_size);
+
+#if 0  //DEBUG_IPC
 		printf("Size:%d\n", read_size);
 
 		for (int idx = 0; idx < read_size; idx++) {
@@ -1323,9 +1344,9 @@ void *ipc_connection_handler(void *socket_desc)
 
 		} else {
 			IPC_PRINTF("failover list is empty!!!\n");
-			printf("failover list is empty!!!\n");
+			////printf("failover list is empty!!!\n");
 			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + shm_idx;
-			printf("ipt_addr %p IDX:%d\n", ipt_addr, shm_idx);
+			////printf("ipt_addr %p IDX:%d\n", ipt_addr, shm_idx);
 		}
 
 		//MSG_PRINTF("ipt_addr:%p  ipc_ptr:%p\n", ipt_addr, ipc_ptr);
@@ -1341,7 +1362,8 @@ void *ipc_connection_handler(void *socket_desc)
 		IPC_PRINTF("NICCount:%d\n", ipc_ptr->nic_count);
 
 
-		printf("NIC IP1:%08x\n", ipt_addr->nic[0]);
+		//printf("NIC IP1:%08x\n", ipt_addr->nic[0]);
+
 		if (ipc_ptr->epoch_id != ipc_ptr->flush_id) {
 			IPC_PRINTF("Match\n");
 		}
@@ -1353,7 +1375,7 @@ void *ipc_connection_handler(void *socket_desc)
 
 			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
 			if (!target_vm) {
-				printf("ERROR\n");
+				printf("target_vm is NULL\n");
 				assert(0);
 			}
 
@@ -1361,12 +1383,13 @@ void *ipc_connection_handler(void *socket_desc)
 			IPC_PRINTF("[FT_SNAPSHOT]vm_data: %p\n", target_vm);
 
 			pthread_cond_signal(&target_vm->ss_data.cond);
+			IPC_PRINTF("CUJU_FT_TRANSACTION_SNAPSHOT End\n");
 		}
 
 #if USING_SNAPSHOT_THREAD
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
 
-			pthread_t thread_snapshot;
+			
 			struct vm_list *vm_data = NULL;
 
 			IPC_PRINTF("FT mode is CUJU_FT_INIT from %08x\n", base_nic);
@@ -1378,6 +1401,7 @@ void *ipc_connection_handler(void *socket_desc)
 				goto error_handle;
 			}
 
+			vm_data->ipc_socket = sock;
 			vm_data->fault_enable = 1;
 			vm_data->nic[0] = base_nic;
 			printf("[FT_INIT] vm_data: %p\n", vm_data);
@@ -1426,7 +1450,7 @@ void *ipc_connection_handler(void *socket_desc)
 		memset(client_message, 0, sizeof(struct proto_ipc));
 		read_size = 0;
 
-		printf("NIC IP2:%08x\n", ipt_addr->nic[0]);
+		//printf("NIC IP2:%08x\n", ipt_addr->nic[0]);
 	}
 
 	if (read_size == 0) {
@@ -1448,10 +1472,18 @@ void *ipc_connection_handler(void *socket_desc)
 	}
 
 error_handle:
+#if USING_NETLINK
 	free(nlh);
+#endif	
 	close(sock);
+
+	pthread_join(thread_snapshot, NULL);
+
 	IPC_PRINTF("Close Thread\n");
-	return 0;
+	printf("[%s] Close Thread\n", __func__);
+	
+	pthread_exit(NULL);
+	//return NULL;
 }
 #if USING_SNAPSHOT_THREAD
 
@@ -1462,14 +1494,13 @@ int ipc_dump_tcp(struct vm_list *vm_target)
 
 	IPC_TH_PRINTF("========================= START =========================\n");
 
-
 	if (vm_target->socket_count) {
 		printf("IP:%08x:\n", vm_target->vm_ip);
 
 		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
 			printf("\tSocket ID:%08x\n", target_sk->socket_id);
 
-			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data.sk_data),
+			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data),
 						 target_sk->conn);
 
 		}
@@ -1487,16 +1518,13 @@ int ipc_restore_tcp(struct vm_list *vm_target)
 
 	IPC_TH_PRINTF("========================= START =========================\n");
 
-
 	if (vm_target->socket_count) {
 		printf("IP:%08x:\n", vm_target->vm_ip);
 
 		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
 			printf("\tSocket ID:%08x\n", target_sk->socket_id);
 
-			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data.sk_data),
-						 target_sk->conn);
-
+			restore_one_tcp_conn(target_sk->socket_id, &(target_sk->sk_data));
 		}
 	}
 
@@ -1505,12 +1533,49 @@ int ipc_restore_tcp(struct vm_list *vm_target)
 	return 0;
 }
 
+u_int32_t lock_for_snapshot = 0;
+void ipc_snapshot_lock()
+{
+	//HA_SPIN_LOCK(SNAPSHOT_LOCK, &shapshot_lock);
+#if 0	
+	lock_for_snapshot = 1;
+#endif
+}
+
+void ipc_snapshot_unlock()
+{
+	//HA_SPIN_UNLOCK(SNAPSHOT_LOCK, &shapshot_lock);
+#if 0	
+	lock_for_snapshot = 0; 	
+#endif
+}
+
+void ipc_snapshot_trylock()
+{
+	//HA_SPIN_TRYLOCK(SNAPSHOT_LOCK, &shapshot_lock);
+#if 0
+	u_int32_t lock_count = 0;
+
+	while(lock_for_snapshot) {
+		lock_count++;
+	}
+
+	printf("Lock Count: %d !!!!!!!!!!!!!!!\n", lock_count);
+#endif
+}
+
+void ipc_snapshot_tryunlock()
+{
+	//HA_SPIN_UNLOCK(SNAPSHOT_LOCK, &shapshot_lock);
+	//lock_for_snapshot = 0; 	
+}
+
 void *ipc_snapshot_in(void *data)
 {
 	struct vm_list *vm_target = (struct vm_list *)data;
 	u_int32_t socket_count;
 
-	printf("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
+	////printf("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
 
 	while (1) {
 		pthread_mutex_lock(&vm_target->ss_data.locker);
@@ -1527,17 +1592,31 @@ void *ipc_snapshot_in(void *data)
 
 				}
 		*/
-
+		
+		pthread_mutex_lock(&(vm_target->socket_metux));	
+		
 		if (vm_target->failovered) {
 			printf("[%s] failovered:%d\n", __func__, vm_target->failovered);
 
-			//restore_one_tcp_conn();
+			////restore_one_tcp_conn();
+			//ipc_restore_tcp(vm_target);
 		} else {
+
 			if (vm_target->socket_count) {
 				printf("[%s] real socket count:%d\n\n\n", __func__, vm_target->socket_count);
-				ipc_dump_tcp(vm_target);
+				//ipc_dump_tcp(vm_target);
 			}
+
+
+
+			/* send end of snapshot to Cuju */
+			//printf("send end of snapshot to Cuju \n");
+			write(vm_target->ipc_socket, &socket_count, sizeof(socket_count));			
+		
 		}
+		
+		pthread_mutex_unlock(&(vm_target->socket_metux));			
+		
 		//show_target_rule(&vm_head.vm_list);
 
 		/* send end of snapshot to Cuju */
@@ -1603,30 +1682,31 @@ void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
 	libsoccr_set_addr(socr, 0, &sa_dst, 0);
 }
 
-int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data *data,
+//int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data *data,
+//			     struct connection *conn)
+int dump_tcp_conn_state_conn(int fd, struct sk_data_info *sk_data,
 			     struct connection *conn)
+
 {
 	//char sk_header[8];
 	int ret;
-
-	//uint32_t src_addr;
-	//uint16_t src_port;
+	struct libsoccr_sk_data *data = &(sk_data->sk_data);
 
 	//struct libsoccr_sk *socr = calloc(1, sizeof(struct libsoccr_sk));
-	struct libsoccr_sk *socr = malloc(sizeof(struct libsoccr_sk));
+	sk_data->libsoccr_sk = malloc(sizeof(struct libsoccr_sk));
 
 	if (tcp_repair_on(fd) < 0) {
 		printf("tcp_repair_on fail.\n");
 		return -1;
 	}
 
-	socr->fd = fd;
-	set_addr_port_conn(socr, conn);
+	sk_data->libsoccr_sk->fd = fd;
+	set_addr_port_conn(sk_data->libsoccr_sk, conn);
 
 	//src_addr = socr->src_addr->v4.sin_addr.s_addr;
 	//src_port = socr->src_addr->v4.sin_port;
 
-	ret = libsoccr_save(socr, data, sizeof(*data));
+	ret = libsoccr_save(sk_data->libsoccr_sk, data, sizeof(*data));
 	//socr->src_addr->v4.sin_addr.s_addr = src_addr;
 	//socr->src_addr->v4.sin_port = src_port;
 
@@ -1659,8 +1739,7 @@ int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data *data,
 
 /******************************** REPAIR RESTORE ********************************/
 
-static int restore_tcp_conn_state_conn(int fd, struct libsoccr_sk *socr,
-				       struct sk_data_info *data)
+static int restore_tcp_conn_state_conn(int fd, struct sk_data_info *data)
 {
 	//int aux;
 	union libsoccr_addr sa_src, sa_dst;
@@ -1679,10 +1758,10 @@ static int restore_tcp_conn_state_conn(int fd, struct libsoccr_sk *socr,
 			     &data->sk_addr.dst_addr, 0) < 0)
 		goto err;
 
-	libsoccr_set_addr(socr, 1, &sa_src, 0);
-	libsoccr_set_addr(socr, 0, &sa_dst, 0);
+	libsoccr_set_addr(data->libsoccr_sk, 1, &sa_src, 0);
+	libsoccr_set_addr(data->libsoccr_sk, 0, &sa_dst, 0);
 
-	if (libsoccr_restore_conn(socr, data, sizeof(*data)))
+	if (libsoccr_restore_conn(data, sizeof(*data)))
 		goto err;
 
 	return 0;
@@ -1693,19 +1772,19 @@ err:
 
 int restore_one_tcp_conn(int fd, struct sk_data_info *data)
 {
-	struct libsoccr_sk *sk;
+	//struct libsoccr_sk *sk;
 
 	printf("Restoring TCP connection\n");
 
-	sk = libsoccr_pause(fd);
-	if (!sk)
+	data->libsoccr_sk = libsoccr_pause(fd);
+	if (!data->libsoccr_sk)
 		return -1;
 
-	if (restore_tcp_conn_state_conn(fd, sk, data)) {
-		libsoccr_release(sk);
+	if (restore_tcp_conn_state_conn(fd, data)) {
+		libsoccr_release(data->libsoccr_sk);
 		return -1;
 	}
-	release_sk(sk);
+	release_sk(data->libsoccr_sk);
 	return 0;
 }
 

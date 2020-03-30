@@ -2710,7 +2710,8 @@ int main(int argc, char **argv)
 
 	pthread_t ipc;
 	pthread_create(&ipc, NULL, ipc_handler, "Child");
-    
+	
+
 #if USING_NETLINK	
 	int sock_fd = 0;
 
@@ -3446,6 +3447,8 @@ int main(int argc, char **argv)
 		/* Wait the end of other threads */
 		for (i = 1; i < global.nbthread; i++)
 			pthread_join(thread_info[i].pthread, NULL);
+
+		pthread_join(ipc, NULL);
 
 #if defined(DEBUG_THREAD) || defined(DEBUG_FULL)
 		show_lock_stats();
