@@ -1345,7 +1345,7 @@ void *ipc_connection_handler(void *socket_desc)
 	printf("[%s] tid_bit %08x\n",__func__, tid_bit);
 
 	while (read_size = recv(sock, client_message, 148, 0)) {
-#if 0  //DEBUG_IPC
+#if 0 //DEBUG_IPC
 		printf("Size:%d\n", read_size);
 
 		for (int idx = 0; idx < read_size; idx++) {
@@ -1356,6 +1356,7 @@ void *ipc_connection_handler(void *socket_desc)
 		}
 		printf("\n");
 #endif
+
 		ipc_ptr = (struct proto_ipc *)client_message;
 
 		//printf("NIC: %08x\n", ipc_ptr->nic[0]);
@@ -1363,26 +1364,30 @@ void *ipc_connection_handler(void *socket_desc)
 		IPC_PRINTF("shm_idx:%d p_shm_idx:%d True:%d\n", shm_idx, primary_shm_idx,
 			   !LIST_ISEMPTY(&fo_head.fo_list));
 
-		base_nic = ipc_ptr->nic[0];
+		if (base_nic == 0) {
+			base_nic = ipc_ptr->nic[0];
+		}
 
-		if (ipc_ptr->cuju_ft_mode != CUJU_FT_INIT) {
-		
+		if ((ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_HANDOVER) &&
+			!LIST_ISEMPTY(&fo_head.fo_list)) {
+			
+			IPC_PRINTF("failover list not empty: (%d true/false)\n", !LIST_ISEMPTY(&fo_head.fo_list));
+			
+			fo_temp = pop_failover((ipc_ptr->nic[0]));			
+			
+			primary_shm_idx = fo_temp->socket_id;
+
+			IPC_PRINTF("insert shm id:%d\n", primary_shm_idx);
+			IPC_PRINTF("insert NIC: %08x\n", fo_temp->nic);
+
+			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + primary_shm_idx;
+			free(fo_temp);
+
 			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
 			if (!target_vm) {
 				printf("target_vm is NULL\n");
 				assert(0);
 			}
-		}
-
-		//IPC_PRINTF("[%s] POP_FAILOVER %08x\n", __func__, ipc_ptr->nic[0]);
-		fo_temp = pop_failover((ipc_ptr->nic[0]));
-
-		if (fo_temp != NULL) {
-			IPC_PRINTF("failover list not empty\n");
-			printf("failover list not empty\n");
-			primary_shm_idx = fo_temp->socket_id;
-			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + primary_shm_idx;
-			free(fo_temp);
 
 			target_vm->failovered = 1;
 			IPC_PRINTF("[FT_FAILOVER] vm_data: %p\n", target_vm);
@@ -1395,8 +1400,6 @@ void *ipc_connection_handler(void *socket_desc)
 			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + shm_idx;
 			////printf("ipt_addr %p IDX:%d\n", ipt_addr, shm_idx);
 		}
-
-		//MSG_PRINTF("ipt_addr:%p  ipc_ptr:%p\n", ipt_addr, ipc_ptr);
 
 		ipt_addr->epoch_id = ipc_ptr->epoch_id;
 		ipt_addr->flush_id = ipc_ptr->flush_id;
@@ -1416,7 +1419,13 @@ void *ipc_connection_handler(void *socket_desc)
 		}
 
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_SNAPSHOT) {
-			target_vm->nic[1]++;
+			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
+			if (!target_vm) {
+				printf("target_vm is NULL\n");
+				assert(0);
+			}
+
+			//target_vm->nic[1]++;
 			//IPC_PRINTF("[FT_SNAPSHOT]vm_data: %p\n", target_vm);
 
 			pthread_cond_signal(&target_vm->ss_data.cond);
@@ -1424,6 +1433,12 @@ void *ipc_connection_handler(void *socket_desc)
 		}
 
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
+			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
+			if (!target_vm) {
+				printf("target_vm is NULL\n");
+				assert(0);
+			}
+
 			target_vm->flush_idx = 1;
 
 			//target_vm->nic[2]++;
@@ -1434,22 +1449,6 @@ void *ipc_connection_handler(void *socket_desc)
 			//fw_insert(target_vm->fw_head, target_vm->fw_tail, ipc_ptr->epoch_id);
 		}
 
-#if 0 //no used
-		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_PRE_SNAPSHOT) {
-			IPC_PRINTF("FT mode is CUJU_FT_TRANSACTION_PRE_SNAPSHOT\n");
-			
-			if (target_vm) {
-				target_vm->pre_snapshot_idx = 1;
-
-				pthread_cond_signal(&target_vm->ss_data.cond);
-			}
-
-			gettimeofday(&time_pre_snapshot, NULL);
-
-
-			IPC_PRINTF("CUJU_FT_TRANSACTION_PRE_SNAPSHOT End\n");
-		}	
-#endif 
 
 #if USING_SNAPSHOT_THREAD
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
@@ -1499,10 +1498,12 @@ void *ipc_connection_handler(void *socket_desc)
 
 	if (read_size == 0) {
 		IPC_PRINTF("Client disconnected\n");
+		printf("Client disconnected\n");
 
 		if (shm_idx != 0) {
 			struct fo_list *new = malloc(sizeof(struct fo_list));
-			IPC_PRINTF("insert shm id\n");
+			IPC_PRINTF("insert shm id:%d\n", shm_idx);
+			IPC_PRINTF("insert NIC: %08x\n", base_nic);
 			new->nic = base_nic;
 			new->socket_id = shm_idx;
 			LIST_ADDQ(&fo_head.fo_list, &new->fo_list);
