@@ -34,6 +34,15 @@
 #include <proto/stick_table.h>
 #include <proto/server.h>
 
+
+#define DEBUG_SESSION 0
+#if DEBUG_SESSION
+#define SESS_PRINTF(x...) printf(x)
+#else
+#define SESS_PRINTF(x...)
+#endif
+
+
 extern struct pool_head *pool_head_session;
 extern struct pool_head *pool_head_sess_srv_list;
 
@@ -50,6 +59,8 @@ static inline void session_store_counters(struct session *sess)
 	void *ptr;
 	int i;
 	struct stksess *ts;
+
+	SESS_PRINTF("[%s]\n", __func__);
 
 	for (i = 0; i < MAX_SESS_STKCTR; i++) {
 		struct stkctr *stkctr = &sess->stkctr[i];
@@ -80,6 +91,9 @@ static inline void session_store_counters(struct session *sess)
 static inline void session_unown_conn(struct session *sess, struct connection *conn)
 {
 	struct sess_srv_list *srv_list = NULL;
+
+	SESS_PRINTF("[%s]\n", __func__);
+
 	LIST_DEL(&conn->session_list);
 	LIST_INIT(&conn->session_list);
 	list_for_each_entry(srv_list, &sess->srv_list, srv_list) {
@@ -97,6 +111,8 @@ static inline int session_add_conn(struct session *sess, struct connection *conn
 {
 	struct sess_srv_list *srv_list = NULL;
 	int found = 0;
+
+	SESS_PRINTF("[%s]\n", __func__);
 
 	list_for_each_entry(srv_list, &sess->srv_list, srv_list) {
 		if (srv_list->target == target) {
@@ -120,6 +136,8 @@ static inline int session_add_conn(struct session *sess, struct connection *conn
 /* Returns 0 if the session can keep the idle conn, -1 if it was destroyed, or 1 if it was added to the server list */
 static inline int session_check_idle_conn(struct session *sess, struct connection *conn)
 {
+	SESS_PRINTF("[%s]\n", __func__);
+
 	if (sess->idle_conns >= sess->fe->max_out_conns) {
 		/* We can't keep the connection, let's try to add it to the server idle list */
 		session_unown_conn(sess, conn);

@@ -32,11 +32,23 @@
 #include <proto/channel.h>
 #include <proto/connection.h>
 
+#define DEBUG_STREAM_INTERFACE 0
+#if DEBUG_STREAM_INTERFACE
+#define SIPRINTF(x...) printf(x)
+#else
+#define SIPRINTF(x...)
+#endif
+
+#define FLOW_BUFFER	 125000000*4
+extern unsigned long long g_out_data;
+extern unsigned long long g_in_data;
 
 extern struct si_ops si_embedded_ops;
 extern struct si_ops si_conn_ops;
 extern struct si_ops si_applet_ops;
 extern struct data_cb si_conn_cb;
+
+void si_wait_snapshot();
 
 /* main event functions used to move data between sockets and buffers */
 int si_check_timeouts(struct stream_interface *si);
@@ -176,6 +188,8 @@ static inline void si_release_endpoint(struct stream_interface *si)
 	struct conn_stream *cs;
 	struct appctx *appctx;
 
+	SIPRINTF("[%s]\n", __func__);
+
 	if (!si->end)
 		return;
 
@@ -203,6 +217,8 @@ static inline void si_release_endpoint(struct stream_interface *si)
  */
 static inline void si_attach_cs(struct stream_interface *si, struct conn_stream *cs)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	si->ops = &si_conn_ops;
 	si->end = &cs->obj_type;
 	cs_attach(cs, si, &si_conn_cb);
@@ -238,6 +254,8 @@ static inline struct appctx *si_appctx(struct stream_interface *si)
 static inline void si_applet_release(struct stream_interface *si)
 {
 	struct appctx *appctx;
+
+	SIPRINTF("[%s]\n", __func__);
 
 	appctx = objt_appctx(si->end);
 	if (appctx && appctx->applet->release && !si_state_in(si->state, SI_SB_DIS|SI_SB_CLO))
@@ -378,6 +396,8 @@ static inline struct conn_stream *si_alloc_cs(struct stream_interface *si, struc
 {
 	struct conn_stream *cs;
 
+	SIPRINTF("[%s]\n", __func__);
+
 	si_release_endpoint(si);
 
 	cs = cs_new(conn);
@@ -399,6 +419,8 @@ static inline int si_alloc_ibuf(struct stream_interface *si, struct buffer_wait 
 {
 	int ret;
 
+	SIPRINTF("[%s]\n", __func__);
+
 	ret = channel_alloc_buffer(si_ic(si), wait);
 	if (!ret)
 		si_rx_buff_blk(si);
@@ -413,6 +435,8 @@ static inline int si_alloc_ibuf(struct stream_interface *si, struct buffer_wait 
 static inline struct appctx *si_alloc_appctx(struct stream_interface *si, struct applet *applet)
 {
 	struct appctx *appctx;
+
+	SIPRINTF("[%s]\n", __func__);
 
 	si_release_endpoint(si);
 	appctx = appctx_new(applet, tid_bit);
@@ -450,6 +474,8 @@ static inline void si_must_kill_conn(struct stream_interface *si)
  */
 static inline void si_chk_rcv(struct stream_interface *si)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	if (si->flags & SI_FL_RXBLK_CONN && si_state_in(si_opposite(si)->state, SI_SB_RDY|SI_SB_EST|SI_SB_DIS|SI_SB_CLO))
 		si_rx_conn_rdy(si);
 
@@ -460,7 +486,7 @@ static inline void si_chk_rcv(struct stream_interface *si)
 		return;
 
 	si->flags |= SI_FL_RX_WAIT_EP;
-	si->ops->chk_rcv(si);
+	si->ops->chk_rcv(si); /* stream_int_chk_rcv_conn */
 }
 
 /* This tries to perform a synchronous receive on the stream interface to
@@ -473,6 +499,8 @@ static inline void si_chk_rcv(struct stream_interface *si)
 static inline int si_sync_recv(struct stream_interface *si)
 {
 	struct conn_stream *cs;
+
+	SIPRINTF("[%s]\n", __func__);
 
 	if (!si_state_in(si->state, SI_SB_RDY|SI_SB_EST))
 		return 0;
@@ -492,7 +520,7 @@ static inline int si_sync_recv(struct stream_interface *si)
 
 /* Calls chk_snd on the connection using the data layer */
 static inline void si_chk_snd(struct stream_interface *si)
-{
+{   /* stream_int_chk_snd_conn */
 	si->ops->chk_snd(si);
 }
 
@@ -501,6 +529,8 @@ static inline int si_connect(struct stream_interface *si, struct connection *con
 {
 	int ret = SF_ERR_NONE;
 	int conn_flags = 0;
+
+	SIPRINTF("[%s]\n", __func__);
 
 	if (unlikely(!conn || !conn->ctrl || !conn->ctrl->connect))
 		return SF_ERR_INTERNAL;
@@ -534,6 +564,8 @@ static inline int si_connect(struct stream_interface *si, struct connection *con
 /* Combines both si_update_rx() and si_update_tx() at once */
 static inline void si_update(struct stream_interface *si)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	si_update_rx(si);
 	si_update_tx(si);
 }

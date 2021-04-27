@@ -20,7 +20,6 @@
 
 #include <proto/channel.h>
 
-
 /* Schedule up to <bytes> more bytes to be forwarded via the channel without
  * notifying the owner task. Any data pending in the buffer are scheduled to be
  * sent as well, within the limit of the number of bytes to forward. This must
@@ -33,6 +32,8 @@ unsigned long long __channel_forward(struct channel *chn, unsigned long long byt
 {
 	unsigned int budget;
 	unsigned int forwarded;
+
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
 
 	/* This is more of a safety measure as it's not supposed to happen in
 	 * regular code paths.
@@ -79,6 +80,8 @@ int co_inject(struct channel *chn, const char *msg, int len)
 {
 	int max;
 
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	if (len == 0)
 		return -1;
 
@@ -111,6 +114,8 @@ int co_inject(struct channel *chn, const char *msg, int len)
  */
 int ci_putchr(struct channel *chn, char c)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	if (unlikely(channel_input_closed(chn)))
 		return -2;
 
@@ -143,6 +148,8 @@ int ci_putchr(struct channel *chn, char c)
 int ci_putblk(struct channel *chn, const char *blk, int len)
 {
 	int max;
+
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
 
 	if (unlikely(channel_input_closed(chn)))
 		return -2;
@@ -191,6 +198,8 @@ int co_getline(const struct channel *chn, char *str, int len)
 	int ret, max;
 	char *p;
 
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	ret = 0;
 	max = len;
 
@@ -237,6 +246,8 @@ int co_getline(const struct channel *chn, char *str, int len)
  */
 int co_getblk(const struct channel *chn, char *blk, int len, int offset)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	if (chn->flags & CF_SHUTW)
 		return -1;
 
@@ -259,6 +270,8 @@ int co_getblk(const struct channel *chn, char *blk, int len, int offset)
  */
 int co_getblk_nc(const struct channel *chn, const char **blk1, size_t *len1, const char **blk2, size_t *len2)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	if (unlikely(co_data(chn) == 0)) {
 		if (chn->flags & CF_SHUTW)
 			return -1;
@@ -283,6 +296,8 @@ int co_getline_nc(const struct channel *chn,
 {
 	int retcode;
 	int l;
+
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
 
 	retcode = co_getblk_nc(chn, blk1, len1, blk2, len2);
 	if (unlikely(retcode <= 0))
@@ -325,6 +340,8 @@ int ci_getblk_nc(const struct channel *chn,
                  char **blk1, size_t *len1,
                  char **blk2, size_t *len2)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	if (unlikely(ci_data(chn) == 0)) {
 		if (chn->flags & CF_SHUTR)
 			return -1;
@@ -359,6 +376,8 @@ int ci_getline_nc(const struct channel *chn,
 {
 	int retcode;
 	int l;
+
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
 
 	retcode = ci_getblk_nc(chn, blk1, len1, blk2, len2);
 	if (unlikely(retcode <= 0))
@@ -402,6 +421,8 @@ int ci_insert_line2(struct channel *c, int pos, const char *str, int len)
 	struct buffer *b = &c->buf;
 	char *dst = c_ptr(c, pos);
 	int delta;
+
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
 
 	delta = len + 2;
 

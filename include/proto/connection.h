@@ -32,6 +32,13 @@
 #include <proto/session.h>
 #include <proto/task.h>
 
+#define DEBUG_RQR_CLO 1
+#if DEBUG_RQR_CLO
+#define RQR_CLO_PRINTF(x...) printf(x)
+#else
+#define RQR_CLO_PRINTF(x...)
+#endif
+
 extern struct pool_head *pool_head_connection;
 extern struct pool_head *pool_head_connstream;
 extern struct xprt_ops *registered_xprt[XPRT_ENTRIES];
@@ -164,7 +171,7 @@ static inline void conn_ctrl_close(struct connection *conn)
 #endif		
 		fd_delete(conn->handle.fd);
 
-#if USING_TCP_REPAIR
+#if 0 //USING_TCP_REPAIR
 		/* add the new fd to TCP MAP */
 
 		////int del_target(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
@@ -192,6 +199,17 @@ static inline void conn_ctrl_close(struct connection *conn)
  */
 static inline void conn_full_close(struct connection *conn)
 {
+	if (conn->direction == DIR_DEST_GUEST) {
+		RQR_CLO_PRINTF("[%s] DELETE DIR_DEST_GUEST %d\n", __func__, conn->handle.fd);
+
+		del_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr), conn->handle.fd);
+	}
+
+	if (conn->direction == DIR_DEST_CLIENT) {
+		RQR_CLO_PRINTF("[%s] DELETE DIR_DEST_CLIENT %d\n", __func__, conn->handle.fd);
+		del_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr), conn->handle.fd);
+	}
+
 	conn_xprt_close(conn);
 	conn_ctrl_close(conn);
 }
@@ -500,6 +518,7 @@ static inline void cs_init(struct conn_stream *cs, struct connection *conn)
 	cs->obj_type = OBJ_TYPE_CS;
 	cs->flags = CS_FL_NONE;
 	cs->conn = conn;
+	cs->out_data = 0;
 }
 
 /* Initializes all required fields for a new connection. Note that it does the
@@ -532,7 +551,75 @@ static inline void conn_init(struct connection *conn)
 	conn->pipe_buf_tail = NULL;
 	conn->sent_pipe = NULL;	
 	conn->sent_pipe_tail = NULL;
+	conn->run_recv_pipe = NULL;
+	conn->run_recv_pipe_tail = NULL;
+	conn->recv_pipe = NULL;	
+	conn->recv_pipe_tail = NULL;	
 	conn->shm_idx = 0;
+	conn->remainder = 0;
+
+	conn->conn_seq = 0;
+	conn->conn_seq_counted = 0;
+	conn->conn_ack = 0;
+	conn->conn_ack_counted = 0;
+	conn->conn_number_idx = 0;
+
+	conn->lock_for_repair = 0;
+
+#if 0
+	/* output pipe snapshot */
+	conn->out_pipe_first_pipe = NULL;
+	conn->out_pipe_first_byte = 0;
+	conn->out_pipe_last_pipe = NULL;
+	conn->out_pipe_last_byte = 0;
+	conn->out_pipe_first_number = 0;
+	conn->out_pipe_first_idx = 0;
+	conn->out_pipe_last_number = 0;
+	conn->out_pipe_last_idx = 0;	
+
+	/* output pipe flush */
+	conn->opf_first_pipe = NULL;
+	conn->opf_first_byte = 0;
+	conn->opf_last_pipe = NULL;
+	conn->opf_last_byte = 0;
+	conn->opf_first_number = 0;
+	conn->opf_first_idx = 0;
+	conn->opf_last_number = 0;
+	conn->opf_last_idx = 0;	
+
+	/* in pipe snapshot */
+	conn->in_pipe_first_pipe = NULL;
+	conn->in_pipe_first_byte = 0;
+	conn->in_pipe_last_pipe = NULL;
+	conn->in_pipe_last_byte = 0;
+	conn->in_pipe_first_number = 0;
+	conn->in_pipe_first_idx = 0;
+	conn->in_pipe_last_number = 0;
+	conn->in_pipe_last_idx = 0;	
+	conn->ips_tr_count = 0;
+	conn->ips_length = 0;
+
+	/* in pipe flush */
+	conn->ipf_first_pipe = NULL;
+	conn->ipf_first_byte = 0;
+	conn->ipf_last_pipe = NULL;
+	conn->ipf_last_byte = 0;
+	conn->ipf_first_number = 0;
+	conn->ipf_first_idx = 0;
+	conn->ipf_last_number = 0;
+	conn->ipf_last_idx = 0;	
+	conn->ipf_tr_count = 0;
+	conn->ipf_length = 0;
+#endif
+	pthread_mutex_init (&conn->conn_mutex, NULL);
+
+	conn->flush_pipe = NULL;
+	conn->flush_pipe_tail = NULL;
+	conn->snapshot_pipe = NULL;
+	conn->snapshot_pipe_tail = NULL;
+	conn->fw_head = NULL;
+	conn->fw_tail = NULL;
+
 }
 
 /* sets <owner> as the connection's owner */

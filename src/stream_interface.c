@@ -41,13 +41,8 @@
 #include <types/global.h>
 #include <types/pipe.h>
 
-#define DEBUG_STREAM_INTERFACE 0
-#if DEBUG_STREAM_INTERFACE
-#define SIPRINTF(x...) printf(x)
-#else
-#define SIPRINTF(x...)
-#endif
-
+unsigned long long g_out_data = 0;
+unsigned long long g_in_data = 0;
 
 #define DEBUG_SI_RECV 0
 #if DEBUG_SI_RECV
@@ -135,6 +130,8 @@ struct data_cb si_conn_cb = {
  */
 int si_check_timeouts(struct stream_interface *si)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	if (tick_is_expired(si->exp, now_ms)) {
 		si->flags |= SI_FL_EXP;
 		return 1;
@@ -145,6 +142,8 @@ int si_check_timeouts(struct stream_interface *si)
 /* to be called only when in SI_ST_DIS with SI_FL_ERR */
 void si_report_error(struct stream_interface *si)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	if (!si->err_type)
 		si->err_type = SI_ET_DATA_ERR;
 
@@ -166,6 +165,8 @@ void si_retnclose(struct stream_interface *si,
 {
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	channel_auto_read(ic);
 	channel_abort(ic);
@@ -192,6 +193,8 @@ void si_retnclose(struct stream_interface *si,
 static void stream_int_shutr(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	si_rx_shut_blk(si);
 	if (ic->flags & CF_SHUTR)
@@ -227,6 +230,8 @@ static void stream_int_shutw(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	oc->flags &= ~CF_SHUTW_NOW;
 	if (oc->flags & CF_SHUTW)
@@ -278,6 +283,8 @@ static void stream_int_chk_rcv(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
 		__FUNCTION__,
 		si, si->state, ic->flags, si_oc(si)->flags);
@@ -298,6 +305,8 @@ static void stream_int_chk_rcv(struct stream_interface *si)
 static void stream_int_chk_snd(struct stream_interface *si)
 {
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
 		__FUNCTION__,
@@ -331,6 +340,8 @@ struct appctx *si_register_handler(struct stream_interface *si, struct applet *a
 {
 	struct appctx *appctx;
 
+	SIPRINTF("[%s]\n", __func__);
+
 	DPRINTF(stderr, "registering handler %p for si %p (was %p)\n", app, si, si_task(si));
 
 	appctx = si_alloc_appctx(si, app);
@@ -353,6 +364,8 @@ struct appctx *si_register_handler(struct stream_interface *si, struct applet *a
  */
 int conn_si_send_proxy(struct connection *conn, unsigned int flag)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	/* we might have been called just after an asynchronous shutw */
 	if (conn->flags & CO_FL_SOCK_WR_SH)
 		goto out_error;
@@ -480,13 +493,32 @@ static void stream_int_notify(struct stream_interface *si)
 	int value_2 = 0;
 	int value_3 = 0;
 
+	int if_value_1 = 0;
+	int if_value_2 = 0;
+	int if_value_3 = 0;
+	int if_value_4 = 0;
+	int if_value_5 = 0;
+	int if_value_6 = 0;
+	int if_value_7 = 0;
+	int if_value_8 = 0;
+	int if_value_9 = 0;
+	int if_value_10 = 0;
+	int if_value_11 = 0;
+	int if_value_12 = 0;
+	int if_value_13 = 0;
+
+	SIPRINTF("[%s]\n", __func__);
+
 	/* process consumer side */
 	if (channel_is_empty(oc)) {
 		struct connection *conn = objt_cs(si->end) ? objt_cs(si->end)->conn : NULL;
 
 		if (((oc->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW) &&
-		    (si->state == SI_ST_EST) && (!conn || !(conn->flags & (CO_FL_HANDSHAKE | CO_FL_EARLY_SSL_HS))))
+		    (si->state == SI_ST_EST) && (!conn || !(conn->flags & (CO_FL_HANDSHAKE | CO_FL_EARLY_SSL_HS)))) {
+			SIPRINTF("[%s] si_shutw(si)\n", __func__);
 			si_shutw(si);
+		}
+		SIPRINTF("[%s] oc->wex = TICK_ETERNITY\n", __func__);
 		oc->wex = TICK_ETERNITY;
 	}
 
@@ -531,8 +563,9 @@ static void stream_int_notify(struct stream_interface *si)
 		value_2 = (sio->flags & SI_FL_WAIT_DATA);
 		value_3 = (!(ic->flags & CF_EXPECT_MORE) || c_full(ic) || ci_data(ic) == 0 || ic->pipe);
 
-		if (value_1 && value_2 && value_3 ) {
+		SIPRINTF("[%s] Ready Send Value: %d %d %d (%d)\n", __func__, value_1, value_2, value_3, !cont_tx_idx);
 
+		if (value_1 && value_2 && value_3) {	
 #else
 	if (!channel_is_empty(ic) &&
 	    (sio->flags & SI_FL_WAIT_DATA) &&
@@ -540,9 +573,11 @@ static void stream_int_notify(struct stream_interface *si)
 #endif	
 		int new_len, last_len;
 
-		last_len = co_data(ic); /* default not run at 1 run at 2*/
+		last_len = co_data(ic); /* default not run at 1 run at 2 */
 		if (ic->pipe)
 			last_len += ic->pipe->data;  /* default run */
+
+		SIPRINTF("[%s] si_chk_snd\n", __func__);
 
 		si_chk_snd(sio);
 
@@ -562,7 +597,7 @@ static void stream_int_notify(struct stream_interface *si)
 
 	si_chk_rcv(si);
 	si_chk_rcv(sio);
-
+	
 	if (si_rx_blocked(si)) {
 		ic->rex = TICK_ETERNITY;  /* default not run  Error at here  */
 	}
@@ -572,6 +607,52 @@ static void stream_int_notify(struct stream_interface *si)
 			ic->rex = tick_add_ifset(now_ms, ic->rto);
 	}
 
+#if 0
+	SIPRINTF("[%s] now_ms:%16X\n", __func__, now_ms);
+	SIPRINTF("[%s] task key:%08X\n", __func__, task->wq.key);
+	
+	if (cont_tx_idx) {
+		#if 0
+		channel_dont_read(ic);
+		SIPRINTF("[%s] Set task_wakeup\n", __func__);	
+		task_wakeup(task, TASK_WOKEN_OTHER);
+		#endif
+		#if 1
+		SIPRINTF("[%s] Set task_queue\n", __func__);
+		SIPRINTF("[%s] task expire:%16X\n", __func__, task->expire);
+		SIPRINTF("[%s] now_ms:%16X\n", __func__, now_ms);
+		SIPRINTF("[%s] ic->rex:%16X\n", __func__, ic->rex);
+		SIPRINTF("[%s] ic->wex:%16X\n", __func__, ic->wex);
+		SIPRINTF("[%s] oc->rex:%16X\n", __func__, oc->rex);
+		SIPRINTF("[%s] oc->wex:%16X\n", __func__, oc->wex);
+		SIPRINTF("[%s] task key:%08X\n", __func__, task->wq.key);
+
+		task->expire = tick_first(
+					   (tick_is_expired(task->expire, now_ms) ? 0 : task->expire),
+						tick_first(tick_first(ic->rex, ic->wex), 
+					   			   tick_first(oc->rex, oc->wex))
+					   );
+		SIPRINTF("[%s] Normal task->expire:%16X\n", __func__, task->expire);	
+
+/*
+		if (tick_is_le(task->expire, task->wq.key)) {
+			SIPRINTF("[%s] change !!!\n", __func__);
+			task->expire = now_ms + 100;
+		}
+*/
+		task->expire = tick_first(task->expire, now_ms) + 10;
+
+		SIPRINTF("[%s] Final task->expire:%16X\n", __func__, task->expire);	
+
+		task_queue(task);
+		//__task_queue(task, &task_per_thread[tid].timers);
+		#endif
+		goto end;
+	}
+
+#endif
+
+#if 0
 	/* wake the task up only when needed */
 	if (/* changes on the production side */
 	    (ic->flags & (CF_READ_NULL|CF_READ_ERROR)) ||
@@ -588,6 +669,33 @@ static void stream_int_notify(struct stream_interface *si)
 		!(oc->flags & (CF_AUTO_CLOSE|CF_SHUTW_NOW|CF_SHUTW))) &&
 	       (sio->state != SI_ST_EST ||
 	        (channel_is_empty(oc) && !oc->to_forward)))))) {
+#else
+
+	if_value_1 = (ic->flags & (CF_READ_NULL|CF_READ_ERROR));
+	if_value_2 = !si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST);
+	if_value_3 = (si->flags & SI_FL_ERR);
+	if_value_4 = (ic->flags & CF_READ_PARTIAL) ;
+	if_value_5 = (ic->flags & CF_EOI);
+	if_value_6 = (if_value_5 || !ic->to_forward || sio->state != SI_ST_EST);
+	if_value_7 = (oc->flags & (CF_WRITE_NULL|CF_WRITE_ERROR));
+	if_value_8 = (oc->flags & CF_WRITE_ACTIVITY);
+
+	if_value_9 = (oc->flags & CF_SHUTW);
+	if_value_10 = (oc->flags & CF_WAKE_WRITE);
+	if_value_11 = !(oc->flags & (CF_AUTO_CLOSE|CF_SHUTW_NOW|CF_SHUTW));
+	if_value_12 = sio->state != SI_ST_EST;
+	if_value_13 = (channel_is_empty(oc) && !oc->to_forward);
+
+	if (/* changes on the production side */
+	    if_value_1 || if_value_2 ||
+	    if_value_3 || (if_value_4 && if_value_6) ||
+	    /* changes on the consumption side */
+	    if_value_7 || ( if_value_8 &&
+	     (if_value_9|| (( if_value_10 || if_value_11) &&
+	       ( if_value_12|| if_value_13 ))))) {
+#endif
+		SIPRINTF("[%s] task_wakeup\n", __func__);		
+
 		task_wakeup(task, TASK_WOKEN_IO);
 	}
 	else {
@@ -595,8 +703,13 @@ static void stream_int_notify(struct stream_interface *si)
 		task->expire = tick_first((tick_is_expired(task->expire, now_ms) ? 0 : task->expire),
 					  tick_first(tick_first(ic->rex, ic->wex),
 						     tick_first(oc->rex, oc->wex)));
+
+		SIPRINTF("[%s] task_queue\n", __func__);
+
 		task_queue(task);
 	}
+
+end:	
 	if (ic->flags & CF_READ_ACTIVITY)
 		ic->flags &= ~CF_READ_DONTWAIT; /* default run */
 }
@@ -615,6 +728,8 @@ static int si_cs_process(struct conn_stream *cs)
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	/* If we have data to send, try it now */
 	if (!channel_is_empty(oc) && !(si->wait_event.events & SUB_RETRY_SEND)) {
 #if ENABLE_TIME_MEASURE		
@@ -622,6 +737,7 @@ static int si_cs_process(struct conn_stream *cs)
 		si_cs_send(cs);
 		gettimeofday(&time_sicsp_send_end, NULL);
 #else
+		SIPRINTF("[%s] si_cs_send at %d\n", __func__, __LINE__);
 		si_cs_send(cs); 
 #endif
 	}
@@ -634,8 +750,10 @@ static int si_cs_process(struct conn_stream *cs)
 	 * and we don't want to add SI_FL_ERR back
 	 */
 	if (si->state >= SI_ST_CON &&
-	    (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR))
+	    (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR)) {
+			SIPRINTF("[%s] si->flags |= SI_FL_ERR\n", __func__);
 		si->flags |= SI_FL_ERR;
+	}
 
 	/* If we had early data, and the handshake ended, then
 	 * we can remove the flag, and attempt to wake the task up,
@@ -644,12 +762,14 @@ static int si_cs_process(struct conn_stream *cs)
 	 */
 	if (!(conn->flags & (CO_FL_HANDSHAKE | CO_FL_EARLY_SSL_HS)) &&
 	    (cs->flags & CS_FL_WAIT_FOR_HS)) {
+		SIPRINTF("[%s] task_wakeup(si_task(si), TASK_WOKEN_MSG)\n", __func__);
 		cs->flags &= ~CS_FL_WAIT_FOR_HS;
 		task_wakeup(si_task(si), TASK_WOKEN_MSG);
 	}
 
 	if (!si_state_in(si->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO) &&
 	    (conn->flags & (CO_FL_CONNECTED | CO_FL_HANDSHAKE)) == CO_FL_CONNECTED) {
+		SIPRINTF("[%s] si->exp = TICK_ETERNITY && oc->flags |= CF_WRITE_NULL\n", __func__);	
 		si->exp = TICK_ETERNITY;
 		oc->flags |= CF_WRITE_NULL;
 		if (si->state == SI_ST_CON)
@@ -658,8 +778,10 @@ static int si_cs_process(struct conn_stream *cs)
 
 	/* Report EOI on the channel if it was reached from the mux point of
 	 * view. */
-	if ((cs->flags & CS_FL_EOI) && !(ic->flags & CF_EOI))
+	if ((cs->flags & CS_FL_EOI) && !(ic->flags & CF_EOI)) {
+		SIPRINTF("[%s] CF_EOI\n", __func__);	
 		ic->flags |= (CF_EOI|CF_READ_PARTIAL);
+	}
 
 	/* Second step : update the stream-int and channels, try to forward any
 	 * pending data, then possibly wake the stream up based on the new
@@ -670,11 +792,12 @@ static int si_cs_process(struct conn_stream *cs)
 	stream_int_notify(si);
 	gettimeofday(&time_sicsp_int_end, NULL);
 #else
-	if (ipc_fd == cs->conn->handle.fd) {
-		SIPRINTF("Enter stream_int_notify\n");
-	}
-	stream_int_notify(si);
+	SIPRINTF("Enter stream_int_notify\n");
+
+	stream_int_notify(si);	
+	
 #endif	
+
 	channel_release_buffer(ic, &(si_strm(si)->buffer_wait));
 
 	return 0;
@@ -693,6 +816,8 @@ int si_cs_send(struct conn_stream *cs)
 	struct channel *oc = si_oc(si);
 	int ret;
 	int did_send = 0;
+
+	SIPRINTF("[%s]\n", __func__);
 
 	/* We're already waiting to be able to send, give up */
 	if (si->wait_event.events & SUB_RETRY_SEND)
@@ -722,13 +847,11 @@ int si_cs_send(struct conn_stream *cs)
 			did_send = 1;
 
 #if ENABLE_CUJU_FT
-#if 1 /* FIXED */
 		if (!oc->pipe->data && !oc->pipe->pipe_nxt) {
 			ft_clean_pipe(oc->pipe);				
 			////put_pipe(oc->pipe);
 			oc->pipe = NULL;
 		}
-#endif
 #else
 		if (!oc->pipe->data) {
 			put_pipe(oc->pipe);
@@ -818,6 +941,10 @@ int si_cs_send(struct conn_stream *cs)
  end:
  
 	if (did_send) {
+		cs->out_data += ret;
+		g_out_data = cs->out_data;
+		//printf("[%s] CS:%p Out Data:%lu\n", __func__, cs, cs->out_data);		
+		
 		oc->flags |= CF_WRITE_PARTIAL | CF_WROTE_DATA;
 		if (si->state == SI_ST_CON)
 			si->state = SI_ST_RDY;
@@ -855,32 +982,32 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 {
 	struct stream_interface *si = ctx;
 	struct conn_stream *cs = objt_cs(si->end);
+	struct channel *ic = si_ic(si);
+	struct stream_interface *sio = si_opposite(si);
+
 	int ret = 0;
 
-	if (ipc_fd == cs->conn->handle.fd) {
-		SIPRINTF("[%s] FD:%d\n", __func__, cs->conn->handle.fd);
-	}
+	SIPRINTF("[%s] FD:%d\n", __func__, cs->conn->handle.fd);
 
 	if (!cs)
 		return NULL;
 
 	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si))) {
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIPRINTF("%s enter si_cs_send\n", __func__);
-		}
+		SIPRINTF("%s enter si_cs_send\n", __func__);
+
 #if ENABLE_TIME_MEASURE
 		gettimeofday(&time_sicsio_send, NULL);
 		ret = si_cs_send(cs);
 		gettimeofday(&time_sicsio_send_end, NULL);
 #else
-		ret = si_cs_send(cs);
+		ret |= si_cs_send(cs);
 #endif	
+		SIPRINTF("%s exit si_cs_send\n", __func__);
 	}
 
 	if (!(si->wait_event.events & SUB_RETRY_RECV)) {
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIPRINTF("%s enter si_cs_recv | SUB_RETRY_RECV pass\n", __func__);
-		}
+		SIPRINTF("[%s] enter si_cs_recv | SUB_RETRY_RECV pass\n", __func__);
+
 #if ENABLE_TIME_MEASURE
 		gettimeofday(&time_sicsio_recv, NULL);
 		ret |= si_cs_recv(cs);
@@ -893,9 +1020,11 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 #if ENABLE_CUJU_FT
 	if (ret != 0) {
 		if (!(cs->conn->cujuipc_idx == 1)) {
-			if (ipc_fd == cs->conn->handle.fd) {	
-				SIPRINTF("%s enter si_cs_process\n", __func__);
-			}
+			SIPRINTF("%s enter si_cs_process\n", __func__);
+
+			//printf("[%s] CS:%p Out Data:%lu\n", __func__, cs, cs->out_data);
+			//printf("[%s]  In Data:%lu\n", __func__, ic->total);
+
 #if ENABLE_TIME_MEASURE
 			gettimeofday(&time_sicsp, NULL);
 
@@ -932,6 +1061,8 @@ struct task *si_cs_io_cb(struct task *t, void *ctx, unsigned short state)
 void si_update_rx(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	if (ic->flags & CF_SHUTR) {
 		si_rx_shut_blk(si);
@@ -978,6 +1109,8 @@ void si_update_tx(struct stream_interface *si)
 	struct channel *oc = si_oc(si);
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	if (oc->flags & CF_SHUTW)
 		return;
 
@@ -1021,6 +1154,8 @@ void si_sync_send(struct stream_interface *si)
 	struct channel *oc = si_oc(si);
 	struct conn_stream *cs;
 
+	SIPRINTF("[%s] oc->flags:%08x si->state:%08x\n", __func__, oc->flags, si->state);
+
 	oc->flags &= ~(CF_WRITE_NULL|CF_WRITE_PARTIAL);
 
 	if (oc->flags & CF_SHUTW)
@@ -1029,8 +1164,10 @@ void si_sync_send(struct stream_interface *si)
 	if (channel_is_empty(oc))
 		return;
 
-	if (!si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST))
+
+	if (!si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST)) {
 		return;
+	}
 
 	cs = objt_cs(si->end);
 	if (!cs)
@@ -1042,7 +1179,11 @@ void si_sync_send(struct stream_interface *si)
 	if (cs->conn->flags & CO_FL_ERROR)
 		return;
 
+	SIPRINTF("[%s] si_cs_send at %d\n", __func__, __LINE__);
+	
 	si_cs_send(cs);
+
+	SIPRINTF("[%s] End oc->flags:%08x\n", __func__, oc->flags);
 }
 
 /* Updates at once the channel flags, and timers of both stream interfaces of a
@@ -1056,6 +1197,13 @@ void si_update_both(struct stream_interface *si_f, struct stream_interface *si_b
 {
 	struct channel *req = si_ic(si_f);
 	struct channel *res = si_oc(si_f);
+
+	SIPRINTF("[%s]\n", __func__);
+	SIPRINTF("[%s] req->flags:%08x \n", __func__, req->flags);
+	SIPRINTF("[%s] res->flags:%08x \n", __func__, res->flags);
+
+	SIPRINTF("[%s] si_f->state:%08x \n", __func__, si_f->state);
+	SIPRINTF("[%s] si_b->state:%08x \n", __func__, si_b->state);
 
 	req->flags &= ~(CF_READ_NULL|CF_READ_PARTIAL|CF_READ_ATTACHED|CF_WRITE_NULL|CF_WRITE_PARTIAL);
 	res->flags &= ~(CF_READ_NULL|CF_READ_PARTIAL|CF_READ_ATTACHED|CF_WRITE_NULL|CF_WRITE_PARTIAL);
@@ -1099,6 +1247,8 @@ static void stream_int_shutr_conn(struct stream_interface *si)
 	struct conn_stream *cs = __objt_cs(si->end);
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	si_rx_shut_blk(si);
 	if (ic->flags & CF_SHUTR)
 		return;
@@ -1136,6 +1286,8 @@ static void stream_int_shutw_conn(struct stream_interface *si)
 	struct connection *conn = cs->conn;
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	oc->flags &= ~CF_SHUTW_NOW;
 	if (oc->flags & CF_SHUTW)
@@ -1221,9 +1373,12 @@ static void stream_int_shutw_conn(struct stream_interface *si)
  */
 static void stream_int_chk_rcv_conn(struct stream_interface *si)
 {
+	SIPRINTF("[%s]\n", __func__);
+
 	/* (re)start reading */
-	if (si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST))
+	if (si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST)) {
 		tasklet_wakeup(si->wait_event.tasklet);
+	}
 }
 
 
@@ -1237,9 +1392,7 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 	struct channel *oc = si_oc(si);
 	struct conn_stream *cs = __objt_cs(si->end);
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIPRINTF("[%s] Enter\n", __func__);
-	}
+	SIPRINTF("[%s]\n", __func__);
 
 	if (unlikely(!si_state_in(si->state, SI_SB_CON|SI_SB_RDY|SI_SB_EST) ||
 	    (oc->flags & CF_SHUTW)))
@@ -1249,13 +1402,11 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 		return;
 
 	if (!oc->pipe &&                          /* spliced data wants to be forwarded ASAP */
-	    !(si->flags & SI_FL_WAIT_DATA))       /* not waiting for data */
+		!(si->flags & SI_FL_WAIT_DATA))       /* not waiting for data */
 		return;
-
+		
 	if (!(si->wait_event.events & SUB_RETRY_SEND) && !channel_is_empty(si_oc(si))) {
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIPRINTF("[%s] enter si_cs_send\n", __func__);
-		}
+		SIPRINTF("[%s] enter si_cs_send\n", __func__);
 		si_cs_send(cs);  /* default run */
 	}
 
@@ -1275,18 +1426,15 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 		 * ->o limit was reached. Maybe we just wrote the last
 		 * chunk and need to close.
 		 */
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIPRINTF("[%s] Channel Empty ID:%lu\n", __func__, pthread_self());
-		}
+		SIPRINTF("[%s] Channel Empty ID:%lu\n", __func__, pthread_self());
+
 
 		if (((oc->flags & (CF_SHUTW|CF_AUTO_CLOSE|CF_SHUTW_NOW)) ==
 		     (CF_AUTO_CLOSE|CF_SHUTW_NOW)) &&
 		    si_state_in(si->state, SI_SB_RDY|SI_SB_EST)) {
 
-			if (ipc_fd == cs->conn->handle.fd) {	
-				SIPRINTF("[%s] Ready Shutdown ID:%lu\n", __func__, pthread_self());	
-			}
-
+			SIPRINTF("[%s] Ready Shutdown ID:%lu\n", __func__, pthread_self());	
+			
 			si_shutw(si);
 			goto out_wakeup;
 		}
@@ -1352,9 +1500,7 @@ int si_cs_recv(struct conn_stream *cs)
 	int read_poll = MAX_READ_POLL_LOOPS;
 	int flags = 0;
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIPRINTF("%s: Enter \n", __func__);
-	}
+	SIPRINTF("[%s]\n", __func__);
 
 	/* If another call to si_cs_recv() failed, and we subscribed to
 	 * recv events already, give up now.
@@ -1362,25 +1508,22 @@ int si_cs_recv(struct conn_stream *cs)
 	if (si->wait_event.events & SUB_RETRY_RECV)
 		return 0;
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: CF_SHUTR \n", __func__);
-	}
+	SIRPRINTF("%s: CF_SHUTR \n", __func__);
+
 
 	/* maybe we were called immediately after an asynchronous shutr */
 	if (ic->flags & CF_SHUTR)
 		return 1;
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: CS_FL_EOS \n", __func__);
-	}
+	SIRPRINTF("%s: CS_FL_EOS \n", __func__);
 
 	/* stop here if we reached the end of data */
 	if (cs->flags & CS_FL_EOS)
 		goto out_shutdown_r;
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: Check CS_FL_RCV_MORE \n", __func__);
-	}
+	
+	SIRPRINTF("%s: Check CS_FL_RCV_MORE \n", __func__);
+
 	/* stop immediately on errors. Note that we DON'T want to stop on
 	 * POLL_ERR, as the poller might report a write error while there
 	 * are still data available in the recv buffer. This typically
@@ -1397,9 +1540,7 @@ int si_cs_recv(struct conn_stream *cs)
 	/* prepare to detect if the mux needs more room */
 	cs->flags &= ~CS_FL_WANT_ROOM;
 	
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: (CF_STREAMER | CF_STREAMER_FAST)\n", __func__);
-	}
+	SIRPRINTF("%s: (CF_STREAMER | CF_STREAMER_FAST)\n", __func__);
 	
 	if ((ic->flags & (CF_STREAMER | CF_STREAMER_FAST)) && !co_data(ic) &&
 	    global.tune.idle_timer &&
@@ -1413,9 +1554,8 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->flags &= ~(CF_STREAMER | CF_STREAMER_FAST);
 	}
 	
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: Check RCV_PIPE\n", __func__);
-	}
+	SIRPRINTF("%s: Check RCV_PIPE\n", __func__);
+
 	/* First, let's see if we may splice data across the channel without
 	 * using a buffer.
 	 */
@@ -1423,9 +1563,7 @@ int si_cs_recv(struct conn_stream *cs)
 	    (ic->pipe || ic->to_forward >= MIN_SPLICE_FORWARD) &&
 	    ic->flags & CF_KERN_SPLICING) {
 		
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: Enter Check RCV_PIPE\n", __func__);	
-		}
+		SIRPRINTF("%s: Enter Check RCV_PIPE\n", __func__);	
 
 		if (c_data(ic)) {
 			/* We're embarrassed, there are already data pending in
@@ -1435,48 +1573,47 @@ int si_cs_recv(struct conn_stream *cs)
 			 */
 			flags |= CO_RFL_BUF_FLUSH;
 
-			if (ipc_fd == cs->conn->handle.fd) {	
-				SIRPRINTF("%s: abort_splice 1\n", __func__);	
-			}
+			SIRPRINTF("%s: abort_splice 1\n", __func__);	
 
 			goto abort_splice;
 		}
 
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: ic->pipe == NULL\n", __func__);
-		}
+		SIRPRINTF("%s: ic->pipe == NULL\n", __func__);
 
 		if (unlikely(ic->pipe == NULL)) {
 			if (pipes_used >= global.maxpipes || !(ic->pipe = get_pipe())) {
 				ic->flags &= ~CF_KERN_SPLICING;
-				if (ipc_fd == cs->conn->handle.fd) {	
-					SIRPRINTF("%s: abort_splice 2\n", __func__);
-				}
+				
+				SIRPRINTF("%s: abort_splice 2\n", __func__);
+
 				goto abort_splice;
 			}
 		}
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: conn->mux->rcv_pipe\n", __func__);
-		}
+	
+		SIRPRINTF("%s: conn->mux->rcv_pipe\n", __func__);
+		
 		
 		ret = conn->mux->rcv_pipe(cs, ic->pipe, ic->to_forward);
 		if (ret < 0) {
 			/* splice not supported on this end, let's disable it */
 			ic->flags &= ~CF_KERN_SPLICING;
-			if (ipc_fd == cs->conn->handle.fd) {	
-				SIRPRINTF("%s: abort_splice 3\n", __func__);
-			}
+
+			SIRPRINTF("%s: abort_splice 3\n", __func__);
+
 			goto abort_splice;
 		}
 
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIPRINTF("%s: rcv_pipe ret is %d\n", __func__, ret);
-		}
+
+		SIPRINTF("%s: rcv_pipe ret is %d\n", __func__, ret);
+
 
 		if (ret > 0) {
 			if (ic->to_forward != CHN_INFINITE_FORWARD)
 				ic->to_forward -= ret;
 			ic->total += ret;
+
+			g_in_data = ic->total;
+
 			cur_read += ret;
 			ic->flags |= CF_READ_PARTIAL;
 			
@@ -1484,53 +1621,48 @@ int si_cs_recv(struct conn_stream *cs)
 				si->state = SI_ST_RDY;
 		}
 		
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: CS_FL_EOS\n", __func__);
-		}
+		SIRPRINTF("%s: CS_FL_EOS\n", __func__);
 
 		if (cs->flags & CS_FL_EOS)
 			goto out_shutdown_r;
 
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: CO_FL_ERROR\n", __func__);
-		}
+		SIRPRINTF("%s: CO_FL_ERROR\n", __func__);
+
 
 		if (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR)
 			return 1;
 
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: conn->flags & CO_FL_WAIT_ROOM\n", __func__);
-		}
+	
+		SIRPRINTF("%s: conn->flags & CO_FL_WAIT_ROOM\n", __func__);
+
 		if (conn->flags & CO_FL_WAIT_ROOM) {
 			/* the pipe is full or we have read enough data that it
 			 * could soon be full. Let's stop before needing to poll.
 			 */
 			si_rx_room_blk(si);
-			if (ipc_fd == cs->conn->handle.fd) {	
-				SIRPRINTF("%s: done_recv\n", __func__);
-			}
+
+			SIRPRINTF("%s: done_recv\n", __func__);
+
 			goto done_recv;
 		}
 
 		/* splice not possible (anymore), let's go on on standard copy */
 	}
 	else {
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("%s: Enter Check RCV_PIPE ELSE\n", __func__);	
-		}
+		SIRPRINTF("%s: Enter Check RCV_PIPE ELSE\n", __func__);	
+
 		/* be sure not to block regular receive path below */
 		conn->flags &= ~CO_FL_WAIT_ROOM;
 	}
 	
-	if (ipc_fd == cs->conn->handle.fd) {		
-		SIRPRINTF("%s: End of Check RCV_PIPE\n", __func__);
-	}
+	SIRPRINTF("%s: End of Check RCV_PIPE\n", __func__);
+
 
  abort_splice:
  #if ENABLE_CUJU_FT
- 	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: abort_splice check pipe \n", __func__);
- 	}
+
+	SIRPRINTF("%s: abort_splice check pipe \n", __func__);
+
  	
 	 if (ic->pipe &&  unlikely(!ic->pipe->data) && (!ic->pipe->pipe_nxt)) {
 		put_pipe(ic->pipe);
@@ -1542,21 +1674,20 @@ int si_cs_recv(struct conn_stream *cs)
 		ic->pipe = NULL;
 	}
 #endif
-	if (ipc_fd == cs->conn->handle.fd) {		
-		SIRPRINTF("%s: si_alloc_ibuf \n", __func__);
-	}
+
+	SIRPRINTF("%s: si_alloc_ibuf \n", __func__);
+
 
 	/* now we'll need a input buffer for the stream */
 	if (!si_alloc_ibuf(si, &(si_strm(si)->buffer_wait))) {
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIRPRINTF("%s: goto end_recv\n", __func__);
-		}
+
+		SIRPRINTF("%s: goto end_recv\n", __func__);
+
 		goto end_recv;
 	}
 	
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: Check Flags\n", __func__);
-	}
+	SIRPRINTF("%s: Check Flags\n", __func__);
+
 	/* Important note : if we're called with POLL_IN|POLL_HUP, it means the read polling
 	 * was enabled, which implies that the recv buffer was not full. So we have a guarantee
 	 * that if such an event is not handled above in splice, it will be handled here by
@@ -1566,9 +1697,9 @@ int si_cs_recv(struct conn_stream *cs)
 	    (!(conn->flags & (CO_FL_ERROR | CO_FL_WAIT_ROOM | CO_FL_HANDSHAKE)) &&
 	       (!(cs->flags & (CS_FL_ERROR|CS_FL_EOS))) && !(ic->flags & CF_SHUTR))) {
 
-		if (ipc_fd == cs->conn->handle.fd) {	   
-			SIRPRINTF("%s: Enter Check Flags\n", __func__);
-		}
+ 
+		SIRPRINTF("%s: Enter Check Flags\n", __func__);
+
 
 		/* <max> may be null. This is the mux responsibility to set
 		 * CS_FL_RCV_MORE on the CS if more space is needed.
@@ -1577,30 +1708,26 @@ int si_cs_recv(struct conn_stream *cs)
 
 		ret = cs->conn->mux->rcv_buf(cs, &ic->buf, max, flags | (co_data(ic) ? CO_RFL_BUF_WET : 0));
 
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIRPRINTF("%s: Leave rcv_buf\n", __func__);		  
-		}
+		SIRPRINTF("%s: Leave rcv_buf\n", __func__);		  
+
 
 		if (cs->flags & CS_FL_WANT_ROOM) {
-			if (ipc_fd == cs->conn->handle.fd) {
-				SIRPRINTF("%s: Enter CS_FL_WANT_ROOM\n", __func__);
-			}
+			SIRPRINTF("%s: Enter CS_FL_WANT_ROOM\n", __func__);
+
 			si_rx_room_blk(si);
 		}	
 
 		if (cs->flags & CS_FL_READ_PARTIAL) {
-			if (ipc_fd == cs->conn->handle.fd) {
-				SIRPRINTF("%s: Enter CS_FL_READ_PARTIAL\n", __func__);
-			}
+			SIRPRINTF("%s: Enter CS_FL_READ_PARTIAL\n", __func__);
+
 			if (tick_isset(ic->rex))
 				ic->rex = tick_add_ifset(now_ms, ic->rto);
 			cs->flags &= ~CS_FL_READ_PARTIAL;
 		}
 
 		if (ret <= 0) {
-			if (ipc_fd == cs->conn->handle.fd) {
-				SIRPRINTF("%s: Enter ret <= 0\n", __func__);
-			}
+			SIRPRINTF("%s: Enter ret <= 0\n", __func__);
+
 			break;
 		}
 
@@ -1627,9 +1754,8 @@ int si_cs_recv(struct conn_stream *cs)
 		}
 		cur_read += ret;
 
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIRPRINTF("%s: Enter to_forward\n", __func__);
-		}
+		SIRPRINTF("%s: Enter to_forward\n", __func__);
+
 		/* if we're allowed to directly forward data, we must update ->o */
 		if (ic->to_forward && !(ic->flags & (CF_SHUTW|CF_SHUTW_NOW))) {
 			unsigned long fwd = ret;
@@ -1646,9 +1772,8 @@ int si_cs_recv(struct conn_stream *cs)
 		if (si->state == SI_ST_CON)
 			si->state = SI_ST_RDY;
 
-		if (ipc_fd == cs->conn->handle.fd) {
-			SIRPRINTF("%s: Enter CF_READ_DONTWAIT\n", __func__);
-		}
+		SIRPRINTF("%s: Enter CF_READ_DONTWAIT\n", __func__);
+
 
 		if ((ic->flags & CF_READ_DONTWAIT) || --read_poll <= 0) {
 			/* we're stopped by the channel's policy */
@@ -1661,9 +1786,8 @@ int si_cs_recv(struct conn_stream *cs)
 		 * not have them in buffers.
 		 */
 		if (ret < max) {
-			if (ipc_fd == cs->conn->handle.fd) {
-				SIRPRINTF("%s: Enter ret < max\n", __func__);
-			}
+			SIRPRINTF("%s: Enter ret < max\n", __func__);
+
 			/* if a streamer has read few data, it may be because we
 			 * have exhausted system buffers. It's not worth trying
 			 * again.
@@ -1693,15 +1817,13 @@ int si_cs_recv(struct conn_stream *cs)
 			break;
 	} /* while !flags */
 
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: Enter done_recv\n", __func__);
-	}
+	SIRPRINTF("%s: Enter done_recv\n", __func__);
+
 
 done_recv:
  	
-	if (ipc_fd == cs->conn->handle.fd) {	 
-		SIRPRINTF("%s: Enter end_recv\n", __func__);
-	}
+	SIRPRINTF("%s: Enter end_recv\n", __func__);
+
 
 	if (cur_read) {
 		if ((ic->flags & (CF_STREAMER | CF_STREAMER_FAST)) &&
@@ -1744,9 +1866,7 @@ done_recv:
 
 end_recv:
 	
-	if (ipc_fd == cs->conn->handle.fd) {	
-		SIRPRINTF("%s: Enter end_recv\n", __func__);
-	}
+	SIRPRINTF("%s: Enter end_recv\n", __func__);
 
 	if (conn->flags & CO_FL_ERROR || cs->flags & CS_FL_ERROR)
 		return 1;
@@ -1757,9 +1877,7 @@ end_recv:
 
 	/* Subscribe to receive events if we're blocking on I/O */
 	if (!si_rx_blocked(si)) {
-		if (ipc_fd == cs->conn->handle.fd) {	
-			SIRPRINTF("conn->mux->subscribe SUB_RETRY_RECV\n");
-		}
+		SIRPRINTF("conn->mux->subscribe SUB_RETRY_RECV\n");
 		
 		conn->mux->subscribe(cs, SUB_RETRY_RECV, &si->wait_event);
 		si_rx_endp_done(si);
@@ -1790,6 +1908,8 @@ static void stream_int_read0(struct stream_interface *si)
 	struct conn_stream *cs = __objt_cs(si->end);
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	si_rx_shut_blk(si);
 	if (ic->flags & CF_SHUTR)
@@ -1846,6 +1966,8 @@ void si_applet_wake_cb(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	/* If the applet wants to write and the channel is closed, it's a
 	 * broken pipe and it must be reported.
 	 */
@@ -1883,6 +2005,8 @@ static void stream_int_shutr_applet(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	si_rx_shut_blk(si);
 	if (ic->flags & CF_SHUTR)
 		return;
@@ -1916,6 +2040,8 @@ static void stream_int_shutw_applet(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	oc->flags &= ~CF_SHUTW_NOW;
 	if (oc->flags & CF_SHUTW)
@@ -1967,6 +2093,8 @@ static void stream_int_chk_rcv_applet(struct stream_interface *si)
 {
 	struct channel *ic = si_ic(si);
 
+	SIPRINTF("[%s]\n", __func__);
+
 	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
 		__FUNCTION__,
 		si, si->state, ic->flags, si_oc(si)->flags);
@@ -1981,6 +2109,8 @@ static void stream_int_chk_rcv_applet(struct stream_interface *si)
 static void stream_int_chk_snd_applet(struct stream_interface *si)
 {
 	struct channel *oc = si_oc(si);
+
+	SIPRINTF("[%s]\n", __func__);
 
 	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
 		__FUNCTION__,
@@ -2000,6 +2130,13 @@ static void stream_int_chk_snd_applet(struct stream_interface *si)
 	if (!channel_is_empty(oc)) {
 		/* (re)start sending */
 		appctx_wakeup(si_appctx(si));
+	}
+}
+
+void si_wait_snapshot() 
+{
+	while (at_snapshot_time) {
+
 	}
 }
 

@@ -2759,7 +2759,7 @@ int main(int argc, char **argv)
     nl_msg.msg_iov = &iov;
     nl_msg.msg_iovlen = 1;
 #endif
-
+	pthread_mutex_init(&show_conn_mutex ,NULL);
 #if 0
 	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x20);
 	add_vm_target(&vm_head.vm_list, 0xFFFFCCCC, 0x40);
@@ -2813,14 +2813,14 @@ int main(int argc, char **argv)
 	
     shm_id = shmget((key_t)KEY_SHM_CUJU_IPC, SUPPORT_VM_CNT * (sizeof(struct proto_ipc)), 0666 | IPC_CREAT);
     if (shm_id == -1) {
-        perror("shmget error");
+        perror("proxy shmget error");
         exit(EXIT_FAILURE);
     }
     
     /* attach shared memory */
     ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
     if (ipt_target == (void *)-1) {
-        perror("shmget error");
+        perror("proxy shmat error");
         exit(EXIT_FAILURE);
     }
 

@@ -66,6 +66,15 @@
 #include <proto/tcp_rules.h>
 #include <proto/vars.h>
 
+
+#define DEBUG_STREAM 0
+#if DEBUG_STREAM
+#define ST_PRINTF(x...) printf(x)
+#else
+#define ST_PRINTF(x...)
+#endif
+
+
 DECLARE_POOL(pool_head_stream, "stream", sizeof(struct stream));
 
 struct list streams = LIST_HEAD_INIT(streams);
@@ -132,6 +141,8 @@ struct stream *stream_new(struct session *sess, enum obj_type *origin)
 	struct conn_stream *cs  = objt_cs(origin);
 	struct appctx *appctx   = objt_appctx(origin);
 	const struct cs_info *csinfo;
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	if (unlikely((s = pool_alloc(pool_head_stream)) == NULL))
 		goto out_fail_alloc;
@@ -365,6 +376,8 @@ static void stream_free(struct stream *s)
 	int must_free_sess;
 	int i;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	/* detach the stream from its own task before even releasing it so
 	 * that walking over a task list never exhibits a dying stream.
 	 */
@@ -518,6 +531,8 @@ static void stream_free(struct stream *s)
  */
 static int stream_alloc_work_buffer(struct stream *s)
 {
+	ST_PRINTF("[%s]\n", __func__);
+
 	if (!LIST_ISEMPTY(&s->buffer_wait.list)) {
 		HA_SPIN_LOCK(BUF_WQ_LOCK, &buffer_wq_lock);
 		LIST_DEL(&s->buffer_wait.list);
@@ -544,6 +559,8 @@ void stream_release_buffers(struct stream *s)
 {
 	int offer = 0;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	if (c_size(&s->req) && c_empty(&s->req)) {
 		offer = 1;
 		b_free(&s->req.buf);
@@ -567,6 +584,8 @@ void stream_process_counters(struct stream *s)
 	void *ptr1,*ptr2;
 	struct stksess *ts;
 	int i;
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	bytes = s->req.total - s->logs.bytes_in;
 	s->logs.bytes_in = s->req.total;
@@ -664,6 +683,8 @@ static void sess_update_st_con_tcp(struct stream *s)
 	struct conn_stream *srv_cs = objt_cs(si->end);
 	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	/* the client might want to abort */
 	if ((rep->flags & CF_SHUTW) ||
 	    ((req->flags & CF_SHUTW_NOW) &&
@@ -710,6 +731,8 @@ static void sess_update_st_cer(struct stream *s)
 	struct stream_interface *si = &s->si[1];
 	struct conn_stream *cs = objt_cs(si->end);
 	struct connection *conn = cs_conn(cs);
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	si->exp    = TICK_ETERNITY;
 	si->flags &= ~SI_FL_EXP;
@@ -815,6 +838,8 @@ static void sess_update_st_rdy_tcp(struct stream *s)
 	struct conn_stream *srv_cs = objt_cs(si->end);
 	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	/* We know the connection at least succeeded, though it could have
 	 * since met an error for any other reason. At least it didn't time out
 	 * eventhough the timeout might have been reported right after success.
@@ -887,6 +912,8 @@ static void sess_establish(struct stream *s)
 	struct connection *conn = srv_cs ? srv_cs->conn : objt_conn(si->end);
 	struct channel *req = &s->req;
 	struct channel *rep = &s->res;
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	/* First, centralize the timers information, and clear any irrelevant
 	 * timeout.
@@ -978,6 +1005,8 @@ static void sess_update_stream_int(struct stream *s)
 	struct server *srv = objt_server(s->target);
 	struct stream_interface *si = &s->si[1];
 	struct channel *req = &s->req;
+
+	ST_PRINTF("[%s] si->state:%d\n", __func__, si->state);
 
 	DPRINTF(stderr,"[%u] %s: sess=%p rq=%p, rp=%p, exp(r,w)=%u,%u rqf=%08x rpf=%08x rqh=%lu rqt=%lu rph=%lu rpt=%lu cs=%d ss=%d\n",
 		now_ms, __FUNCTION__,
@@ -1158,6 +1187,8 @@ abort_connection:
  */
 static void sess_set_term_flags(struct stream *s)
 {
+	ST_PRINTF("[%s]\n", __func__);
+
 	if (!(s->flags & SF_FINST_MASK)) {
 		if (s->si[1].state == SI_ST_INI) {
 			/* anything before REQ in fact */
@@ -1187,6 +1218,8 @@ static void sess_set_term_flags(struct stream *s)
 static void sess_prepare_conn_req(struct stream *s)
 {
 	struct stream_interface *si = &s->si[1];
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	DPRINTF(stderr,"[%u] %s: sess=%p rq=%p, rp=%p, exp(r,w)=%u,%u rqf=%08x rpf=%08x rqh=%lu rqt=%lu rph=%lu rpt=%lu cs=%d ss=%d\n",
 		now_ms, __FUNCTION__,
@@ -1297,6 +1330,8 @@ enum act_return process_use_service(struct act_rule *rule, struct proxy *px,
 {
 	struct appctx *appctx;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	/* Initialises the applet if it is required. */
 	if (flags & ACT_FLAG_FIRST) {
 		/* Register applet. this function schedules the applet. */
@@ -1351,6 +1386,8 @@ static int process_switching_rules(struct stream *s, struct channel *req, int an
 	struct session *sess = s->sess;
 	struct proxy *fe = sess->fe;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	req->analysers &= ~an_bit;
 	req->analyse_exp = TICK_ETERNITY;
 
@@ -1395,7 +1432,7 @@ static int process_switching_rules(struct stream *s, struct channel *req, int an
 						backend = proxy_be_by_name(tmp->area);
 					
 						if(!strcmp(tmp->area, "ft_group")) {
-							printf("FT_GROUP");
+							printf("FT_GROUP\n");
 						}
 					}
 
@@ -1484,6 +1521,8 @@ static int process_server_rules(struct stream *s, struct channel *req, int an_bi
 	struct session *sess = s->sess;
 	struct server_rule *rule;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%lu analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
@@ -1533,6 +1572,8 @@ static inline void sticking_rule_find_target(struct stream *s,
 	void *ptr;
 	struct server *srv;
 
+	ST_PRINTF("[%s]\n", __func__);
+
 	/* Look for the server name previously stored in <t> stick-table */
 	HA_RWLOCK_RDLOCK(STK_SESS_LOCK, &ts->lock);
 	ptr = __stktable_data_ptr(t, ts, STKTABLE_DT_SERVER_NAME);
@@ -1576,6 +1617,8 @@ static int process_sticking_rules(struct stream *s, struct channel *req, int an_
 	struct proxy    *px   = s->be;
 	struct session *sess  = s->sess;
 	struct sticking_rule  *rule;
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%lu analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -1658,6 +1701,8 @@ static int process_store_rules(struct stream *s, struct channel *rep, int an_bit
 	struct sticking_rule  *rule;
 	int i;
 	int nbreq = s->store_count;
+
+	ST_PRINTF("[%s]\n", __func__);
 
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%lu analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -1827,6 +1872,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	struct stream_interface *si_f, *si_b;
 	unsigned int rate;
 
+	ST_PRINTF("[%s] task:%p\n", __func__, t);
+
 	//printf("[%s:] Enter ID:%d\n", __func__, pthread_self());
 
 	activity[tid].stream++;
@@ -1837,12 +1884,15 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	si_f = &s->si[0];
 	si_b = &s->si[1];
 
+	ST_PRINTF("[%s] si_sync_recv\n", __func__);
+
 	/* First, attempt to receive pending data from I/O layers */
  	si_sync_recv(si_f);
 	si_sync_recv(si_b);
 
 	rate = update_freq_ctr(&s->call_rate, 1);
 	if (rate >= 100000 && s->call_rate.prev_ctr) { // make sure to wait at least a full second
+		ST_PRINTF("[%s] stream_dump_and_crash\n", __func__);
 		stream_dump_and_crash(&s->obj_type, read_freq_ctr(&s->call_rate));
 	}
 
@@ -1853,6 +1903,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	if (s->txn)
 		memset(&s->txn->auth, 0, sizeof(s->txn->auth));
 
+
+	ST_PRINTF("[%s] Clear req->flags and res->flags CF_READ_NOEXP and CF_WAKE_WRITE bits\n", __func__);
 	/* This flag must explicitly be set every time */
 	req->flags &= ~(CF_READ_NOEXP|CF_WAKE_WRITE);
 	res->flags &= ~(CF_READ_NOEXP|CF_WAKE_WRITE);
@@ -1868,6 +1920,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	/* update pending events */
 	s->pending_events |= (state & TASK_WOKEN_ANY);
 	
+	ST_PRINTF("[%s] pending_events check\n", __func__);
+
 	/* 1a: Check for low level timeouts if needed. We just set a flag on
 	 * stream interfaces when their timeouts have expired.
 	 */
@@ -1880,15 +1934,17 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 		 * but we do not touch any other flag. We must be careful and correctly
 		 * detect state changes when calling them.
 		 */
-
+		ST_PRINTF("[%s] channel_check_timeouts\n", __func__);
 		channel_check_timeouts(req);
 		/* Frontend -> Haproxy -> Backend */
 		if (unlikely((req->flags & (CF_SHUTW|CF_WRITE_TIMEOUT)) == CF_WRITE_TIMEOUT)) {
+			ST_PRINTF("[%s] si_shutw\n", __func__);
 			si_b->flags |= SI_FL_NOLINGER;
 			si_shutw(si_b);
 		}
 
 		if (unlikely((req->flags & (CF_SHUTR|CF_READ_TIMEOUT)) == CF_READ_TIMEOUT)) {
+			ST_PRINTF("[%s] si_shutr\n", __func__);
 			if (si_f->flags & SI_FL_NOHALF)
 				si_f->flags |= SI_FL_NOLINGER;
 			si_shutr(si_f);
@@ -1897,11 +1953,13 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 		channel_check_timeouts(res);
 		/* Backend -> Haproxy -> Frontend */
 		if (unlikely((res->flags & (CF_SHUTW|CF_WRITE_TIMEOUT)) == CF_WRITE_TIMEOUT)) {
+			ST_PRINTF("[%s] si_shutw\n", __func__);
 			si_f->flags |= SI_FL_NOLINGER;
 			si_shutw(si_f);
 		}
 
 		if (unlikely((res->flags & (CF_SHUTR|CF_READ_TIMEOUT)) == CF_READ_TIMEOUT)) {
+			ST_PRINTF("[%s] si_shutr\n", __func__);
 			if (si_b->flags & SI_FL_NOHALF)
 				si_b->flags |= SI_FL_NOLINGER;
 			si_shutr(si_b);
@@ -1927,6 +1985,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	}
 
  resync_stream_interface:
+	ST_PRINTF("[%s] resync_stream_interface\n", __func__);
 	/* below we may emit error messages so we have to ensure that we have
 	 * our buffers properly allocated.
 	 */
@@ -1934,6 +1993,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 		/* No buffer available, we've been subscribed to the list of
 		 * buffer waiters, let's wait for our turn.
 		 */
+		ST_PRINTF("[%s] Enter !stream_alloc_work_buffer(s)\n", __func__);
 		si_f->flags &= ~SI_FL_DONT_WAKE;
 		si_b->flags &= ~SI_FL_DONT_WAKE;
 		goto update_exp_and_leave;
@@ -1949,6 +2009,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	srv = objt_server(s->target);
 	if (unlikely(si_f->flags & SI_FL_ERR)) {
 		if (si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS)) {
+
+			ST_PRINTF("[%s] si_shutr and si_shutw\n", __func__);
 			si_shutr(si_f);
 			si_shutw(si_f);
 			si_report_error(si_f);
@@ -1966,45 +2028,55 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	}
 	/* not for IPC */
 	if (!last_error) {
-	if (unlikely(si_b->flags & SI_FL_ERR)) {
-		if (si_state_in(si_b->state, SI_SB_EST|SI_SB_DIS)) {
-			si_shutr(si_b);
-			si_shutw(si_b);
-			si_report_error(si_b);
-			_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
-			if (srv)
-				_HA_ATOMIC_ADD(&srv->counters.failed_resp, 1);
-			if (!(req->analysers) && !(res->analysers)) {
-				_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
-				_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
+		if (unlikely(si_b->flags & SI_FL_ERR)) {
+			if (si_state_in(si_b->state, SI_SB_EST|SI_SB_DIS)) {
+				ST_PRINTF("[%s] si_shutr and si_shutw\n", __func__);
+				si_shutr(si_b);
+				si_shutw(si_b);
+				si_report_error(si_b);
+				_HA_ATOMIC_ADD(&s->be->be_counters.failed_resp, 1);
 				if (srv)
-					_HA_ATOMIC_ADD(&srv->counters.srv_aborts, 1);
-				if (!(s->flags & SF_ERR_MASK))
-					s->flags |= SF_ERR_SRVCL;
-				if (!(s->flags & SF_FINST_MASK))
-					s->flags |= SF_FINST_D;
+					_HA_ATOMIC_ADD(&srv->counters.failed_resp, 1);
+				if (!(req->analysers) && !(res->analysers)) {
+					_HA_ATOMIC_ADD(&s->be->be_counters.srv_aborts, 1);
+					_HA_ATOMIC_ADD(&sess->fe->fe_counters.srv_aborts, 1);
+					if (srv)
+						_HA_ATOMIC_ADD(&srv->counters.srv_aborts, 1);
+					if (!(s->flags & SF_ERR_MASK))
+						s->flags |= SF_ERR_SRVCL;
+					if (!(s->flags & SF_FINST_MASK))
+						s->flags |= SF_FINST_D;
+				}
 			}
-		}
-		/* note: maybe we should process connection errors here ? */
-	} 
+			/* note: maybe we should process connection errors here ? */
+		} 
 	}
 	last_error = 0;
 
+	ST_PRINTF("[%s] Ready to si_state_in(si_b->state, SI_SB_CON|SI_SB_RDY)\n", __func__);	
 
 	if (si_state_in(si_b->state, SI_SB_CON|SI_SB_RDY)) {
+		ST_PRINTF("[%s] si_state_in(si_b->state, SI_SB_CON|SI_SB_RDY)\n", __func__);
 		/* we were trying to establish a connection on the server side,
 		 * maybe it succeeded, maybe it failed, maybe we timed out, ...
 		 */
-		if (si_b->state == SI_ST_RDY)
+		if (si_b->state == SI_ST_RDY) {
+			ST_PRINTF("[%s] si_b->state == SI_ST_RDY sess_update_st_rdy_tcp\n", __func__);
 			sess_update_st_rdy_tcp(s);
-		else if (si_b->state == SI_ST_CON)
+		}	
+		else if (si_b->state == SI_ST_CON) {
+			ST_PRINTF("[%s] si_b->state == SI_ST_CON sess_update_st_con_tcp\n", __func__);
 			sess_update_st_con_tcp(s);
+		}
 
-		if (si_b->state == SI_ST_CER)
+		if (si_b->state == SI_ST_CER) {
+			ST_PRINTF("[%s] si_b->state == SI_ST_CER sess_update_st_cer\n", __func__);
 			sess_update_st_cer(s);
-		else if (si_b->state == SI_ST_EST)
+		}
+		else if (si_b->state == SI_ST_EST) {
+			ST_PRINTF("[%s] si_b->state == SI_ST_EST sess_establish\n", __func__);
 			sess_establish(s);
-
+		}
 		/* state is now one of SI_ST_CON (still in progress), SI_ST_EST
 		 * (established), SI_ST_DIS (abort), SI_ST_CLO (last error),
 		 * SI_ST_ASS/SI_ST_TAR/SI_ST_REQ for retryable errors.
@@ -2017,7 +2089,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	rp_prod_last = si_b->state;
 
 	/* Check for connection closure */
-#if 0
+#if 1
 	DPRINTF(stderr,
 		"[%u] %s:%d: task=%p s=%p, sfl=0x%08x, rq=%p, rp=%p, exp(r,w)=%u,%u rqf=%08x rpf=%08x rqh=%lu rqt=%lu rph=%lu rpt=%lu cs=%d ss=%d, cet=0x%x set=0x%x retr=%d\n",
 		now_ms, __FUNCTION__, __LINE__,
@@ -2031,13 +2103,20 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 		si_b->conn_retries);
 #endif
 	/* nothing special to be done on client side */
-	if (unlikely(si_f->state == SI_ST_DIS))
+	ST_PRINTF("[%s] unlikely(si_f->state == SI_ST_DIS)\n", __func__);	
+
+	if (unlikely(si_f->state == SI_ST_DIS)) {
+		ST_PRINTF("[%s] si_f->state == SI_ST_DIS => SI_ST_CLO\n", __func__);
 		si_f->state = SI_ST_CLO;
+	}
+
+	ST_PRINTF("[%s] unlikely(si_b->state == SI_ST_DIS)\n", __func__);	
 
 	/* When a server-side connection is released, we have to count it and
 	 * check for pending connections on this server.
 	 */
 	if (unlikely(si_b->state == SI_ST_DIS)) {
+		ST_PRINTF("[%s] si_b->state == SI_ST_DIS => SI_ST_CLO\n", __func__);
 		si_b->state = SI_ST_CLO;
 		srv = objt_server(s->target);
 		if (srv) {
@@ -2057,6 +2136,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	 */
 
  resync_request:
+	ST_PRINTF("[%s] resync_request label\n", __func__);
 	/* Analyse request */
 	if (((req->flags & ~rqf_last) & CF_MASK_ANALYSER) ||
 	    ((req->flags ^ rqf_last) & CF_MASK_STATIC) ||
@@ -2066,10 +2146,14 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	    s->pending_events & TASK_WOKEN_MSG) {
 		unsigned int flags = req->flags;
 
+		ST_PRINTF("[%s] Analyse request Phase\n", __func__);	
+
 		if (si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO)) {
 			int max_loops = global.tune.maxpollevents;
 			unsigned int ana_list;
 			unsigned int ana_back;
+
+			ST_PRINTF("[%s] si_state_in(si_f->state, SI_SB_EST|SI_SB_DIS|SI_SB_CLO) at %d\n", __func__, __LINE__);
 
 			/* it's up to the analysers to stop new connections,
 			 * disable reading or closing. Note: if an analyser
@@ -2157,6 +2241,7 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	req_ana_back = req->analysers;
 
  resync_response:
+	ST_PRINTF("[%s] resync_response label\n", __func__);
 	/* Analyse response */
 #if 0//ENABLE_CUJU_FT
  	printf("###################################################################\n");
@@ -2653,6 +2738,8 @@ struct task *process_stream(struct task *t, void *context, unsigned short state)
 	rpf_last = res->flags;
 
 	/* Let's see if we can send the pending response now */
+
+
 	si_sync_send(si_f);
 
 	/*

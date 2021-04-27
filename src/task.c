@@ -26,6 +26,8 @@
 #include <proto/stream.h>
 #include <proto/task.h>
 
+#include <types/cuju_ft.h>
+
 DECLARE_POOL(pool_head_task,    "task",    sizeof(struct task));
 DECLARE_POOL(pool_head_tasklet, "tasklet", sizeof(struct tasklet));
 
@@ -66,6 +68,8 @@ struct task_per_thread task_per_thread[MAX_THREADS];
  */
 void __task_wakeup(struct task *t, struct eb_root *root)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 #ifdef USE_THREAD
 	if (root == &rqueue) {
 		HA_SPIN_LOCK(TASK_RQ_LOCK, &rq_lock);
@@ -139,6 +143,8 @@ void __task_wakeup(struct task *t, struct eb_root *root)
  */
 void __task_queue(struct task *task, struct eb_root *wq)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (likely(task_in_wq(task)))
 		__task_unlink_wq(task);
 
@@ -164,10 +170,14 @@ int wake_expired_tasks()
 	int ret = TICK_ETERNITY;
 	__decl_hathreads(int key);
 
+	HAT_PRINTF("[%s]\n", __func__);
+
 	while (1) {
   lookup_next_local:
+		HAT_PRINTF("[%s] eb32_lookup_ge\n", __func__);
 		eb = eb32_lookup_ge(&task_per_thread[tid].timers, now_ms - TIMER_LOOK_BACK);
 		if (!eb) {
+			HAT_PRINTF("[%s] !eb\n", __func__);
 			/* we might have reached the end of the tree, typically because
 			* <now_ms> is in the first half and we're first scanning the last
 			* half. Let's loop back to the beginning of the tree now.
@@ -177,14 +187,18 @@ int wake_expired_tasks()
 				break;
 		}
 
+		HAT_PRINTF("[%s] tick_is_lt\n", __func__);
 		if (tick_is_lt(now_ms, eb->key)) {
 			/* timer not expired yet, revisit it later */
 			ret = eb->key;
 			break;
 		}
 
+		HAT_PRINTF("[%s] eb32_entry\n", __func__);
 		/* timer looks expired, detach it from the queue */
 		task = eb32_entry(eb, struct task, wq);
+
+		HAT_PRINTF("[%s] __task_unlink_wq\n", __func__);
 		__task_unlink_wq(task);
 
 		/* It is possible that this task was left at an earlier place in the
@@ -201,31 +215,46 @@ int wake_expired_tasks()
 		 * expiration time is not set.
 		 */
 		if (!tick_is_expired(task->expire, now_ms)) {
-			if (tick_isset(task->expire))
+			HAT_PRINTF("[%s] tick_is_expired\n", __func__);
+			if (tick_isset(task->expire)) {
+				HAT_PRINTF("[%s] tick_isset and __task_queue\n", __func__);
 				__task_queue(task, &task_per_thread[tid].timers);
+			}
 			goto lookup_next_local;
 		}
+		HAT_PRINTF("[%s] task_wakeup\n", __func__);
 		task_wakeup(task, TASK_WOKEN_TIMER);
 	}
 
 #ifdef USE_THREAD
-	if (eb_is_empty(&timers))
+	if (eb_is_empty(&timers)) {
+		HAT_PRINTF("[%s] eb_is_empty and leave\n", __func__);
 		goto leave;
+	}
 
+	HAT_PRINTF("[%s] HA_RWLOCK_RDLOCK\n", __func__);
 	HA_RWLOCK_RDLOCK(TASK_WQ_LOCK, &wq_lock);
+
+	HAT_PRINTF("[%s] eb32_lookup_ge\n", __func__);
 	eb = eb32_lookup_ge(&timers, now_ms - TIMER_LOOK_BACK);
 	if (!eb) {
+		HAT_PRINTF("[%s] eb32_first\n", __func__);
 		eb = eb32_first(&timers);
 		if (likely(!eb)) {
+			HAT_PRINTF("[%s] eb NULL and HA_RWLOCK_RDUNLOCK and leave\n", __func__);
 			HA_RWLOCK_RDUNLOCK(TASK_WQ_LOCK, &wq_lock);
 			goto leave;
 		}
 	}
 	key = eb->key;
+	HAT_PRINTF("[%s] HA_RWLOCK_RDUNLOCK\n", __func__);
 	HA_RWLOCK_RDUNLOCK(TASK_WQ_LOCK, &wq_lock);
 
+
+	HAT_PRINTF("[%s] tick_is_lt\n", __func__);
 	if (tick_is_lt(now_ms, key)) {
 		/* timer not expired yet, revisit it later */
+		HAT_PRINTF("[%s] tick_first and leave\n", __func__);
 		ret = tick_first(ret, key);
 		goto leave;
 	}
@@ -235,23 +264,30 @@ int wake_expired_tasks()
 	while (1) {
 		HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
   lookup_next:
+		HAT_PRINTF("[%s] eb32_lookup_ge\n", __func__);
 		eb = eb32_lookup_ge(&timers, now_ms - TIMER_LOOK_BACK);
 		if (!eb) {
+			HAT_PRINTF("[%s] !eb and eb32_first\n", __func__);
 			/* we might have reached the end of the tree, typically because
 			* <now_ms> is in the first half and we're first scanning the last
 			* half. Let's loop back to the beginning of the tree now.
 			*/
 			eb = eb32_first(&timers);
-			if (likely(!eb))
+			if (likely(!eb)) {
+				HAT_PRINTF("[%s] !eb\n", __func__);
 				break;
+			}
 		}
 
+		HAT_PRINTF("[%s] tick_is_lt(now_ms, eb->key\n", __func__);
 		if (tick_is_lt(now_ms, eb->key)) {
+			HAT_PRINTF("[%s] tick_first\n", __func__);
 			/* timer not expired yet, revisit it later */
 			ret = tick_first(ret, eb->key);
 			break;
 		}
 
+		HAT_PRINTF("[%s] eb32_entry and __task_unlink_wq\n", __func__);
 		/* timer looks expired, detach it from the queue */
 		task = eb32_entry(eb, struct task, wq);
 		__task_unlink_wq(task);
@@ -269,11 +305,18 @@ int wake_expired_tasks()
 		 * We may also not requeue the task (and not point eb at it) if its
 		 * expiration time is not set.
 		 */
+		HAT_PRINTF("[%s] !tick_is_expired(task->expire, now_ms)\n", __func__);
 		if (!tick_is_expired(task->expire, now_ms)) {
-			if (tick_isset(task->expire))
+			HAT_PRINTF("[%s] tick_isset(task->expire)\n", __func__);
+			if (tick_isset(task->expire)) {
+				HAT_PRINTF("[%s] __task_queue\n", __func__);
 				__task_queue(task, &timers);
+			}
+			HAT_PRINTF("[%s] lookup_next\n", __func__);
 			goto lookup_next;
 		}
+
+		HAT_PRINTF("[%s] task_wakeup\n", __func__);
 		task_wakeup(task, TASK_WOKEN_TIMER);
 		HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	}
@@ -304,10 +347,15 @@ void process_runnable_tasks()
 	struct task *t;
 	int max_processed;
 
+	HAT_PRINTF("[%s] Enter tid:%16x\n", __func__, tid);
+
 	ti->flags &= ~TI_FL_STUCK; // this thread is still running
+
+	HAT_PRINTF("[%s] thread_has_tasks: %d\n", __func__, thread_has_tasks());
 
 	if (!thread_has_tasks()) {
 		activity[tid].empty_rq++;
+		HAT_PRINTF("[%s] activity[tid].empty_rq: %d\n", __func__, activity[tid].empty_rq);
 		return;
 	}
 
@@ -319,15 +367,18 @@ void process_runnable_tasks()
 		max_processed = (max_processed + 3) / 4;
 
 	/* Note: the grq lock is always held when grq is not null */
-
+	HAT_PRINTF("[%s] while (task_per_thread[tid].task_list_size < max_processed)\n", __func__);
 	while (task_per_thread[tid].task_list_size < max_processed) {
 		if ((global_tasks_mask & tid_bit) && !grq) {
 #ifdef USE_THREAD
+			HAT_PRINTF("[%s] get grq\n", __func__);
 			HA_SPIN_LOCK(TASK_RQ_LOCK, &rq_lock);
 			grq = eb32sc_lookup_ge(&rqueue, rqueue_ticks - TIMER_LOOK_BACK, tid_bit);
 			if (unlikely(!grq)) {
+				HAT_PRINTF("[%s] get grq unlikely(!grq)\n", __func__);
 				grq = eb32sc_first(&rqueue, tid_bit);
 				if (!grq) {
+					HAT_PRINTF("[%s] grq is NULL\n", __func__);
 					global_tasks_mask &= ~tid_bit;
 					HA_SPIN_UNLOCK(TASK_RQ_LOCK, &rq_lock);
 				}
@@ -340,25 +391,33 @@ void process_runnable_tasks()
 		 */
 
 		if (!lrq) {
+			HAT_PRINTF("[%s] lrq is NULL\n", __func__);
 			lrq = eb32sc_lookup_ge(&task_per_thread[tid].rqueue, rqueue_ticks - TIMER_LOOK_BACK, tid_bit);
 			if (unlikely(!lrq))
 				lrq = eb32sc_first(&task_per_thread[tid].rqueue, tid_bit);
 		}
 
-		if (!lrq && !grq)
-			break;
+		if (!lrq && !grq) {
+			HAT_PRINTF("[%s] grq and lrq are NULL\n", __func__);
+			break; 
+		}	
 
 		if (likely(!grq || (lrq && (int)(lrq->key - grq->key) <= 0))) {
+			HAT_PRINTF("[%s] likely(!grq || (lrq && (int)(lrq->key - grq->key) <= 0))\n", __func__);
 			t = eb32sc_entry(lrq, struct task, rq);
 			lrq = eb32sc_next(lrq, tid_bit);
+
+			HAT_PRINTF("[%s] __task_unlink_rq\n", __func__);
 			__task_unlink_rq(t);
 		}
 #ifdef USE_THREAD
 		else {
+			HAT_PRINTF("[%s] else [likely(!grq || (lrq && (int)(lrq->key - grq->key) <= 0))]\n", __func__);
 			t = eb32sc_entry(grq, struct task, rq);
 			grq = eb32sc_next(grq, tid_bit);
 			__task_unlink_rq(t);
 			if (unlikely(!grq)) {
+				HAT_PRINTF("[%s] grq is NULL at %d\n", __func__, __LINE__);
 				grq = eb32sc_first(&rqueue, tid_bit);
 				if (!grq) {
 					global_tasks_mask &= ~tid_bit;
@@ -386,12 +445,19 @@ void process_runnable_tasks()
 		void *ctx;
 		struct task *(*process)(struct task *t, void *ctx, unsigned short state);
 
+		HAT_PRINTF("[%s] while at %d\n", __func__, __LINE__);
+
 		t = (struct task *)LIST_ELEM(task_per_thread[tid].task_list.n, struct tasklet *, list);
 		state = _HA_ATOMIC_XCHG(&t->state, TASK_RUNNING);
 		__ha_barrier_atomic_store();
+
+		HAT_PRINTF("[%s] __tasklet_remove_from_tasklet_list at %d\n", __func__, __LINE__);
 		__tasklet_remove_from_tasklet_list((struct tasklet *)t);
-		if (!TASK_IS_TASKLET(t))
+
+		if (!TASK_IS_TASKLET(t)) {
+			HAT_PRINTF("[%s] !TASK_IS_TASKLET(t) at %d\n", __func__, __LINE__);
 			task_per_thread[tid].task_list_size--;
+		}
 
 		ti->flags &= ~TI_FL_STUCK; // this thread is still running
 		activity[tid].ctxsw++;
@@ -408,11 +474,16 @@ void process_runnable_tasks()
 
 		curr_task = (struct task *)t;
 		__ha_barrier_store();
-		if (likely(process == process_stream))
+		if (likely(process == process_stream)) {
+			HAT_PRINTF("[%s] process_stream at %d\n", __func__, __LINE__);
 			t = process_stream(t, ctx, state);
-		else if (process != NULL)
+		}
+		else if (process != NULL) {
+			HAT_PRINTF("[%s] process at %d\n", __func__, __LINE__);
 			t = process(TASK_IS_TASKLET(t) ? NULL : t, ctx, state);
+		}
 		else {
+			HAT_PRINTF("[%s] __task_free at %d\n", __func__, __LINE__);
 			__task_free(t);
 			curr_task = NULL;
 			__ha_barrier_store();
@@ -420,6 +491,7 @@ void process_runnable_tasks()
 			 * we're just freeing a destroyed task, we should only
 			 * do so if we really ran a task.
 			 */
+			HAT_PRINTF("[%s] continue at %d\n", __func__, __LINE__);
 			continue;
 		}
 		curr_task = NULL;
@@ -428,16 +500,22 @@ void process_runnable_tasks()
 		 * immediately, else we defer it into wait queue
 		 */
 		if (t != NULL) {
+			HAT_PRINTF("[%s] t != NULL at %d\n", __func__, __LINE__);
+
 			if (unlikely(!TASK_IS_TASKLET(t) && t->call_date)) {
 				t->cpu_time += now_mono_time() - t->call_date;
 				t->call_date = 0;
 			}
 
 			state = _HA_ATOMIC_AND(&t->state, ~TASK_RUNNING);
-			if (state)
+			if (state) {
+				HAT_PRINTF("[%s] task_wakeup at %d\n", __func__, __LINE__);
 				task_wakeup(t, 0);
-			else
+			}	
+			else {
+				HAT_PRINTF("[%s] task_queue at %d\n", __func__, __LINE__);
 				task_queue(t);
+			}
 		}
 
 		max_processed--;
@@ -459,6 +537,8 @@ struct work_list *work_list_create(int nbthread,
 {
 	struct work_list *wl;
 	int i;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 	wl = calloc(nbthread, sizeof(*wl));
 	if (!wl)
@@ -485,6 +565,8 @@ void work_list_destroy(struct work_list *work, int nbthread)
 {
 	int t;
 
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (!work)
 		return;
 	for (t = 0; t < nbthread; t++)
@@ -501,6 +583,8 @@ void mworker_cleantasks()
 	int i;
 	struct eb32_node *tmp_wq = NULL;
 	struct eb32sc_node *tmp_rq = NULL;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 #ifdef USE_THREAD
 	/* cleanup the global run queue */
@@ -540,6 +624,8 @@ void mworker_cleantasks()
 static void init_task()
 {
 	int i;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 #ifdef USE_THREAD
 	memset(&timers, 0, sizeof(timers));

@@ -42,6 +42,22 @@
 #include <proto/stream.h>
 #include <proto/task.h>
 
+#define DEBUG_LISTENER 0
+#if DEBUG_LISTENER
+#define LSEN_PRINTF(x...) printf(x)
+#else
+#define LSEN_PRINTF(x...)
+#endif
+
+
+#define DEBUG_ACCEPT 1
+#if DEBUG_ACCEPT
+#define ACT_PRINTF(x...) printf(x)
+#else
+#define ACT_PRINTF(x...)
+#endif
+
+
 /* List head of all known bind keywords */
 static struct bind_kw_list bind_keywords = {
 	.list = LIST_HEAD_INIT(bind_keywords.list)
@@ -633,9 +649,13 @@ void listener_accept(int fd)
 	static int accept4_broken;
 #endif
 
+	ACT_PRINTF("[%s] Enter fd %d\n", __func__, fd);
+
 	if (!l)
 		return;
 	p = l->bind_conf->frontend;
+
+	ACT_PRINTF("[%s] frontend fd %d\n", __func__, fd);
 
 	/* if l->maxaccept is -1, then max_accept is UINT_MAX. It is not really
 	 * illimited, but it is probably enough.
@@ -708,6 +728,9 @@ void listener_accept(int fd)
 		struct sockaddr_storage addr;
 		socklen_t laddr = sizeof(addr);
 		unsigned int count;
+		struct in_addr ipv4_from;
+		in_port_t ipv4_from_port;
+
 		__decl_hathreads(unsigned long mask);
 
 		/* pre-increase the number of connections without going too far.
@@ -729,6 +752,7 @@ void listener_accept(int fd)
 		if (l->maxconn && next_conn == l->maxconn) {
 			/* we filled it, mark it full */
 			listener_full(l);
+			ACT_PRINTF("[%s] listener_full fd %d\n", __func__, fd);
 		}
 
 		if (p) {
@@ -787,8 +811,12 @@ void listener_accept(int fd)
 						  (errno == ENOSYS || errno == EINVAL || errno == EBADF) &&
 						  (accept4_broken = 1))))
 #endif
-			if ((cfd = accept(fd, (struct sockaddr *)&addr, &laddr)) != -1)
+			if ((cfd = accept(fd, (struct sockaddr *)&addr, &laddr)) != -1) {
+				ACT_PRINTF("[%s] accept cfd %d and fd %d\n", __func__, cfd, fd);
 				fcntl(cfd, F_SETFL, O_NONBLOCK);
+			}
+
+		ACT_PRINTF("[%s] accept4 cfd %d and fd %d\n", __func__, cfd, fd);
 
 		if (unlikely(cfd == -1)) {
 			switch (errno) {
@@ -839,6 +867,13 @@ void listener_accept(int fd)
 				goto stop;
 			}
 		}
+
+		ACT_PRINTF("[%s] errno cfd %d and fd %d\n", __func__, cfd, fd);
+
+		ipv4_from.s_addr = ntohl(((struct sockaddr_in *)&addr)->sin_addr.s_addr);
+		ipv4_from_port = ntohs(((struct sockaddr_in *)&addr)->sin_port);	
+
+		printf("From IP:%08x Port:%04x\n", ipv4_from.s_addr, ipv4_from_port);
 
 		/* we don't want to leak the FD upon reload if it's in the master */
 		if (unlikely(master == 1))
@@ -1026,6 +1061,9 @@ void listener_accept(int fd)
 	/* we've exhausted max_accept, so there is no need to poll again */
 stop:
 	fd_done_recv(fd);
+
+	ACT_PRINTF("[%s] fd_done_recv fd %d\n", __func__, fd);
+
 	goto end;
 
 transient_error:

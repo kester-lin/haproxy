@@ -134,7 +134,7 @@ REGPRM3 static void _do_poll(struct poller *p, int exp, int wake)
 			activity[tid].poll_drop++;
 			continue;
 		}
-
+		////printf("UPDATE: %d\n", fd);
 		_update_fd(fd);
 	}
 	fd_nbupdt = 0;
@@ -154,6 +154,8 @@ REGPRM3 static void _do_poll(struct poller *p, int exp, int wake)
 			continue;
 		if (!fdtab[fd].owner)
 			continue;
+
+		////printf("UPDATE List: %d\n", fd);	
 		_update_fd(fd);
 	}
 
@@ -219,6 +221,8 @@ REGPRM3 static void _do_poll(struct poller *p, int exp, int wake)
 			continue;
 		}
 		EPOLLPRINTF("Get Event (%d/%d) FD:%d Pipe:%d\n", count, status, fd, fd_pipe_cnt);	
+		//printf("Get Event (%d/%d) FD:%d Pipe:%d\n", count, status, fd, fd_pipe_cnt);
+
 
 		if (!(fdtab[fd].thread_mask & tid_bit)) {
 			/* FD has been migrated */

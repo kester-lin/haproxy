@@ -41,9 +41,9 @@ struct pipe {
   struct pipe *pipe_dup;
   struct pipe *pipe_ted; /* Only for Pipe Head */
 
-  struct pipe *pipe_nxt_last;
-  struct pipe *pipe_dup_last;
-  struct pipe *pipe_ted_last; /* Only for Pipe Head */
+  //struct pipe *pipe_nxt_last;
+  //struct pipe *pipe_dup_last;
+  //struct pipe *pipe_ted_last; /* Only for Pipe Head */
 
   unsigned long flush_id;
   u_int32_t flush_idx;
@@ -53,7 +53,9 @@ struct pipe {
   int out_fd;
   int trans_suspend;
   unsigned long transfer_cnt;
-  int transfered;  
+  int transfered; 
+
+  u_int32_t offset;
 #endif
 };
 

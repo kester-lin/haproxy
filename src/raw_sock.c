@@ -38,10 +38,15 @@
 #include <proto/raw_sock.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
-
 #include <types/global.h>
 #include <types/cuju_ft.h>
 #include <libs/soccr.h>
+
+#include <linux/sockios.h>
+#include <sys/ioctl.h>
+#include <assert.h>
+#include <pthread.h>
+
 
 #if defined(USE_LINUX_SPLICE)
 #include <common/splice.h>
@@ -81,6 +86,14 @@
 #else
 #define SHMFPRINTF(x...)
 #endif
+
+#define DEBUG_OUTGONIG_LIST 0
+#if DEBUG_OUTGONIG_LIST
+#define OUTL_PRINTF(x...) printf(x)
+#else
+#define OUTL_PRINTF(x...)
+#endif
+
 
 
 /* A pipe contains 16 segments max, and it's common to see segments of 1448 bytes
@@ -170,16 +183,20 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	//uint32_t epoch_id = 0;
 	//uint32_t flush_id = 0;
 
+	struct pipe *pipe_buf = NULL;
+
 	if (!conn_ctrl_ready(conn))
 		return 0;
 
 	if (!fd_recv_ready(conn->handle.fd))
 		return 0;
 
-	//printf("[%s] Enter ID:%d\n", __func__, pthread_self());
+	DSRPRINTF("[%s] FD: Enter ID:%d\n", __func__, conn->handle.fd);
+	//printf("[%s] FD: Enter ID:%d, Tid:%d Conn:%p\n", __func__, conn->handle.fd, tid, conn);
 
 	conn_refresh_polling_flags(conn);
 	errno = 0;
+
 
 #if ENABLE_CUJU_FT
 	pipe->in_fd = conn->handle.fd;
@@ -191,8 +208,10 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	 */
 	if (unlikely(!(fdtab[conn->handle.fd].ev & FD_POLL_IN))) {
 		/* stop here if we reached the end of data */
-		if ((fdtab[conn->handle.fd].ev & (FD_POLL_ERR|FD_POLL_HUP)) == FD_POLL_HUP)
+		if ((fdtab[conn->handle.fd].ev & (FD_POLL_ERR|FD_POLL_HUP)) == FD_POLL_HUP) {
+			printf("[%s] Goto out_read0 at %d\n", __func__, __LINE__);
 			goto out_read0;
+		}
 
 		/* report error on POLL_ERR before connection establishment */
 		if ((fdtab[conn->handle.fd].ev & FD_POLL_ERR) && (conn->flags & CO_FL_WAIT_L4_CONN)) {
@@ -210,7 +229,6 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 
 	//printf("NETLINK IP:%08x Port:%04x\n", ntohl(ipv4_to.s_addr), ntohs(ipv4_to_port));
 
-
 #if USING_SHM_IPC
 	if (!conn->shm_idx) {
 		conn->shm_idx = getshmid(ipv4_from.s_addr, ipv4_to.s_addr, &conn->direction);
@@ -219,6 +237,10 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 			SHMFPRINTF("IPC SHM ID is zero\n");
 		}
 	}
+
+	if (conn->direction == DIR_DEST_CLIENT) {
+		conn->lock_for_repair = 1;
+	}	
 
     SHMFPRINTF("IPC Epoch ID:%d\n", (ipt_target + conn->shm_idx)->epoch_id);
 	SHMFPRINTF("IPC Flush ID:%d\n", (ipt_target + conn->shm_idx)->flush_id);
@@ -233,6 +255,18 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 	}
 #endif
 
+#if 0
+	if (g_in_data > (g_out_data + FLOW_BUFFER)) {
+		/* alway stop reading until the pipe is flushed */
+		conn->flags |= CO_FL_WAIT_ROOM;
+		printf("[%s] Post Read\n", __func__);
+		goto post_read;
+	}
+	else {
+		//printf("[%s] Disable Post Read\n", __func__);
+	}
+#endif
+
 	while (count) {
 		if (count > MAX_SPLICE_AT_ONCE)
 			count = MAX_SPLICE_AT_ONCE;
@@ -241,6 +275,8 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 					 SPLICE_F_MOVE|SPLICE_F_NONBLOCK);
 
 		if (ret <= 0) {
+			//printf("[%s] RET(%d) <= 0\n", __func__, ret);
+
 			if (ret == 0)
 				goto out_read0;
 
@@ -280,6 +316,12 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 			break;
 		} /* ret <= 0 */
 
+		retval += ret;
+		pipe->data += ret;
+		count -= ret;
+
+		//printf("[%s] recv data pipe:%d\n", __func__, pipe->data);
+
 		/* Recv the Data tag epoch id*/
 		//if ((pipe->epoch_idx == 0) && (conn->direction == DIR_DEST_CLIENT)) {
 		if (conn->direction == DIR_DEST_CLIENT) {
@@ -289,12 +331,39 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 			pipe->epoch_id = guest_info->gctl_ipc.epoch_id;
 #endif
 			pipe->epoch_idx = 1; 
-			DSRPRINTF("%s: %p epochid:%lu\n", __func__, pipe, pipe->epoch_id);			
+			DSRPRINTF("[%s] %p epochid:%lu\n", __func__, pipe, pipe->epoch_id);	
+			ori_pipe_create++;
+
+#if USING_RQ_RECOVERY
+			pipe_buf = get_pipe();
+			//printf("[Main] Get Pipe: %p\n", pipe_buf);
+			ft_dup_pipe(pipe, pipe_buf, COPY_PIPE_COPY);
+			r_pipe_create++;
+
+			//printf("pthread_mutex_lock transmit\n");
+			pthread_mutex_lock(&conn->conn_mutex);
+
+			if (conn->run_recv_pipe == NULL) {
+				conn->run_recv_pipe = pipe_buf;
+				conn->run_recv_pipe_tail = pipe_buf;
+				//printf("Head:%p Tail:%p  (NULL)\n", conn->run_recv_pipe, conn->run_recv_pipe_tail);
+			}
+			else {
+				//printf("Head:%p Tail:%p  (NOT NULL)\n", conn->run_recv_pipe, conn->run_recv_pipe_tail);
+				conn->run_recv_pipe_tail->pipe_nxt = pipe_buf;
+				conn->run_recv_pipe_tail = conn->run_recv_pipe_tail->pipe_nxt;
+				conn->run_recv_pipe_tail->pipe_nxt = NULL;
+			}
+
+			conn->lock_for_repair = 0; 
+			//printf("pthread_mutex_unlock transmit\n");
+			pthread_mutex_unlock(&conn->conn_mutex);
+
+			//show_conn_in_pipe_run(conn);
+#endif
 		}
 
-		retval += ret;
-		pipe->data += ret;
-		count -= ret;
+		DSRPRINTF("[%s] end recv\n", __func__);
 
 		if (pipe->data >= SPLICE_FULL_HINT || ret >= global.tune.recv_enough) {
 			/* We've read enough of it for this time, let's stop before
@@ -306,10 +375,11 @@ int raw_sock_to_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pipe,
 		}
 	} /* while */
 
+post_read:
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && retval)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
- leave:
+leave:
 	if (retval > 0) {
 		/* we count the total bytes sent, and the send rate for 32-byte
 		 * blocks. The reason for the latter is that freq_ctr are
@@ -363,11 +433,10 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	struct pipe *pipe_idx = NULL;
 	int loop_cnt = 0;
 	struct proto_ipc *ipc_ptr = NULL;
+	int size;
 #endif
 
-	static struct libsoccr_sk_data sk_data;
-
-	//printf("Send ID %d\n", conn->handle.fd);
+	//printf("[%s] FD: Enter ID:%d, Tid:%d Conn:%p\n", __func__, conn->handle.fd, tid, conn);
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -377,7 +446,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 	conn_refresh_polling_flags(conn);
 
-	DSRPRINTF("%s: %p\n", __func__, pipe);
+	DSRPRINTF("[%s] FD %p\n", __func__, conn->handle.fd, pipe);
+
 
 #if 0
 	ipv4_to = ((struct sockaddr_in *)&conn->addr.to)->sin_addr;
@@ -438,19 +508,19 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 			if (pipe_buf == NULL) {
 				printf("Use FD count:%d !!!!!!!!\n", fd_pipe_cnt);
-#if PIPE_ASSERT
+				#if PIPE_ASSERT
 				assert(0);
-#else
+				#else
 				return 0;
-#endif			
+				#endif			
 			}
 			if (pipe_dup == NULL) {
 				printf("Use FD count:%d !!!!!!!!\n", fd_pipe_cnt);
-#if PIPE_ASSERT
+				#if PIPE_ASSERT
 				assert(0);
-#else
+				#else
 				return 0;
-#endif			
+				#endif			
 			}
 
 			ft_dup_pipe(pipe, pipe_buf, COPY_PIPE_COPY);
@@ -466,12 +536,12 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			pipe_buf = get_pipe();
 			
 			if (pipe_buf == NULL) {
-				DSRPRINTF("NULL pointer\n");
-#if PIPE_ASSERT
+				DSRPRINTF("Pipe is NULL pointer\n");
+				#if PIPE_ASSERT
 				assert(0);
-#else
+				#else
 				return 0;
-#endif			
+				#endif			
 			}
 
 			DSRPRINTF("Get Pipe:%p\n", pipe_buf);	
@@ -483,8 +553,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			conn->frontend_pipecnt++;
 		}
 		else {
-			printf("No Direction/ No FT mode\n");
-
+			printf("No Direction / No FT mode\n");
 		}
 	}
 	else {
@@ -495,9 +564,6 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 			goto after_send;
 		}
 	}
-
-	/* enable when enter FT */
-	////fdtab[conn->handle.fd].enable_migration = 1;
 
 	if (pipe->pipe_nxt) {
 		DSRPRINTF("Pipe Have NXT\n");
@@ -537,6 +603,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	else {
 		DSRPRINTF("Pipe Have NO NXT\n");		
 		pipe->pipe_nxt = pipe_buf;
+		pipe_buf->pipe_dup = pipe_dup;
 		//if (pipe->pipe_nxt)
 			//pipe->pipe_nxt->pipe_dup = pipe_dup;
 		conn->pipe_buf_tail = pipe->pipe_nxt;
@@ -556,10 +623,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	}
 
 	if (conn->direction == DIR_DEST_GUEST) {
-
 #if !ENABLE_LIST_ADD_TAIL   /* Add list tail method */ 
-		//curr_flush_id = ft_get_flushcnt();
-
 #if USING_SHM_IPC
 		curr_flush_id = (ipt_target + conn->shm_idx)->flush_id;
 #else		
@@ -592,7 +656,6 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #endif	
 		pipe_trans->flush_id = curr_flush_id;
 #endif	
-
 
 		transfer_cnt = 0;
 		transfer_data_cnt = 0;
@@ -632,9 +695,9 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				done += ret;
 				pipe_trans->data -= ret;
 				pipe_trans->transfer_cnt++;
-				pipe_trans->trans_suspend = 0;			
+				pipe_trans->trans_suspend = 0;
 				pipe_trans->transfered = 1;
-				
+
 				DSRPRINTF("Transfered\n");
 			}
 			else {
@@ -696,8 +759,6 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		}
 
 
-
-
 #if DEBUG_RS_LIST
 		pipe_loop = conn->sent_pipe ;
 		loop_cnt = 0;
@@ -731,18 +792,17 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 
 				pipe_idx = pipe_loop;
 				pipe_loop = pipe_loop->pipe_nxt;
-#if DEBUG_RS_LIST
+				
+				#if DEBUG_RS_LIST
 				if (pipe_idx) {
 					RSLPRINTF("Target: %p %lu FlushID:%d:%lu \n", pipe_idx, pipe_idx->flush_id, curr_flush_id, pipe_idx->flush_id);
 				}
-#endif
+				#endif
+
 				if (pipe_idx && pipe_idx->transfered && (curr_flush_id >= pipe_idx->flush_id)) {
 					RSLPRINTF("!!!Release: %p Loop:%d\n", pipe_idx, loop_cnt);
 					ft_clean_pipe(pipe_idx->pipe_dup);
-					////put_pipe(pipe_idx->pipe_dup);
-
 					ft_clean_pipe(pipe_idx);
-					////put_pipe(pipe_idx);
 
 					fd_pipe_cnt-=2; 
 
@@ -789,7 +849,6 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 		curr_flush_id = guest_info->gctl_ipc.flush_id;
 #endif
 
-
 		while (pipe_trans->data) {
 			//if (curr_flush_id > pipe_trans->epoch_id) {
 		    DSRPRINTF("curr_flush_id: %d\n", curr_flush_id);
@@ -829,6 +888,8 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				if(!ret)
 					assert(0);
 
+				ori_pipe_cancel++;
+
 				done += ret;
 				pipe_trans->data -= ret;
 				pipe_trans->transfer_cnt++;
@@ -843,6 +904,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 				break;
 			}
 
+			/* goto next */
 			if (pipe_trans->pipe_nxt != NULL) {
 #if ENABLE_LIST_ADD_TAIL	
 				struct pipe *pipe_release = pipe_trans;
@@ -860,7 +922,7 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 #else
 				pipe_trans = pipe_trans->pipe_nxt;
 #endif				
-				DSRPRINTF("Transfered then goto pipe_nxt\n");
+				OUTL_PRINTF("Transfered then goto pipe_nxt\n");
 			}
 			else {
 #if ENABLE_LIST_ADD_TAIL
@@ -874,15 +936,15 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 					pipe->pipe_nxt = NULL;
 				}				
 #endif
-				DSRPRINTF("DIR_DEST_CLIENT Break No Next\n");
+				OUTL_PRINTF("DIR_DEST_CLIENT Break No Next\n");
 				break;
 			}			
-		}
+		}  /* end of while(1) */ 
 
 #if !ENABLE_LIST_ADD_TAIL 
 		if (done) {
 			ft_release_pipe_by_transfer(pipe, &fd_pipe_cnt , &conn->frontend_pipecnt);
-		 }
+		}
 #endif		 
 
 //
@@ -937,6 +999,32 @@ int raw_sock_from_pipe(struct connection *conn, void *xprt_ctx, struct pipe *pip
 	
 after_send:
 
+#if 0
+	//DSRPRINTF("[%s] dump_tcp_conn_state_conn\n", __func__);
+	dump_tcp_conn_state_conn(conn->handle.fd, &test_sk, conn);
+
+/*
+	if (ioctl(conn->handle.fd, SIOCOUTQ, &size) == -1) {
+		printf("Unable to get size of snd queue");
+		return -1;
+	}
+
+	if (ioctl(conn->handle.fd, SIOCOUTQNSD, &size) == -1) {
+		printf("Unable to get size of unsent data");
+		return -1;
+	}
+*/
+	//DSRPRINTF("inq_len:  %08x \n", test_sk.sk_data.inq_len);
+	//DSRPRINTF("inq_seq:  %08x \n", test_sk.sk_data.inq_seq);
+	//printf("outq_len: %08x \n", test_sk.sk_data.outq_len);
+	printf("outq_seq: %08x \n", test_sk.sk_data.outq_seq);
+	//printf("unsq_len: %08x \n", test_sk.sk_data.unsq_len);
+	
+	//gettimeofday(&time_end_press, NULL);
+	//empty_queue_time = tv_to_us(&time_end_press) - tv_to_us(&time_pre_snapshot);
+	//printf ("[%s] Set idx to 0 %lu\n", __func__, empty_queue_time);
+
+#endif
 
 	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && done)
 		conn->flags &= ~CO_FL_WAIT_L4_CONN;
@@ -981,6 +1069,12 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 	struct in_addr ipv4_from;
 	in_port_t ipv4_from_port;
 	int nl_ret = 0;
+	u_int32_t sq_seq;
+	u_int32_t sq_len;
+	u_int32_t rq_ack;
+	u_int32_t rq_len;
+	int8_t ret_dump = 0;	
+
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
@@ -992,6 +1086,23 @@ static size_t raw_sock_to_buf(struct connection *conn, void *xprt_ctx, struct bu
 
 	conn_refresh_polling_flags(conn);
 	errno = 0;
+
+	printf("[%s] dump frontend server\n",__func__);
+
+	if(conn->conn_number_idx == 0) {
+		ret_dump = dump_tcp_number(conn->handle.fd, &sq_seq, &sq_len, &rq_ack, &rq_len);
+
+		if (ret_dump == 1) {
+			printf("[%s] Show FD state:%d ret:%d\n", __func__, conn->handle.fd, ret_dump);
+			printf("[%s] outq_seq: %u outq_length: %u\n", __func__, sq_seq, sq_len);
+			printf("[%s]  inq_seq: %u  inq_length: %u\n", __func__, rq_ack, rq_len);
+
+			conn->conn_seq = sq_seq;
+			conn->conn_ack = rq_ack;
+			conn->conn_number_idx = 1;
+		}
+	}
+
 
 	if (unlikely(!(fdtab[conn->handle.fd].ev & FD_POLL_IN))) {
 		/* stop here if we reached the end of data */
@@ -1166,12 +1277,33 @@ static size_t raw_sock_from_buf(struct connection *conn, void *xprt_ctx, const s
 	ssize_t ret;
 	size_t try, done;
 	int send_flag;
+	u_int32_t sq_seq;
+	u_int32_t sq_len;
+	u_int32_t rq_ack;
+	u_int32_t rq_len;
+	int8_t ret_dump = 0;	
 
 	if (!conn_ctrl_ready(conn))
 		return 0;
 
 	if (!fd_send_ready(conn->handle.fd))
 		return 0;
+
+	printf("[%s] dump backend server\n",__func__);
+
+	if(conn->conn_number_idx == 0) {
+		ret_dump = dump_tcp_number(conn->handle.fd, &sq_seq, &sq_len, &rq_ack, &rq_len);
+
+		if (ret_dump == 1) {
+			printf("[%s] Show FD state:%d ret:%d\n", __func__, conn->handle.fd, ret_dump);
+			printf("[%s] outq_seq: %u outq_length: %u\n", __func__, sq_seq, sq_len);
+			printf("[%s]  inq_seq: %u  inq_length: %u\n", __func__, rq_ack, rq_len);
+
+			conn->conn_seq = sq_seq;
+			conn->conn_ack = rq_ack;
+			conn->conn_number_idx = 1;
+		}
+	}
 
 	DSBUFPRINTF("[%s] Enter\n", __func__);
 

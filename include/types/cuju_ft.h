@@ -7,7 +7,26 @@
 #include <libs/soccr.h>
 #include <types/tcp_repair.h>
 
+
+extern u_int32_t fake_pipe_cnt;
 extern int pb_event;
+extern u_int32_t at_snapshot_time;
+extern u_int32_t cont_tx_idx;
+extern u_int32_t snapshot_tx_idx; 
+extern u_int32_t debug_test_flag;
+
+extern u_int32_t r_pipe_create;
+extern u_int32_t r_pipe_cancel;
+
+extern u_int32_t ori_pipe_create;
+extern u_int32_t ori_pipe_cancel;
+
+extern struct timeval time_pre_snapshot;
+extern struct timeval time_end_press;
+extern unsigned long empty_queue_time;
+
+
+extern pthread_mutex_t show_conn_mutex;
 
 #define IP_LENGTH 4
 #define DEFAULT_NIC_CNT 3
@@ -110,6 +129,9 @@ extern unsigned long time_in_sicsp_int;
 #define NL_TARGET_DEL_OUT 0xCCCC  
 
 
+#define CONN_IS_SERVER 1
+#define CONN_IS_CLIENT 0
+
 /* cuju_ft_mode */
 enum CUJU_FT_MODE
 {
@@ -126,6 +148,13 @@ enum CUJU_FT_MODE
     CUJU_FT_TRANSACTION_TRANSFER,
     CUJU_FT_TRANSACTION_SNAPSHOT, // 10
     CUJU_FT_TRANSACTION_RUN,
+    CUJU_FT_TRANSACTION_PRE_SNAPSHOT,
+};
+
+
+struct flush_work {
+    u_int32_t flush_id;
+    struct flush_work* fw_next;  
 };
 
 /* IPC PROTO */
@@ -188,10 +217,12 @@ struct vmsk_list
 {
     u_int32_t socket_id;
     struct connection *conn;
-    struct libsoccr_sk soccr;
+    //struct libsoccr_sk soccr;
     struct sk_data_info sk_data;
     struct list skid_list;
 };
+
+
 
 struct vm_list 
 {
@@ -201,6 +232,8 @@ struct vm_list
     u_int8_t fault_enable;
     u_int8_t failovered;
 
+    u_int8_t flush_idx;
+
     u_int32_t socket_count;
     pthread_mutex_t socket_metux;
 
@@ -209,6 +242,9 @@ struct vm_list
     struct list vm_list;
 
     struct snapshot_data ss_data;
+
+    //struct flush_work* fw_head;
+    //struct flush_work* fw_tail;
 };
 
 struct fo_list {
@@ -225,9 +261,31 @@ struct thread_data
     struct proto_ipc* ipt_base;
 };
 
+struct recov_pipe {
+	/* output pipe flush */
+	struct pipe* first_pipe;
+	u_int32_t first_byte;
+	struct pipe* last_pipe;
+	u_int32_t last_byte;
+	u_int32_t first_number;
+	u_int8_t first_idx;
+	u_int32_t last_number;
+	u_int8_t last_idx;	
+
+	u_int32_t tr_count;
+	u_int32_t tr_length;
+
+
+    u_int32_t remainder;
+    u_int32_t offset;
+    struct recov_pipe* rp_next;  
+};
+
+
+
 extern struct vm_list vm_head;
 
-
+int restore_one_tcp_conn(int fd, struct sk_data_info *data, struct vmsk_list *target_sk);
 
 unsigned long ft_get_flushcnt();
 unsigned long ft_get_epochcnt();
@@ -247,7 +305,7 @@ struct guest_ip_list* check_guestip(u_int32_t source, u_int32_t dest, uint8_t* d
 u_int8_t add_ft_fd(u_int16_t ftfd);
 u_int16_t get_ft_fd(void);
 __u64 tv_to_us(const struct timeval* tv);
-uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t *dir);
+u_int16_t getshmid(u_int32_t source, u_int32_t dest, u_int8_t *dir);
 
 
 struct vm_list* target_in_table(struct list *table, u_int32_t vm_ip, u_int32_t socket_id);
@@ -266,6 +324,27 @@ void ipc_snapshot_unlock();
 void ipc_snapshot_trylock();
 void ipc_snapshot_tryunlock();
 
+int dump_tcp_conn_state_conn_zerocpy(int fd, struct sk_data_info *sk_data,
+			    				     struct connection *conn, struct vm_list* target_vm);
+
+u_int8_t show_conn_in_pipe(struct connection *conn);
+u_int8_t show_conn_in_pipe_end(struct connection *conn);
+u_int8_t show_conn_in_pipe_run(struct connection *conn);
+int add_vmlist_by_conn(struct connection* conn, int cli_srv);
+
+struct recov_pipe* rp_create();
+u_int8_t rp_delete(struct recov_pipe* ptr);
+
+u_int8_t fw_insert(struct connection *conn, u_int32_t flush_id);
+
+u_int8_t add_to_flush_pipe_tail(struct connection *conn);
+
+u_int8_t release_recovery_pipe_by_flush(struct connection *conn,
+										struct recov_pipe* start, struct recov_pipe* end, 
+										struct pipe* head, struct pipe* tail,
+										u_int32_t *no_next_idx);
+                                        
+void show_recovery_pipe_list(struct recov_pipe * head);
 #endif
 
 #endif

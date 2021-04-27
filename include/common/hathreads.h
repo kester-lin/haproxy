@@ -912,10 +912,15 @@ static inline void __spin_lock(enum lock_label lbl, struct ha_spinlock *l,
 {
 	uint64_t start_time;
 
+#if 1
+	//printf("OWNER LOCK:owner:%08x  Tid_bit:%08x\n", l->info.owner, tid_bit);
+
 	if (unlikely(l->info.owner & tid_bit)) {
 		/* the thread is already owning the lock */
+		printf("ABORT\n");
 		abort();
 	}
+#endif
 
 	HA_ATOMIC_OR(&l->info.waiters, tid_bit);
 

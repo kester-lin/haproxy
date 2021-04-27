@@ -41,6 +41,16 @@
 #include <proto/stream.h>
 #include <proto/task.h>
 
+
+#define DEBUG_CHANNEL 0
+#if DEBUG_CHANNEL
+#define CHAN_PRINTF(x...) printf(x)
+#else
+#define CHAN_PRINTF(x...)
+#endif
+
+
+
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
 int init_channel();
 
@@ -119,18 +129,24 @@ static inline size_t c_room(const struct channel *c)
 /* c_empty() : returns a boolean indicating if the channel's buffer is empty */
 static inline size_t c_empty(const struct channel *c)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	return !c_data(c);
 }
 
 /* c_full() : returns a boolean indicating if the channel's buffer is full */
 static inline size_t c_full(const struct channel *c)
 {
+	CHAN_PRINTF("[%s] at %d\n", __func__, __LINE__);
+
 	return !c_room(c);
 }
 
 /* co_data() : returns the amount of output data in the channel's buffer */
 static inline size_t co_data(const struct channel *c)
 {
+	CHAN_PRINTF("[%s] size:%d \n", __func__, c->output);
+
 	return c->output;
 }
 

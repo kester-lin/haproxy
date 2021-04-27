@@ -203,6 +203,7 @@ struct channel {
 	int rto;                        /* read timeout, in ticks */
 	int wto;                        /* write timeout, in ticks */
 	int analyse_exp;                /* expiration date for current analysers (if set) */
+  
 };
 
 

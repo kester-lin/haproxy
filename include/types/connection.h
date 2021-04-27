@@ -409,6 +409,8 @@ struct conn_stream {
 	void *data;                          /* pointer to upper layer's entity (eg: stream interface) */
 	const struct data_cb *data_cb;       /* data layer callbacks. Must be set before xprt->init() */
 	void *ctx;                           /* mux-specific context */
+
+	unsigned long long out_data;
 };
 
 /*
@@ -479,7 +481,90 @@ struct connection {
 	struct pipe* sent_pipe_tail;
 	uint32_t last_flush_id; 
 
-	uint16_t shm_idx;
+
+	struct pipe* run_recv_pipe;
+	struct pipe* run_recv_pipe_tail;
+	struct pipe* recv_pipe;
+	struct pipe* recv_pipe_tail;
+
+	u_int16_t remainder; 
+	u_int16_t shm_idx;
+
+	u_int8_t  conn_number_idx;
+
+	u_int8_t lock_for_repair;
+	pthread_mutex_t conn_mutex;
+
+	u_int32_t conn_seq;			/* Origin Value */
+	u_int32_t conn_ack;         /* Origin Value */
+
+	u_int32_t last_conn_seq;    /* update after flush  */
+	u_int32_t last_conn_ack;    /* update after flush  */
+	u_int32_t now_conn_seq;	    /* in snapshot time */
+	u_int32_t now_conn_ack;     /* in snapshot time */
+
+	u_int64_t conn_seq_counted;	    /* in snapshot time */
+	u_int64_t conn_ack_counted;     /* in snapshot time */
+
+
+#if 0
+	/* output pipe snapshot */
+	struct pipe* out_pipe_first_pipe;
+	u_int32_t out_pipe_first_byte;
+	struct pipe* out_pipe_last_pipe;
+	u_int32_t out_pipe_last_byte;
+	u_int32_t out_pipe_first_number;
+	u_int8_t out_pipe_first_idx;
+	u_int32_t out_pipe_last_number;
+	u_int8_t out_pipe_last_idx;	
+
+	/* output pipe flush */
+	struct pipe* opf_first_pipe;
+	u_int32_t opf_first_byte;
+	struct pipe* opf_last_pipe;
+	u_int32_t opf_last_byte;
+	u_int32_t opf_first_number;
+	u_int8_t opf_first_idx;
+	u_int32_t opf_last_number;
+	u_int8_t opf_last_idx;	
+
+	/* in pipe snapshot */
+	struct pipe* in_pipe_first_pipe;
+	u_int32_t in_pipe_first_byte;
+	struct pipe* in_pipe_last_pipe;
+	u_int32_t in_pipe_last_byte;
+
+	u_int32_t in_pipe_first_number;
+	u_int8_t in_pipe_first_idx;
+	u_int32_t in_pipe_last_number;
+	u_int8_t in_pipe_last_idx;	
+	u_int32_t ips_tr_count;
+	u_int32_t ips_length;
+
+	/* in pipe flush */
+	struct pipe* ipf_first_pipe;
+	u_int32_t ipf_first_byte;
+	struct pipe* ipf_last_pipe;
+	u_int32_t ipf_last_byte;
+
+	u_int32_t ipf_first_number;
+	u_int8_t ipf_first_idx;
+	u_int32_t ipf_last_number;
+	u_int8_t ipf_last_idx;	
+	u_int32_t ipf_tr_count;
+	u_int32_t ipf_length;
+#endif	
+
+#if 1
+	struct recov_pipe * flush_pipe;
+	struct recov_pipe * flush_pipe_tail;
+	struct recov_pipe * snapshot_pipe;
+	struct recov_pipe * snapshot_pipe_tail;
+	struct flush_work * fw_head;
+	struct flush_work * fw_tail;
+#endif
+
+
 #endif
 };
 enum dir_mode {

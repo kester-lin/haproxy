@@ -79,13 +79,15 @@ struct pipe *get_pipe()
 	ret->out_fd = 0;
 	ret->trans_suspend = 0;
 	ret->transfer_cnt = 0;
-	ret->transfered = 0;  
+	ret->transfered = 0; 
+	ret->offset = 0; 
 #endif
 
  out:
 	HA_SPIN_UNLOCK(PIPES_LOCK, &pipes_lock);
-#if 0
+#if 1
 	if (ret == NULL) {
+		printf("NO PIPE RESOURCE\n");
 		assert(0);
 	}
 #endif

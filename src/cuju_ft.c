@@ -19,7 +19,10 @@
 #include <types/tcp_repair.h>
 #include <common/libnet-structures.h>
 #include <common/libnet-macros.h>
+#include <common/hathreads.h>
 #include <pthread.h>
+
+u_int32_t rqr_result = 0;
 
 #ifdef DEBUG_FULL
 #include <assert.h>
@@ -31,16 +34,6 @@
 #if FAKE_CUJU_ID
 u_int32_t guest_ip_db = 0xd47ea8c0;
 #else
-
-//u_int32_t guest_ip_db = 0xd47ea8c0;
-
-/*
-struct guest_ip_list
-{
-    u_int32_t guest_ip;
-    struct list list;
-};
-*/
 //static struct list pools = LIST_HEAD_INIT(pools);
 static struct guest_ip_list gip_list = {
 	.list = LIST_HEAD_INIT(gip_list.list)
@@ -82,9 +75,33 @@ static struct guest_ip_list gip_list = {
 #define IPC_TH_PRINTF(x...)
 #endif
 
+/* RECV QUEUE RECOVERY */
+#define DEBUG_RQR 0
+#if DEBUG_RQR
+#define RQR_PRINTF(x...) printf(x)
+#else
+#define RQR_PRINTF(x...)
+#endif
+
+
+#define DEBUG_RQR_FLUSH 0
+#if DEBUG_RQR_FLUSH
+#define RQRF_PRINTF(x...) printf(x)
+#else
+#define RQRF_PRINTF(x...)
+#endif
+
+
 #define SUPPORT_VM_CNT 10
 
+u_int32_t fake_pipe_cnt = 0;
 u_int16_t fd_list_migration = 0;
+
+u_int32_t r_pipe_create = 0;
+u_int32_t r_pipe_cancel = 0;
+
+u_int32_t ori_pipe_create = 0;
+u_int32_t ori_pipe_cancel = 0;
 
 static struct ft_fd_list ftfd_list = {
 	.list = LIST_HEAD_INIT(ftfd_list.list)
@@ -94,7 +111,6 @@ u_int32_t fd_pipe_cnt = 0;
 u_int16_t empty_pipe = 0;
 u_int16_t empty_pbuffer = 0;
 u_int16_t last_error = 0;
-
 u_int16_t ipc_fd = 0;
 
 struct gctl_ipc gctl_ipc;
@@ -108,6 +124,17 @@ int nl_sock_fd = 0;
 struct msghdr nl_msg;
 struct netlink_ipc nl_ipc;
 struct nlmsghdr *nlh = NULL;
+
+u_int32_t at_snapshot_time = 0; 
+u_int32_t cont_tx_idx = 0; 
+u_int32_t snapshot_tx_idx = 0; 
+u_int32_t debug_test_flag = 0;
+
+u_int8_t has_send_event = 0;
+
+struct timeval time_pre_snapshot;
+struct timeval time_end_press;
+unsigned long empty_queue_time;
 
 #if ENABLE_TIME_MEASURE_EPOLL
 struct timeval time_tepoll;
@@ -159,6 +186,48 @@ unsigned long time_in_sicsp_int = 0;
 
 #endif
 
+struct recov_pipe* rp_create() 
+{
+	struct recov_pipe* ptr = malloc(sizeof(struct recov_pipe));
+
+	ptr->first_pipe = NULL;
+	ptr->first_byte = 0;
+	ptr->last_pipe = NULL;
+	ptr->last_byte = 0;
+	ptr->first_number = 0;
+	ptr->first_idx = 0;
+	ptr->last_number = 0;
+	ptr->last_idx = 0;	
+
+	ptr->remainder = 0;
+    ptr->offset = 0;
+	ptr->rp_next = NULL;
+
+	return ptr;
+}
+
+u_int8_t rp_delete(struct recov_pipe* ptr) 
+{
+	if (ptr->first_pipe)
+		ft_clean_pipe(ptr->first_pipe);
+
+	if (ptr->last_pipe)
+		ft_clean_pipe(ptr->last_pipe);
+
+	free(ptr);
+
+	return 1;
+}
+
+
+unsigned long __tv_us_elapsed(const struct timeval *tv1, const struct timeval *tv2)
+{
+	unsigned long ret;
+
+	ret  = ((signed long)(tv2->tv_sec  - tv1->tv_sec))  * 1000 * 1000;
+	ret += ((signed long)(tv2->tv_usec - tv1->tv_usec));
+	return ret;
+}
 
 #if FAKE_CUJU_ID
 /* FAKE */
@@ -319,10 +388,10 @@ int ft_close_pipe(struct pipe *pipe, int *pipe_cnt)
 			pipe_prev->pipe_nxt = pipe_trace->pipe_nxt;
 
 			ft_clean_pipe(pipe_trace->pipe_dup);
-			put_pipe(pipe_trace->pipe_dup);
+			//put_pipe(pipe_trace->pipe_dup);
 
 			ft_clean_pipe(pipe_trace);
-			put_pipe(pipe_trace);
+			//put_pipe(pipe_trace);
 			(*pipe_cnt) -= 2;
 			printf("release pipe 2 total:%d\n", (*pipe_cnt));
 
@@ -370,11 +439,11 @@ int ft_release_pipe_by_flush(struct pipe *pipe, uint32_t flush_id,
 
 				if (pipe_trace->pipe_dup) {
 					ft_clean_pipe(pipe_trace->pipe_dup);
-					put_pipe(pipe_trace->pipe_dup);
+					//put_pipe(pipe_trace->pipe_dup);
 				}
 
 				ft_clean_pipe(pipe_trace);
-				put_pipe(pipe_trace);
+				//put_pipe(pipe_trace);
 
 				(*pipe_cnt) -= 2;
 				(*total_pipe_cnt) -= 2;
@@ -434,7 +503,7 @@ int ft_release_pipe_by_transfer(struct pipe *pipe, uint16_t *total_pipe_cnt,
 				//put_pipe(pipe_trace->pipe_dup);
 
 				ft_clean_pipe(pipe_trace);
-				put_pipe(pipe_trace);
+				//put_pipe(pipe_trace);
 
 				printf("release pipe 1 total:%d\n", (*total_pipe_cnt));
 
@@ -472,6 +541,7 @@ void ft_clean_pipe(struct pipe *pipe)
 
 		put_pipe(pipe);
 	}
+	pipe = NULL;
 }
 
 int cuju_process(struct conn_stream *cs)
@@ -524,7 +594,7 @@ int cuju_process(struct conn_stream *cs)
 
 		ipc_fd = conn->handle.fd;
 
-		printf("[%s]FD:%d!!!!!\n", __func__, ipc_fd);
+		printf("[%s] FD:%d!!!!!\n", __func__, ipc_fd);
 
 		if (ipc_ptr->nic_count) {
 			for (int idx = 0; idx < ipc_ptr->nic_count; idx++) {
@@ -791,7 +861,7 @@ u_int8_t add_ft_fd(u_int16_t ftfd)
 	return 1;
 }
 
-uint16_t getshmid(u_int32_t source, u_int32_t dest, uint8_t *dir)
+u_int16_t getshmid(u_int32_t source, u_int32_t dest, u_int8_t *dir)
 {
 	struct proto_ipc *ptr = ipt_target;
 	unsigned int idx = 0;
@@ -913,7 +983,7 @@ struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t soc
 						}
 					}
 
-					target_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+					target_sk = (struct vmsk_list *)calloc(1, sizeof(struct vmsk_list));
 
 					if (target_sk == NULL) {
 						return NULL;
@@ -921,6 +991,7 @@ struct vm_list *add_vm_target(struct list *table, u_int32_t vm_ip, u_int32_t soc
 					target_sk->socket_id = socket_id;
 					target->socket_count++;
 					target_sk->conn = conn;
+					////target_sk->sk_data.libsoccr_sk = NULL;
 
 					LIST_ADDQ(&target->skid_head.skid_list, &target_sk->skid_list);
 					pthread_mutex_unlock(&(target->socket_metux));	
@@ -944,7 +1015,7 @@ create_newvm:
 		if (socket_id) {
 			pthread_mutex_lock(&(target->socket_metux));
 
-			target_sk = (struct vmsk_list *)malloc(sizeof(struct vmsk_list));
+			target_sk = (struct vmsk_list *)calloc(1, sizeof(struct vmsk_list));
 
 			if (target_sk == NULL) {
 				free(target);
@@ -954,8 +1025,11 @@ create_newvm:
 			target_sk->socket_id = socket_id;
 			target_sk->conn = conn;
 			target->socket_count++;
+			////target_sk->sk_data.libsoccr_sk = NULL;
+			
 			target->skid_head.skid_list.n = &target->skid_head.skid_list;
 			target->skid_head.skid_list.p = &target->skid_head.skid_list;
+
 			//target->skid_head.skid_list = LIST_HEAD_INIT(&new_vm->skid_head.skid_list);
 			LIST_ADDQ(&target->skid_head.skid_list, &target_sk->skid_list);
 		} else {
@@ -1102,7 +1176,7 @@ void *ipc_handler(void)
 	int addrlen = sizeof(clientInfo);
 	pthread_t thread_id;
 	struct thread_data thread_data;
-
+	int one = 1;
 #if USING_NETLINK
 	int netlink_sock_fd = 0;
 	struct sockaddr_nl src_addr;
@@ -1115,14 +1189,14 @@ void *ipc_handler(void)
 			0666 | IPC_CREAT);
 
 	if (shm_id == -1) {
-		perror("shmget error\n");
+		perror("ipc_handler shmget error\n");
 		exit(EXIT_FAILURE);
 	}
 
 	/* attach shared memory */
 	ipt_target = (struct proto_ipc *)shmat(shm_id, (void *)0, 0);
 	if (ipt_target == (void *) - 1) {
-		perror("shmget error");
+		perror("ipc_handler shmat error");
 		exit(EXIT_FAILURE);
 	}
 
@@ -1166,13 +1240,21 @@ void *ipc_handler(void)
 		perror("Fail to create a socket.\n");
 	}
 
+	setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *) &one, sizeof(one));
+
 	//socket的連線
 	bzero(&serverInfo, sizeof(serverInfo));
 
 	serverInfo.sin_family = PF_INET;
 	serverInfo.sin_addr.s_addr = INADDR_ANY;
 	serverInfo.sin_port = htons(1200);
-
+	
+	
+	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, (char *) &one, sizeof(one)) == -1) {
+		perror("setsockopt(SO_REUSEPORT)\n");
+		goto func_error;
+	}
+	
 	bind(sockfd, (struct sockaddr *)&serverInfo, sizeof(serverInfo));
 
 	listen(sockfd, 5);
@@ -1199,7 +1281,7 @@ void *ipc_handler(void)
 		printf("Thread IPT base address %p\n", ipt_target);
 
 		if (pthread_create(&thread_id, NULL, ipc_connection_handler, (void *)&thread_data) < 0) {
-			perror("could not create thread");
+			perror("could not create thread\n");
 			goto func_error;
 		}
 
@@ -1253,50 +1335,16 @@ void *ipc_connection_handler(void *socket_desc)
 	struct vm_list *target_vm = NULL;
 	pthread_t thread_snapshot;
 
-#if USING_NETLINK
-	int sock_fd = ((struct thread_data *)socket_desc)->netlink_sock;
-	struct sockaddr_nl dest_addr;
-	struct nlmsghdr *nlh = NULL;
-	struct iovec iov;
-	struct msghdr msg;
-	struct netlink_ipc nl_ipc;
+	printf("[%s] tid_bit %08x\n",__func__, tid_bit);
+		//global.nbthread
 
-	memset(&dest_addr, 0, sizeof(struct sockaddr_nl));
-	dest_addr.nl_family = AF_NETLINK;
-	dest_addr.nl_pid = 0;
-	dest_addr.nl_groups = 0;
-
-	nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
-	if (nlh == NULL) {
-		perror("malloc nlmsghdr failed!\n");
-		close(sock_fd);
-		return 0;
+	if ( global.nbthread < 31) {
+		ha_set_tid(31);
 	}
-	memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
-	nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
-	nlh->nlmsg_pid = getpid();
-	nlh->nlmsg_flags = 0;
 
-	iov.iov_base = (void *)nlh;
-	iov.iov_len = NLMSG_SPACE(MAX_PAYLOAD);
+	printf("[%s] tid_bit %08x\n",__func__, tid_bit);
 
-	memset(&msg, 0, sizeof(struct msghdr));
-	msg.msg_name = (void *)&dest_addr;
-	msg.msg_namelen = sizeof(struct sockaddr_nl);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-
-	MSG_PRINTF("[%s]\n", __func__);
-#endif
-	//if (shm_idx != 0) {
-	//    ipt_addr = ((struct thread_data*)socket_desc)->ipt_base + shm_idx;
-	//}
-
-	while (read_size = recv(sock, client_message, 2000, 0)) {
-		//end of string marker
-		//client_message[read_size] = '\0';
-		printf("Size:%d\n", read_size);
-
+	while (read_size = recv(sock, client_message, 148, 0)) {
 #if 0  //DEBUG_IPC
 		printf("Size:%d\n", read_size);
 
@@ -1315,13 +1363,18 @@ void *ipc_connection_handler(void *socket_desc)
 		IPC_PRINTF("shm_idx:%d p_shm_idx:%d True:%d\n", shm_idx, primary_shm_idx,
 			   !LIST_ISEMPTY(&fo_head.fo_list));
 
-		//if (shm_idx == 0 && primary_shm_idx == 0 && !list_empty(&failover_list)) {
-
 		base_nic = ipc_ptr->nic[0];
 
-		/* this may occur after CUJU_FT_TRANSACTION_SNAPSHOT */
+		if (ipc_ptr->cuju_ft_mode != CUJU_FT_INIT) {
+		
+			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
+			if (!target_vm) {
+				printf("target_vm is NULL\n");
+				assert(0);
+			}
+		}
 
-		IPC_PRINTF("[%s] POP_FAILOVER %08x\n", __func__, ipc_ptr->nic[0]);
+		//IPC_PRINTF("[%s] POP_FAILOVER %08x\n", __func__, ipc_ptr->nic[0]);
 		fo_temp = pop_failover((ipc_ptr->nic[0]));
 
 		if (fo_temp != NULL) {
@@ -1330,12 +1383,6 @@ void *ipc_connection_handler(void *socket_desc)
 			primary_shm_idx = fo_temp->socket_id;
 			ipt_addr = ((struct thread_data *)socket_desc)->ipt_base + primary_shm_idx;
 			free(fo_temp);
-
-			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
-			if (!target_vm) {
-				printf("ERROR\n");
-				assert(0);
-			}
 
 			target_vm->failovered = 1;
 			IPC_PRINTF("[FT_FAILOVER] vm_data: %p\n", target_vm);
@@ -1369,27 +1416,43 @@ void *ipc_connection_handler(void *socket_desc)
 		}
 
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_SNAPSHOT) {
-			IPC_PRINTF("FT mode is CUJU_FT_TRANSACTION_SNAPSHOT\n");
-			//printf("FT mode is SNAPSHOT from %08x\n", ipc_ptr->nic[0]);
-			//pthread_cond_signal();
-
-			target_vm = vm_in_table(&vm_head.vm_list, base_nic);
-			if (!target_vm) {
-				printf("target_vm is NULL\n");
-				assert(0);
-			}
-
 			target_vm->nic[1]++;
-			IPC_PRINTF("[FT_SNAPSHOT]vm_data: %p\n", target_vm);
+			//IPC_PRINTF("[FT_SNAPSHOT]vm_data: %p\n", target_vm);
 
 			pthread_cond_signal(&target_vm->ss_data.cond);
-			IPC_PRINTF("CUJU_FT_TRANSACTION_SNAPSHOT End\n");
+			//IPC_PRINTF("CUJU_FT_TRANSACTION_SNAPSHOT End\n");
 		}
+
+		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_FLUSH_OUTPUT) {
+			target_vm->flush_idx = 1;
+
+			//target_vm->nic[2]++;
+			//pthread_cond_signal(&target_vm->ss_data.cond);
+		
+			ipc_add_flush_work(target_vm, ipt_addr->flush_id);
+
+			//fw_insert(target_vm->fw_head, target_vm->fw_tail, ipc_ptr->epoch_id);
+		}
+
+#if 0 //no used
+		if (ipc_ptr->cuju_ft_mode == CUJU_FT_TRANSACTION_PRE_SNAPSHOT) {
+			IPC_PRINTF("FT mode is CUJU_FT_TRANSACTION_PRE_SNAPSHOT\n");
+			
+			if (target_vm) {
+				target_vm->pre_snapshot_idx = 1;
+
+				pthread_cond_signal(&target_vm->ss_data.cond);
+			}
+
+			gettimeofday(&time_pre_snapshot, NULL);
+
+
+			IPC_PRINTF("CUJU_FT_TRANSACTION_PRE_SNAPSHOT End\n");
+		}	
+#endif 
 
 #if USING_SNAPSHOT_THREAD
 		if (ipc_ptr->cuju_ft_mode == CUJU_FT_INIT) {
-
-			
 			struct vm_list *vm_data = NULL;
 
 			IPC_PRINTF("FT mode is CUJU_FT_INIT from %08x\n", base_nic);
@@ -1413,24 +1476,6 @@ void *ipc_connection_handler(void *socket_desc)
 		}
 #endif
 
-#if USING_NETLINK
-		nl_ipc.epoch_id = ipc_ptr->epoch_id;
-		nl_ipc.flush_id = ipc_ptr->flush_id;
-		nl_ipc.cuju_ft_mode = ipc_ptr->cuju_ft_mode;
-		nl_ipc.nic_count = ipc_ptr->nic_count;
-
-		memcpy(NLMSG_DATA(nlh), &nl_ipc, sizeof(nl_ipc));
-
-		//strcpy(NLMSG_DATA(nlh), (void *)&nl_ipc);
-
-		if (sendmsg(sock_fd, &msg, 0) < 0) {
-			perror("send msg failed!\n");
-			free(nlh);
-			close(sock_fd);
-			goto error_handle;
-		}
-#endif
-
 		//MSG_PRINTF("NIC Cnt:%d\n", ipc_ptr->nic_count);
 		//MSG_PRINTF("CONN Cnt:%d\n", ipc_ptr->conn_count);
 		//MSG_PRINTF("IP:%08x\n", *(u_int32_t*)ipc_ptr->nic[0]);
@@ -1445,7 +1490,6 @@ void *ipc_connection_handler(void *socket_desc)
 			}
 		}
 #endif
-
 		//clear the message buffer
 		memset(client_message, 0, sizeof(struct proto_ipc));
 		read_size = 0;
@@ -1487,26 +1531,68 @@ error_handle:
 }
 #if USING_SNAPSHOT_THREAD
 
+int ipc_add_flush_work(struct vm_list *vm_target, u_int32_t flush_id)
+{
+	struct vm_list *target;
+	struct vmsk_list *target_sk;
+
+	IPC_TH_PRINTF("========================= FLUSH =========================\n");
+	//printf("========================= FLUSH =========================\n");
+
+	if (vm_target->socket_count) {
+		IPC_TH_PRINTF("[%s] IP:%d:\n", __func__, vm_target->vm_ip);
+
+		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
+			
+			if (target_sk->conn->direction == DIR_DEST_CLIENT) {
+				IPC_TH_PRINTF("[%s] Socket ID:%08x\n", __func__, target_sk->socket_id);
+
+				IPC_TH_PRINTF("[%s]A: Head:%p Tail:%p\n", __func__, target_sk->conn->fw_head, target_sk->conn->fw_tail);
+
+				fw_insert(target_sk->conn, flush_id);
+
+				IPC_TH_PRINTF("[%s]B: Head:%p Tail:%p\n", __func__, target_sk->conn->fw_head, target_sk->conn->fw_tail);
+
+			}
+		}
+	}
+
+	IPC_TH_PRINTF("========================= F#END =========================\n");
+	//printf("========================= F#END =========================\n");
+
+	return 0;
+}
+
 int ipc_dump_tcp(struct vm_list *vm_target)
 {
 	struct vm_list *target;
 	struct vmsk_list *target_sk;
 
 	IPC_TH_PRINTF("========================= START =========================\n");
+	//printf("========================= START =========================\n");
 
 	if (vm_target->socket_count) {
-		printf("IP:%08x:\n", vm_target->vm_ip);
+		////printf("IP:%08x:\n", vm_target->vm_ip);
 
 		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
-			printf("\tSocket ID:%08x\n", target_sk->socket_id);
+			////printf("\tSocket ID:%08x\n", target_sk->socket_id);
 
-			dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data),
-						 target_sk->conn);
+			//fd_cant_send(target_sk->socket_id);
 
+			//fdtab[target_sk->socket_id].ev |= FD_POLL_OUT;
+
+			//dump_tcp_conn_state_conn(target_sk->socket_id, &(target_sk->sk_data),
+			//			 target_sk->conn);
+
+			dump_tcp_conn_state_conn_zerocpy(target_sk->socket_id, &(target_sk->sk_data),
+						 					 target_sk->conn, target);
+
+			//fd_may_send(target_sk->socket_id);
 		}
 	}
 
-	IPC_TH_PRINTF("========================= END =========================\n");
+	IPC_TH_PRINTF("========================= S#END =========================\n");
+	//printf("========================= S#END =========================\n");
 
 	return 0;
 }
@@ -1516,7 +1602,7 @@ int ipc_restore_tcp(struct vm_list *vm_target)
 	struct vm_list *target;
 	struct vmsk_list *target_sk;
 
-	IPC_TH_PRINTF("========================= START =========================\n");
+	IPC_TH_PRINTF("========================= RESTO =========================\n");
 
 	if (vm_target->socket_count) {
 		printf("IP:%08x:\n", vm_target->vm_ip);
@@ -1524,14 +1610,189 @@ int ipc_restore_tcp(struct vm_list *vm_target)
 		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
 			printf("\tSocket ID:%08x\n", target_sk->socket_id);
 
-			restore_one_tcp_conn(target_sk->socket_id, &(target_sk->sk_data));
+			restore_one_tcp_conn(target_sk->socket_id, &(target_sk->sk_data), target_sk);
 		}
 	}
 
-	IPC_TH_PRINTF("========================= END =========================\n");
+	IPC_TH_PRINTF("========================= R#END =========================\n");
 
 	return 0;
 }
+#define MAX_EPOCH_SIZE 10000000
+u_int32_t calculate_diff(u_int32_t first, u_int32_t second)
+{
+	if (second >= first) {
+
+		return second - first;
+	}
+	else {
+
+		return 0xFFFFFFFF - first + second ;
+	}
+}
+
+pthread_mutex_t show_conn_mutex;
+
+u_int8_t show_conn_in_pipe(struct connection *conn)
+{
+#if DEBUG_RQR	
+
+	struct pipe* pipe_head = NULL;
+	struct pipe* pipe_next = NULL;
+
+	u_int32_t idx = 0;
+
+	//pthread_mutex_lock(&show_conn_mutex);
+
+	pipe_head = conn->recv_pipe;
+
+	printf("[%s] Conn:%p Recv Pipe: %p \n", __func__, conn, pipe_head);
+	
+	while(1) {
+		if (pipe_head == NULL)
+			break; 
+
+		printf("%p(%04d) ->", pipe_head, pipe_head->data);
+
+		if (idx % 8 == 7)
+			printf("\n");
+
+		pipe_head = pipe_head->pipe_nxt;
+
+		idx++;	
+	}
+
+	printf("[%s] Recv Pipe End\n", __func__);
+
+	//pthread_mutex_unlock(&show_conn_mutex);
+#endif
+
+	return 0;
+}
+
+u_int8_t show_conn_in_pipe_end(struct connection *conn)
+{
+#if DEBUG_RQR	
+
+	struct pipe* pipe_head = NULL;
+	struct pipe* pipe_next = NULL;
+
+	u_int32_t idx = 0;
+
+	//pthread_mutex_lock(&show_conn_mutex);
+
+	pipe_head = conn->recv_pipe;
+
+	printf("[%s] [End] Conn:%p Recv Pipe: %p \n", __func__, conn, pipe_head);
+	
+	while(1) {
+		if (pipe_head == NULL)
+			break; 
+
+		printf("%p(%04d) ->", pipe_head, pipe_head->data);
+
+		if (idx % 8 == 7)
+			printf("\n");
+
+		pipe_head = pipe_head->pipe_nxt;
+
+		idx++;	
+	}
+
+	printf("[%s] [End] Recv Pipe End\n", __func__);
+
+	//pthread_mutex_unlock(&show_conn_mutex);
+#endif
+
+	return 0;
+}
+
+u_int8_t show_conn_in_pipe_run(struct connection *conn)
+{
+#if DEBUG_RQR		
+	struct pipe* pipe_head = NULL;
+	struct pipe* pipe_next = NULL;
+	u_int32_t idx = 0;
+
+	//pthread_mutex_lock(&show_conn_mutex);
+
+	pipe_head = conn->run_recv_pipe;
+
+	printf("[%s] Conn:%p RUN Recv Pipe: %p \n", __func__, conn, pipe_head);
+	
+	while(1) {
+		if (pipe_head == NULL)
+			break; 
+
+		printf("%p(%04d) ->", pipe_head, pipe_head->data);
+
+		if (idx % 8 == 7)
+			printf("\n");
+
+		pipe_head = pipe_head->pipe_nxt;
+
+		idx++;	
+	}
+
+	printf("[%s] RUN Recv Pipe End\n", __func__);
+
+	//pthread_mutex_unlock(&show_conn_mutex);
+#endif
+	return 0;
+}
+
+
+int ipc_modify_tcp_status(struct vm_list *vm_target)
+{
+	struct vm_list *target;
+	struct vmsk_list *target_sk;
+
+	struct pipe *pipe_head = NULL;
+	struct pipe *pipe_next = NULL;
+	struct pipe *pipe_tail = NULL;
+	int32_t move = 0;
+	u_int32_t move_red = 0;
+	u_int32_t diff = 0;
+
+	u_int8_t dist_last_idx = 0;
+	u_int32_t dist_last = 0;
+
+	u_int8_t dist_nxt_snapshot_idx = 0;
+	u_int32_t dist_nxt_snapshot = 0;
+	u_int8_t zero_idx = 0;
+
+
+	IPC_TH_PRINTF("========================= START FLUSH =========================\n");
+	RQR_PRINTF("========================= START FLUSH =========================\n");
+	
+	if (vm_target->socket_count) {
+		////printf("IP:%08x:\n", vm_target->vm_ip);
+		list_for_each_entry(target_sk, &vm_target->skid_head.skid_list, skid_list) {
+			/* Output Queue */
+			if (target_sk->conn->direction == DIR_DEST_GUEST) {
+
+			}
+
+			if (target_sk->conn->direction == DIR_DEST_CLIENT) {
+				show_conn_in_pipe(target_sk->conn);
+
+				if (target_sk->conn->snapshot_pipe) {
+					RQR_PRINTF("[ipc_modify_tcp_status] Snapshot First: %u\n", target_sk->conn->snapshot_pipe->first_number);
+					RQR_PRINTF("[ipc_modify_tcp_status] Snapshot Last: %u\n", target_sk->conn->snapshot_pipe->last_number);	
+					RQR_PRINTF("[ipc_modify_tcp_status] Snapshot Count: %u\n", target_sk->conn->snapshot_pipe->tr_count);
+					RQR_PRINTF("[ipc_modify_tcp_status] Snapshot Length: %u\n", target_sk->conn->snapshot_pipe->tr_length);
+				}
+			}
+
+		}
+	}
+
+	IPC_TH_PRINTF("========================= #END# FLUSH =========================\n");
+	RQR_PRINTF("========================= #END# FLUSH =========================\n");
+	
+	return 0;
+}
+
 
 u_int32_t lock_for_snapshot = 0;
 void ipc_snapshot_lock()
@@ -1570,10 +1831,24 @@ void ipc_snapshot_tryunlock()
 	//lock_for_snapshot = 0; 	
 }
 
+#define STO_CUJU_SNAPSHOT 1
+#define STO_CUJU_PRE_SNAPSHOT 2
+
 void *ipc_snapshot_in(void *data)
 {
 	struct vm_list *vm_target = (struct vm_list *)data;
 	u_int32_t socket_count;
+	static int snapshot_count = 0;
+	char buf[12];
+	
+	printf("[%s] tid_bit %08x\n",__func__, tid_bit);
+		//global.nbthread
+
+	if ( global.nbthread < 31) {
+		ha_set_tid(31);
+	}
+
+	printf("[%s] tid_bit %08x\n",__func__, tid_bit);
 
 	////printf("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
 
@@ -1582,37 +1857,45 @@ void *ipc_snapshot_in(void *data)
 		pthread_cond_wait(&vm_target->ss_data.cond, &vm_target->ss_data.locker);
 
 		IPC_TH_PRINTF("[%s] vm_data:%p  nic:%08x\n", __func__, vm_target, vm_target->nic[0]);
-		IPC_TH_PRINTF("[%s] fake socket:%d\n\n\n", __func__, vm_target->nic[1]);
-		IPC_TH_PRINTF("[%s] real socker count:%d\n\n\n", __func__, vm_target->socket_count);
+		IPC_TH_PRINTF("[%s] fake socket:%d\n", __func__, vm_target->nic[1]);
+		IPC_TH_PRINTF("[%s] real socket count:%d\n", __func__, vm_target->socket_count);
 
-		/*
-				socket_count = vm_target->socket_count;
-				for (int idx = 0; idx < socket_count; idx++)
-			    {
-
-				}
-		*/
-		
 		pthread_mutex_lock(&(vm_target->socket_metux));	
 		
 		if (vm_target->failovered) {
 			printf("[%s] failovered:%d\n", __func__, vm_target->failovered);
 
 			////restore_one_tcp_conn();
-			//ipc_restore_tcp(vm_target);
-		} else {
+			ipc_restore_tcp(vm_target);
+			vm_target->failovered = 0;
+		}
+		else {
+			has_send_event = 0;
 
 			if (vm_target->socket_count) {
-				printf("[%s] real socket count:%d\n\n\n", __func__, vm_target->socket_count);
-				//ipc_dump_tcp(vm_target);
+				struct timeval tv1;
+				struct timeval tv2;
+				at_snapshot_time = 1;
+				IPC_TH_PRINTF("[%s] real socket count:%d\n", __func__, vm_target->socket_count);
+				
+				snapshot_tx_idx = 0;
+
+				//gettimeofday(&tv1, NULL);
+				ipc_dump_tcp(vm_target);
+				//gettimeofday(&tv2, NULL);
+
+				snapshot_count++;
+			
+				//printf("dump time(us):%lu\n", __tv_us_elapsed(&tv1, &tv2));
 			}
-
-
 
 			/* send end of snapshot to Cuju */
 			//printf("send end of snapshot to Cuju \n");
-			write(vm_target->ipc_socket, &socket_count, sizeof(socket_count));			
-		
+
+			if (!has_send_event) {
+				buf[11] = STO_CUJU_SNAPSHOT;
+				write(vm_target->ipc_socket, &buf, sizeof(buf));			
+			}
 		}
 		
 		pthread_mutex_unlock(&(vm_target->socket_metux));			
@@ -1621,12 +1904,11 @@ void *ipc_snapshot_in(void *data)
 
 		/* send end of snapshot to Cuju */
 
-
 		pthread_mutex_unlock(&vm_target->ss_data.locker);
 	}
 
 
-	printf("[%s]\n", __func__);
+	IPC_TH_PRINTF("[%s]\n", __func__);
 
 func_error:
 	pthread_exit(NULL);
@@ -1638,26 +1920,39 @@ func_error:
 
 void release_sk(struct libsoccr_sk *sk)
 {
+	if (sk) {
+		if (sk->recv_queue) {
+			free(sk->recv_queue);
+			sk->recv_queue = NULL;
+		}
 
-	free(sk->recv_queue);
-	free(sk->send_queue);
-	//free(sk->src_addr);	// the addr is local pointer, so needn't free.
-	//free(sk->dst_addr);
-	free(sk);
+		if (sk->send_queue) {
+			free(sk->send_queue);
+			sk->send_queue = NULL;
+		}
+		//free(sk->src_addr);	// the addr is local pointer, so needn't free.
+		//free(sk->dst_addr);
+		//free(sk);
+		//sk = NULL;
+	}
 }
 
 void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
 {
-	union libsoccr_addr sa_src, sa_dst;
+	//union libsoccr_addr sa_src, sa_dst;
 	struct sockaddr_in src_addr, dst_addr;
-
 	struct in_addr ipv4_to;
 	struct in_addr ipv4_from;
 	in_port_t ipv4_to_port;
 	in_port_t ipv4_from_port;
 
-	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
-	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
+	if (socr->src_addr == NULL) {
+		socr->src_addr = calloc(1, sizeof(union libsoccr_addr));
+	}
+
+	if (socr->dst_addr == NULL) {
+		socr->dst_addr = calloc(1, sizeof(union libsoccr_addr));
+	}
 
 	ipv4_to.s_addr = ((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr;
 	ipv4_from.s_addr = ((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr;
@@ -1668,55 +1963,81 @@ void set_addr_port_conn(struct libsoccr_sk *socr, struct connection *conn)
 	src_addr.sin_addr.s_addr = ipv4_from.s_addr;
 	dst_addr.sin_addr.s_addr = ipv4_to.s_addr;
 
-	if (restore_sockaddr(&sa_src,
+	if (restore_sockaddr(socr->src_addr,
 			     AF_INET, ipv4_from_port,
 			     &src_addr.sin_addr.s_addr, 0) < 0)
 		return;
 
-	if (restore_sockaddr(&sa_dst,
+	if (restore_sockaddr(socr->dst_addr,
 			     AF_INET, ipv4_to_port,
 			     &dst_addr.sin_addr.s_addr, 0) < 0)
 		return;
 
-	libsoccr_set_addr(socr, 1, &sa_src, 0);
-	libsoccr_set_addr(socr, 0, &sa_dst, 0);
+	printf("socr->src_addr IP:%04x\n", socr->src_addr->v4.sin_addr.s_addr);
+	printf("socr->src_addr Port:%04x\n", socr->src_addr->v4.sin_port);
+	printf("socr->dst_addr IP:%04x\n", socr->dst_addr->v4.sin_addr.s_addr);
+	printf("socr->dst_addr Port:%04x\n", socr->dst_addr->v4.sin_port);
+
+	//libsoccr_set_addr(socr, 1, &sa_src, 0);
+	//libsoccr_set_addr(socr, 0, &sa_dst, 0);
 }
 
-//int dump_tcp_conn_state_conn(int fd, struct libsoccr_sk_data *data,
-//			     struct connection *conn)
 int dump_tcp_conn_state_conn(int fd, struct sk_data_info *sk_data,
 			     struct connection *conn)
-
 {
 	//char sk_header[8];
-	int ret;
+	int ret = 0;
+	u_int64_t transmitted_delta = 0; 
+	u_int64_t transmitted_this_round = 0;
+	u_int64_t transmitted_this_round_head = 0;
+	u_int32_t rip_head = 0;
+	u_int32_t rip_tail = 0;
+	struct pipe* pipe_ptr = NULL;
+	struct pipe* pipe_free = NULL;
+	int64_t middle_count = 0;
+	int64_t first_count = 0;
+	int64_t last_count = 0;
+	int64_t final_count = 0;
+	u_int8_t rem_idx = 0;
+	u_int8_t first_idx = 0;
+	u_int8_t last_idx = 0;
+
 	struct libsoccr_sk_data *data = &(sk_data->sk_data);
 
 	//struct libsoccr_sk *socr = calloc(1, sizeof(struct libsoccr_sk));
-	sk_data->libsoccr_sk = malloc(sizeof(struct libsoccr_sk));
+	RQR_PRINTF("[%s] FD:%d\n", __func__, fd);
 
-	if (tcp_repair_on(fd) < 0) {
-		printf("tcp_repair_on fail.\n");
-		return -1;
+	if (sk_data->libsoccr_sk == NULL) {
+
+		sk_data->libsoccr_sk = libsoccr_pause(fd);
+
+		if (sk_data->libsoccr_sk == NULL) {
+			RQR_PRINTF("TCP REPAIR ON fail\n");
+			return 0 ;
+		}
+
+		sk_data->libsoccr_sk->fd = fd;
+
+		if (sk_data->libsoccr_sk) {
+			printf("tcp_repair_on FD:%d\n", fd);
+		}	
+		else { 
+			printf("libsoccr_pause fd:%d\n", fd); 
+			return ret;
+		}
+		set_addr_port_conn(sk_data->libsoccr_sk, conn);
+	}
+	else {
+		if (tcp_repair_on(fd) < 0) {
+			printf("tcp_repair_on() failed (FD:%d)\n", fd);
+			return NULL;
+		}
 	}
 
-	sk_data->libsoccr_sk->fd = fd;
-	set_addr_port_conn(sk_data->libsoccr_sk, conn);
+	ret = libsoccr_save_zerocopy(sk_data->libsoccr_sk, data, sizeof(*data));
 
-	//src_addr = socr->src_addr->v4.sin_addr.s_addr;
-	//src_port = socr->src_addr->v4.sin_port;
-
-	ret = libsoccr_save(sk_data->libsoccr_sk, data, sizeof(*data));
-	//socr->src_addr->v4.sin_addr.s_addr = src_addr;
-	//socr->src_addr->v4.sin_port = src_port;
-
-	if (ret < 0) {
-		printf("libsoccr_save() failed with %d\n", ret);
-		return ret;
-	}
-	if (ret != sizeof(*data)) {
-		printf("This libsocr is not supported (%d vs %d)\n",
-		       ret, (int)sizeof(*data));
+	if (ret) {
+		printf("libsoccr_save_zerocopy() failed with %08x\n", ret);
 		return ret;
 	}
 
@@ -1725,16 +2046,544 @@ int dump_tcp_conn_state_conn(int fd, struct sk_data_info *sk_data,
 		return -1;
 	}
 
-	//if 連線數量達預期..開始存sk queue data.
-#if 0
-	save_sk_header(buf, 1);
-	save_sk_data(data, socr, buf);
-	int len = buf->header_size + buf->queue_size;
-	char *send_data = final_save_data(buf);
-	free(send_data);
+	return ret;
+}
+
+void show_recovery_pipe_list(struct recov_pipe * head)
+{
+#if 0	
+	struct recov_pipe * rp_ptr = head;
+	struct recov_pipe * rp_nxt;
+	u_int32_t idx = 0;
+
+	printf("\n@@@@@@@@@@@@@@@@@@@@@@@@@ SHOW @@@@@@@@@@@@@@@@@@@@@@@@@\n");
+
+	while(1) {
+		printf("%p -->", rp_ptr);
+
+		if (idx % 8 == 7)
+			printf("\n");
+
+		rp_nxt = rp_ptr->rp_next;
+		rp_ptr = rp_nxt;
+
+		if (rp_ptr == NULL) {
+			break;
+		}
+
+		idx++;
+	}
+	printf("\n@@@@@@@@@@@@@@@@@@@@@@@@@ #SE# @@@@@@@@@@@@@@@@@@@@@@@@@\n");	
+#endif
+}
+
+int dump_tcp_conn_state_conn_zerocpy(int fd, struct sk_data_info *sk_data,
+			    				     struct connection *conn, struct vm_list* target_vm) 
+{
+	//char sk_header[8];
+	int ret = 0;
+	u_int64_t transmitted_delta = 0; 
+	u_int64_t transmitted_this_round = 0;
+	u_int64_t transmitted_this_round_head = 0;
+	u_int32_t rip_head = 0;
+	u_int32_t rip_tail = 0;
+	struct pipe* pipe_ptr = NULL;
+	struct pipe* pipe_free = NULL;
+	int64_t middle_count = 0;
+	int64_t first_count = 0;
+	int64_t last_count = 0;
+	int64_t final_count = 0;
+	u_int8_t rem_idx = 0;
+	u_int8_t first_idx = 0;
+	u_int8_t last_idx = 0;
+	u_int32_t idx = 0;
+	u_int32_t no_next_idx = 0;
+	char buf[12];
+
+	struct flush_work* fw_ptr = NULL;
+	struct flush_work* fw_nxt = NULL;
+
+	struct recov_pipe * rp_ptr = NULL;
+	struct recov_pipe * rp_nxt = NULL;
+
+	struct libsoccr_sk_data *data = &(sk_data->sk_data);
+
+	//struct timeval tv1;
+	//struct timeval tv2;	
+
+	//struct libsoccr_sk *socr = calloc(1, sizeof(struct libsoccr_sk));
+	RQR_PRINTF("[%s] FD:%d\n", __func__, fd);
+
+	//gettimeofday(&tv1, NULL);
+
+	if (sk_data->libsoccr_sk == NULL) {
+		sk_data->libsoccr_sk = libsoccr_pause(fd);
+
+		if (sk_data->libsoccr_sk == NULL) {
+			RQR_PRINTF("TCP REPAIR ON fail\n");
+			return 0 ;
+		}
+
+		sk_data->libsoccr_sk->fd = fd;
+
+		if (sk_data->libsoccr_sk) {
+			RQR_PRINTF("tcp_repair_on FD:%d\n", fd);
+		}	
+		else { 
+			RQR_PRINTF("libsoccr_pause fd:%d\n", fd); 
+			return ret;
+		}
+		set_addr_port_conn(sk_data->libsoccr_sk, conn);
+	}
+	else {
+		if (tcp_repair_on(fd) < 0) {
+			printf("tcp_repair_on() failed (FD:%d)\n", fd);
+			return NULL;
+		}
+	}
+
+
+	////printf("sk_data->libsoccr_sk->fd:%d\n", sk_data->libsoccr_sk->fd);
+#if 1
+	ret = libsoccr_save_zerocopy(sk_data->libsoccr_sk, data, sizeof(*data));
+
+	if (ret) {
+		printf("libsoccr_save_zerocopy() failed with %08x\n", ret);
+		return ret;
+	}
+#else
+	ret = libsoccr_save(sk_data->libsoccr_sk, data, sizeof(*data));
+
+	//printf("[%s] Number IN:%u , Out:%u\n", __func__, data->inq_seq, data->outq_seq);
+	//printf("[%s] Length IN:%u , Out:%u\n", __func__, data->inq_len, data->outq_len);
+	//printf("[%s] Length unsend:%u , Out:%u\n", __func__, data->unsq_len, data->outq_len);
+	
+	if (ret < 0) {
+		printf("libsoccr_save() failed with %d\n", ret);
+		return ret;
+	}
+
+	if (ret != sizeof(*data)) {
+		printf("This libsocr is not supported (%d vs %d)\n",
+		       ret, (int)sizeof(*data));
+		return ret;
+	}
 #endif
 
+#if 0
+	if (conn->direction == DIR_DEST_GUEST) {
+		printf("[OUT] Enter Incoming Path\n");
+		printf("[OUT] Ori:%u  Current:%u len:%d\n", conn->conn_seq, data->outq_seq, data->outq_len);
+
+		if (data->outq_len == 0) {
+			conn->out_pipe_first_idx = 0;
+			conn->out_pipe_last_idx = 0;
+			//conn->out_pipe_first_number = 0;
+			//conn->out_pipe_last_number = 0;			
+		} 
+		else {
+			conn->out_pipe_first_idx = 1;
+			conn->out_pipe_last_idx = 1;			
+		}
+
+		//data->inq_seq - conn->conn_ack
+		if (data->outq_seq >= conn->conn_seq) {
+			transmitted_delta = data->outq_seq - conn->conn_seq;
+		}
+		else {
+			transmitted_delta = (0xFFFFFFFF - data->outq_seq) + conn->conn_seq;
+		}	
+		printf("[OUT] transmitted_delta:%u\n", transmitted_delta);
+		printf("[OUT] transmitted_delta first:%u\n", transmitted_delta - data->outq_len);
+
+		transmitted_this_round = transmitted_delta - conn->conn_seq_counted;
+		conn->conn_seq_counted = transmitted_delta;		
+
+		first_count = data->outq_seq - data->outq_len;
+		last_count = data->outq_seq;
+
+		printf("[OUT] FRQA count:%u\n", first_count);
+		printf("[OUT] LRQA count:%u\n", last_count);
+
+		conn->out_pipe_first_number = first_count;
+		conn->out_pipe_last_number = last_count;
+
+	}
+#endif	
+
+	rem_idx = 0;
+
+	/* outgoing path */
+	if (conn->direction == DIR_DEST_CLIENT) {
+		show_conn_in_pipe_run(conn);
+
+		RQR_PRINTF("[IN PATH] Enter Outgoing Path\n");
+		RQR_PRINTF("[IN PATH] Ori:%u  Current:%u len:%d\n", conn->conn_ack, data->inq_seq, data->inq_len);
+
+#if USING_RQ_RECOVERY
+		//printf("pthread_mutex_lock snapshot\n");
+		pthread_mutex_lock(&conn->conn_mutex);
+
+		/* add to tail */
+		RQR_PRINTF("[show] Head:%p Tail:%p\n", conn->recv_pipe, conn->recv_pipe_tail);	
+		RQR_PRINTF("[show] Run Head:%p Tail:%p\n", conn->run_recv_pipe, conn->run_recv_pipe_tail);
+
+		if (conn->recv_pipe == NULL) {
+			conn->recv_pipe = conn->run_recv_pipe;
+			conn->recv_pipe_tail = conn->run_recv_pipe_tail;
+			RQR_PRINTF("Head:%p Tail:%p  (NULL)\n", conn->recv_pipe, conn->recv_pipe_tail);
+		}
+		else {
+			if (conn->run_recv_pipe != NULL) {
+				conn->recv_pipe_tail->pipe_nxt = conn->run_recv_pipe;
+				conn->recv_pipe_tail = conn->run_recv_pipe_tail;
+				//conn->recv_pipe_tail->pipe_nxt = NULL;
+			}
+			RQR_PRINTF("Head:%p Tail:%p  (NOT NULL)\n", conn->recv_pipe, conn->recv_pipe_tail);			
+		}
+		conn->run_recv_pipe = NULL;
+		conn->run_recv_pipe_tail = NULL;
+		
+		//printf("pthread_mutex_unlock snapshot\n");
+		pthread_mutex_unlock(&conn->conn_mutex);
+
+		show_conn_in_pipe(conn);
+#endif
+		
+		if (data->inq_seq >= conn->conn_ack) {
+			transmitted_delta = data->inq_seq - conn->conn_ack;
+		}
+		else {
+			transmitted_delta = (0xFFFFFFFF - data->inq_seq) + conn->conn_ack;
+		}
+
+		RQR_PRINTF("[IN PATH] transmitted_delta:%u\n", transmitted_delta);
+		RQR_PRINTF("[IN PATH] transmitted_delta first:%u\n", transmitted_delta - data->inq_len);
+
+
+		RQR_PRINTF("[IN PATH] Transmit This Round[calculate] ack counted:%u\n", conn->conn_ack_counted);
+		transmitted_this_round = transmitted_delta - conn->conn_ack_counted;
+		conn->conn_ack_counted += transmitted_this_round;
+
+		RQR_PRINTF("[IN PATH] Transmit This Round:%u\n", transmitted_this_round);
+
+		first_count = data->inq_seq - data->inq_len;
+		last_count = data->inq_seq;
+
+		RQR_PRINTF("[IN PATH] FRQA count:%u\n", first_count);
+		RQR_PRINTF("[IN PATH] LRQA count:%u\n", last_count);
+
+#if USING_RQ_RECOVERY
+
+		if (conn->snapshot_pipe == NULL) {
+			conn->snapshot_pipe = rp_create();
+
+			RQR_PRINTF("Create Pipe: %p\n", conn->snapshot_pipe);
+
+			if (conn->snapshot_pipe == NULL) {
+				RQR_PRINTF("conn->snapshot_pipe is NULL\n");
+				abort();
+			}
+
+			conn->snapshot_pipe->first_number = first_count;
+			conn->snapshot_pipe->last_number = last_count;	
+			conn->snapshot_pipe->tr_count = transmitted_this_round;
+			conn->snapshot_pipe->tr_length = data->outq_len;
+		}
+		else {
+			RQR_PRINTF("Snapshot Recovery pipe is not NULL\n");
+			abort();
+		}
+
+		if (conn->snapshot_pipe) {
+			RQR_PRINTF("[IN PATH] Snapshot First: %u\n", conn->snapshot_pipe->first_number);
+			RQR_PRINTF("[IN PATH] Snapshot Last: %u\n", conn->snapshot_pipe->last_number);	
+			RQR_PRINTF("[IN PATH] Snapshot Count: %u\n",conn->snapshot_pipe->tr_count);
+			RQR_PRINTF("[IN PATH] Snapshot Length: %u\n", conn->snapshot_pipe->tr_length);
+		}
+	    
+		RQR_PRINTF("[%s] Enter Release Phase\n", __func__);
+#endif		
+	}
+
+	if (tcp_repair_off(fd) < 0) {
+		printf("tcp_repair_off fail.\n");
+		return -1;
+	}
+
+	//gettimeofday(&tv2, NULL);
+
+	//printf("dump time(us):%lu\n", __tv_us_elapsed(&tv1, &tv2));
+
+#if USING_RQ_RECOVERY
+	if (conn->direction == DIR_DEST_CLIENT) {
+		int rem_idx = 0;
+		fw_ptr = conn->fw_head;
+		rp_ptr = conn->flush_pipe;
+		idx = 0;
+		RQR_PRINTF("[%s] fw_ptr:%p rp_ptr:%p\n", __func__, fw_ptr, rp_ptr);
+
+		while (fw_ptr != NULL) {
+			//printf("[%s](%04d)  fw_ptr:%p rp_ptr:%p\n", __func__, idx, fw_ptr, rp_ptr);
+
+			if (fw_ptr == NULL) {
+				RQRF_PRINTF("[%s] Release 1\n", __func__);
+				break;
+			}
+
+			if (fw_ptr->fw_next == NULL) {
+				/* keep last flush */
+				RQRF_PRINTF("[%s] Release 2\n", __func__);
+				break;
+			}
+
+			if (rp_ptr == NULL) {
+				RQRF_PRINTF("[%s] Release 3\n", __func__);
+				break;
+			}
+
+			if (rp_ptr->rp_next == NULL) {
+				/* keep last flush */
+				RQRF_PRINTF("[%s] Release 4\n", __func__);
+				break;
+			}
+
+			RQRF_PRINTF("[%s](%04u) fw_ptr:%p rp_ptr:%p\n", __func__, idx, fw_ptr, rp_ptr);
+
+			RQRF_PRINTF("release_recovery_pipe_by_flush enter, rp_ptr:%p\n", rp_ptr);
+
+			idx = release_recovery_pipe_by_flush(conn, rp_ptr, rp_ptr->rp_next, 
+			                                     conn->recv_pipe, conn->recv_pipe_tail, &no_next_idx);
+
+			RQRF_PRINTF("[show] final recv pipe head:%p\n", conn->recv_pipe);									 
+			
+			if (rp_ptr->remainder) {
+				RQRF_PRINTF("[%s] rp_ptr->remainder:%d\n", __func__, rp_ptr->remainder);
+				if (no_next_idx) {
+					RQRF_PRINTF("[%s] no_next_idx:%d\n", __func__, no_next_idx);
+					break;
+				}
+			}
+			else if (rp_ptr->offset) {
+				RQRF_PRINTF("[%s] rp_ptr->offset:%d\n", __func__, rp_ptr->offset);
+			}
+		
+			RQRF_PRINTF("[%s] free rp_ptr %p\n", __func__, rp_ptr);
+			rp_nxt = rp_ptr->rp_next;
+
+			conn->flush_pipe = rp_nxt;
+			free(rp_ptr);
+			rp_ptr = rp_nxt;
+
+			fw_nxt = fw_ptr->fw_next;
+			if (conn->fw_tail == conn->fw_head) {
+				conn->fw_tail = fw_nxt;
+			}
+
+			conn->fw_head = fw_nxt;
+			free(fw_ptr);
+			fw_ptr = fw_nxt;
+		}
+
+		add_to_flush_pipe_tail(conn);
+	}
+#endif			
+
+	show_conn_in_pipe_end(conn);
+
 	return ret;
+}
+
+u_int8_t release_recovery_pipe_by_flush(struct connection *conn,
+										struct recov_pipe* start, struct recov_pipe* end, 
+										struct pipe* head, struct pipe* tail,
+										u_int32_t *no_next_idx) 
+{
+	struct recov_pipe * rp_ptr = NULL;
+	struct recov_pipe * rp_nxt = NULL;
+	struct pipe * pipe_head = NULL; 
+	struct pipe * pipe_next = NULL; 
+	int32_t move = 0;
+	u_int32_t move_red = 0;
+	u_int32_t diff = 0;
+
+	u_int8_t dist_last_idx = 0;
+	u_int32_t dist_last = 0;
+
+	u_int8_t dist_nxt_snapshot_idx = 0;
+	u_int32_t dist_nxt_snapshot = 0;
+	u_int8_t zero_idx = 0;
+
+	rp_ptr = start;
+	rp_nxt = end;
+	start->offset = 0; 
+	*no_next_idx = 0;
+
+	show_recovery_pipe_list(start);
+
+	if (start->remainder == 0) {
+		RQRF_PRINTF("[%s] Flush First: %u\n", __func__, start->first_number);
+		RQRF_PRINTF("[%s] Flush Last: %u\n", __func__, start->last_number);		
+		RQRF_PRINTF("[%s] Flush Count: %u\n", __func__, start->tr_count);
+		RQRF_PRINTF("[%s] Flush Length: %u\n", __func__, start->tr_length);
+
+		RQRF_PRINTF("[%s] Snapshot First: %u\n", __func__, end->first_number);
+		RQRF_PRINTF("[%s] Snapshot Last: %u\n", __func__, end->last_number);	
+		RQRF_PRINTF("[%s] Snapshot Count: %u\n", __func__, end->tr_count);
+		RQRF_PRINTF("[%s] Snapshot Length: %u\n", __func__, end->tr_length);
+
+		dist_last = calculate_diff(start->first_number, 
+								start->last_number);
+
+		dist_nxt_snapshot = calculate_diff(start->first_number, 
+										end->first_number);
+
+		RQRF_PRINTF("[%s] Last:%u Snapshot:%u\n", __func__, dist_last, dist_nxt_snapshot);
+
+		if (start->first_number == 0 && start->last_number == 0) {
+			RQRF_PRINTF("Check Zero\n");
+			zero_idx = 1;
+			dist_nxt_snapshot_idx = 0;
+			move = 0;
+		}
+		else {
+			if (dist_nxt_snapshot > dist_last) {
+				RQRF_PRINTF("Remove to snapshot pipe\n");
+				dist_nxt_snapshot_idx = 1;
+				move = dist_nxt_snapshot;				
+			}
+			else {
+				RQRF_PRINTF("Remove in the Last Flush pipe\n");
+				dist_last_idx = 1;
+				move = dist_last;
+			}					
+		}
+
+		RQRF_PRINTF("[DIST IDX] MOVE:%u Last IDX:%d Snapshot IDX:%d\n",
+			       move, dist_last_idx, dist_nxt_snapshot_idx);
+	}
+	else {
+		RQRF_PRINTF("[%s] start->remainder %u\n", __func__, start->remainder);
+		move = start->remainder;
+
+		//start->remainder = 0;
+	}
+
+	if (zero_idx == 0) {
+		RQRF_PRINTF("[Main] ZERO_IDX  move:%d\n", move);
+
+		pipe_head = conn->recv_pipe;
+	
+		while(1) {
+	
+			if (pipe_head == NULL)	{
+				start->remainder = move;
+				*no_next_idx = 1;
+				break;
+			}
+		
+			RQRF_PRINTF("[Main] last_move:%d Head:%p (%d:%d)\n", 
+						move, pipe_head, pipe_head->data, pipe_head->offset);
+
+			if (pipe_head->offset) {
+				RQRF_PRINTF("[Main] move :%d offset %d\n", move, pipe_head->offset);
+				if (move > pipe_head->offset) {
+					RQRF_PRINTF("[Main] move > offset\n");
+					move -= pipe_head->offset;
+					pipe_head->offset = 0;
+				}
+				else if (move < pipe_head->offset) {
+					RQRF_PRINTF("[Main] move < offset\n");
+					pipe_head->offset -= move;
+					if (pipe_head->offset > 0) {
+						RQRF_PRINTF("[Main] move < offset result :%d\n", pipe_head->offset);
+						start->offset = 1;
+					}
+					else {
+						RQRF_PRINTF("[Main] ft_clean_pipe\n");
+						ft_clean_pipe(pipe_head);
+					}
+					break;
+				}
+				else {
+					move = 0;
+					RQRF_PRINTF("[Main] move offset == 0\n");
+				}
+			}
+			else {
+				if (move > pipe_head->data) {
+					RQRF_PRINTF("[Main] move (%d) > data (%d)\n", move, pipe_head->data);
+
+					move_red = move;
+					move -= pipe_head->data;
+
+					if (move < 0) {
+						printf("[Main] move < 0\n");
+
+						start->remainder = move_red;
+						break;
+					}
+				}	
+				else if (move < pipe_head->data) {
+					RQRF_PRINTF("[Main] move (%d) > data (%d)\n", move, pipe_head->data);
+					pipe_head->offset = pipe_head->data - move;
+					start->offset = 1;
+					RQRF_PRINTF("[Main] move < data offset is %d pipe addr %p\n", pipe_head->offset, pipe_head);
+					break;
+				}
+				else {
+					move = 0;
+					RQRF_PRINTF("[Main] move == 0\n");
+				}
+			}
+	
+			RQRF_PRINTF("[Main] Current Move:%d\n", move);
+			pipe_next = pipe_head->pipe_nxt;
+			RQRF_PRINTF("[Main] pipe_next is:%p\n", pipe_next);
+
+			if (pipe_head->offset == 0) { 
+				RQRF_PRINTF("[Main] Free Pipe:%p Data:%d\n", pipe_head, pipe_head->data );
+				r_pipe_cancel++;
+				ft_clean_pipe(pipe_head);
+
+				RQRF_PRINTF("[Main] Pipe Create:%u Cancel:%u\n", r_pipe_create, r_pipe_cancel);
+			}
+
+			pipe_head = pipe_next;
+
+			if (move == 0) {
+				RQRF_PRINTF("[Main] move == 0\n");
+				break;
+			}			
+		}
+
+		rqr_result++;
+		if (rqr_result % 100 == 99) {
+			printf("[Result] Pipe Create:%u Cancel:%u diff:%d\n", r_pipe_create, r_pipe_cancel, r_pipe_create - r_pipe_cancel);
+			printf("[Origin] Pipe Create:%u Cancel:%u diff:%d\n", ori_pipe_create, ori_pipe_cancel, ori_pipe_create - ori_pipe_cancel);
+		}
+#if 0
+		conn->ipf_first_pipe = pipe_head;
+		conn->ipf_first_byte = move_red;  
+		conn->recv_pipe = pipe_head;
+#endif
+		/* all data in recv pipe; */
+
+		conn->recv_pipe = pipe_head;
+
+		if (pipe_head == NULL)	{
+			tail = NULL;
+			return 0;
+		}
+
+		
+		RQRF_PRINTF("[Main] pipe_head is:%p\n", conn->recv_pipe);
+		return 1;
+	}
+	else {
+		RQRF_PRINTF("[Main] ZERO_IDX is not ZERO move:%d\n", move);
+	}
+
 }
 
 /******************************** REPAIR RESTORE ********************************/
@@ -1743,19 +2592,14 @@ static int restore_tcp_conn_state_conn(int fd, struct sk_data_info *data)
 {
 	//int aux;
 	union libsoccr_addr sa_src, sa_dst;
-	//print_info(data);
-
-	//struct sockaddr_in clinetaddr, serveraddr;
-	//serveraddr.sin_addr.s_addr = inet_addr("140.96.29.50");
-	//clinetaddr.sin_addr.s_addr = inet_addr("192.168.90.95");
 
 	if (restore_sockaddr(&sa_src,
-			     AF_INET, data->sk_addr.src_port,
-			     &data->sk_addr.src_addr, 0) < 0)
+			     AF_INET, data->libsoccr_sk->src_addr->v4.sin_port,
+			     &data->libsoccr_sk->src_addr->v4.sin_addr.s_addr, 0) < 0)
 		goto err;
 	if (restore_sockaddr(&sa_dst,
-			     AF_INET, data->sk_addr.dst_port,
-			     &data->sk_addr.dst_addr, 0) < 0)
+			     AF_INET, data->libsoccr_sk->dst_addr->v4.sin_port,
+			     &data->libsoccr_sk->dst_addr->v4.sin_addr.s_addr, 0) < 0)
 		goto err;
 
 	libsoccr_set_addr(data->libsoccr_sk, 1, &sa_src, 0);
@@ -1770,22 +2614,194 @@ err:
 	return -1;
 }
 
-int restore_one_tcp_conn(int fd, struct sk_data_info *data)
+
+void tcp_repair_fd_remove(int fd)
 {
-	//struct libsoccr_sk *sk;
+	tcp_repair_fd_dodelete(fd, 0);
+}
+#if 0 
+struct fdtab {
+	__decl_hathreads(HA_SPINLOCK_T lock);
+	unsigned long thread_mask;           /* mask of thread IDs authorized to process the task */
+	unsigned long update_mask;           /* mask of thread IDs having an update for fd */
+	struct fdlist_entry cache;           /* Entry in the fdcache */
+	struct fdlist_entry update;          /* Entry in the global update list */
+	void (*iocb)(int fd);                /* I/O handler */
+	void *owner;                         /* the connection or listener associated with this fd, NULL if closed */
+	unsigned char state;                 /* FD state for read and write directions (2*3 bits) */
+	unsigned char ev;                    /* event seen in return of poll() : FD_POLL_* */
+	unsigned char linger_risk:1;         /* 1 if we must kill lingering before closing */
+	unsigned char cloned:1;              /* 1 if a cloned socket, requires EPOLL_CTL_DEL on close */
 
-	printf("Restoring TCP connection\n");
+#if ENABLE_CUJU_FT
+	int enable_migration;
+	int pipe_conut;	
+#endif
+};
+#endif
+void tcp_repair_copy_fdtab(int source, int dest)
+{
+	RQR_PRINTF("Source FD id %d\n", source);
+	RQR_PRINTF("[source] thread_mask:%lu\n", fdtab[source].thread_mask);
+	RQR_PRINTF("[source] update_mask:%lu\n", fdtab[source].update_mask);
+	RQR_PRINTF("[source] state:%d\n", fdtab[source].state);
+	RQR_PRINTF("[source] ev:%d\n", fdtab[source].ev);		
+	RQR_PRINTF("[source] linger_risk:%d\n", fdtab[source].linger_risk);
+	RQR_PRINTF("[source] cloned:%d\n", fdtab[source].cloned);	
 
-	data->libsoccr_sk = libsoccr_pause(fd);
-	if (!data->libsoccr_sk)
-		return -1;
+	RQR_PRINTF("Dest FD id %d\n", dest);
+	RQR_PRINTF("[dest] thread_mask:%lu\n", fdtab[dest].thread_mask);
+	RQR_PRINTF("[dest] update_mask:%lu\n", fdtab[dest].update_mask);
+	RQR_PRINTF("[dest] state:%d\n", fdtab[dest].state);
+	RQR_PRINTF("[dest] ev:%d\n", fdtab[dest].ev);		
+	RQR_PRINTF("[dest] linger_risk:%d\n", fdtab[dest].linger_risk);
+	RQR_PRINTF("[dest] cloned:%d\n", fdtab[dest].cloned);	
 
-	if (restore_tcp_conn_state_conn(fd, data)) {
-		libsoccr_release(data->libsoccr_sk);
+	fdtab[dest].thread_mask = fdtab[source].thread_mask;
+	fdtab[dest].update_mask = fdtab[dest].update_mask;
+	fdtab[dest].state = fdtab[dest].state;
+	fdtab[dest].ev = fdtab[dest].ev;
+	fdtab[dest].linger_risk = fdtab[dest].linger_risk;
+ 	fdtab[dest].cloned = fdtab[dest].cloned;
+	memcpy(&(fdtab[dest].cache), &(fdtab[source].cache), sizeof(struct fdlist_entry));
+	memcpy(&(fdtab[dest].update), &(fdtab[source].update), sizeof(struct fdlist_entry));
+
+	tcp_repair_fd_remove(dest);
+}
+
+#define USING_RESET_FD 1
+int restore_one_tcp_conn(int fd, struct sk_data_info *data, struct vmsk_list *target_sk)
+{
+	int nfd = 0;
+	//int ret = 0;
+	//int addr_size = 0;
+	//struct sockaddr_in temp_v4;
+	//struct sockaddr_in6 temp_v6;
+
+	RQR_PRINTF("Restoring TCP connection\n");
+
+	show_sk_data_info(&(target_sk->sk_data));
+
+#if USING_RESET_FD
+	nfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	data->libsoccr_sk->fd = nfd;
+
+	tcp_repair_copy_fdtab(fd, nfd);
+#endif 
+
+	if (tcp_repair_on(data->libsoccr_sk->fd) < 0) {
+		RQR_PRINTF("tcp_repair_off fail.\n");
 		return -1;
 	}
-	release_sk(data->libsoccr_sk);
+
+#if !USING_RESET_FD
+	if (data->libsoccr_sk->dst_addr->sa.sa_family == AF_INET) {
+		addr_size = sizeof(data->libsoccr_sk->dst_addr->v4); 
+		memcpy(&temp_v4, &data->libsoccr_sk->dst_addr->sa, addr_size);
+		temp_v4.sin_family = AF_UNSPEC;
+		connect(data->libsoccr_sk->fd, &temp_v4, addr_size);
+	}
+	else {
+		addr_size = sizeof(data->libsoccr_sk->dst_addr->v6);
+		memcpy(&temp_v6, &data->libsoccr_sk->dst_addr->sa, addr_size);
+		temp_v6.sin6_family = AF_UNSPEC;
+		connect(data->libsoccr_sk->fd, &temp_v6, addr_size);
+	}
+#endif
+
+
+	if (restore_tcp_conn_state_conn(data->libsoccr_sk->fd, data)) {
+		libsoccr_release_conn(data->libsoccr_sk);
+		return -1;
+	}
+
+	libsoccr_resume(data->libsoccr_sk);
+
+#if USING_RESET_FD
+	target_sk->conn->handle.fd = nfd;
+#endif
+
 	return 0;
+}
+
+
+int add_vmlist_by_conn(struct connection* conn, int cli_srv)
+{
+	u_int8_t direction = DIR_NO_CHECK;
+
+	if (conn == NULL)
+		return;
+
+	conn->addr_from = ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr);
+	conn->addr_to = ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr);
+	
+	getshmid(conn->addr_from, conn->addr_to, &direction);
+
+	if ((direction == DIR_DEST_GUEST) && (cli_srv == CONN_IS_SERVER)) {
+		RQR_PRINTF("[%s] DIR_DEST_GUEST %d\n", __func__, conn->handle.fd);
+
+		add_vm_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr), conn->handle.fd, conn);
+		conn->direction = direction;
+	}
+	
+	if ((direction == DIR_DEST_CLIENT) && (cli_srv == CONN_IS_CLIENT)) {
+		RQR_PRINTF("[%s] DIR_DEST_CLIENT %d\n", __func__, conn->handle.fd);
+
+		add_vm_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr), conn->handle.fd, conn);
+		conn->direction = direction;	
+	}
+
+	return 0;
+}
+
+u_int8_t fw_insert(struct connection *conn, u_int32_t flush_id) 
+{
+	struct flush_work* ptr = NULL;
+	
+	ptr = malloc(sizeof(struct flush_work));
+
+	if (ptr == NULL) {
+		printf("[%s] PTR is NULL\n", __func__);
+		return 0;
+	}
+
+	ptr->flush_id = flush_id;
+	ptr->fw_next = NULL;
+
+	if (conn->fw_head == NULL) {
+		RQR_PRINTF("[%s] Head is NULL\n", __func__);
+		conn->fw_head = ptr;
+		conn->fw_tail = ptr;
+	}
+	else {
+		RQR_PRINTF("[%s] Head is not NULL\n", __func__);
+		conn->fw_tail->fw_next = ptr;
+		conn->fw_tail = conn->fw_tail->fw_next;
+	}
+
+	return 1;
+}
+
+u_int8_t fw_delete(struct flush_work* ptr) 
+{
+	free(ptr);
+
+	return 1;
+}
+
+u_int8_t add_to_flush_pipe_tail(struct connection *conn)
+{
+	if (conn->flush_pipe == NULL) {
+		conn->flush_pipe = conn->snapshot_pipe;
+		conn->flush_pipe_tail = conn->snapshot_pipe;
+	}
+	else {
+		if (conn->snapshot_pipe != NULL) {
+			conn->flush_pipe_tail->rp_next = conn->snapshot_pipe;
+			conn->flush_pipe_tail = conn->flush_pipe_tail->rp_next;
+		}
+	}
+	conn->snapshot_pipe = NULL;
 }
 
 #endif /* USING_TCP_REPAIR */

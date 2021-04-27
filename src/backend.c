@@ -1214,6 +1214,11 @@ int connect_server(struct stream *s)
 	int init_mux = 0;
 	int alloced_cs = 0;
 	int err;
+	socklen_t auxl;
+	uint32_t outq_seq;
+	int ret = 0;
+	int aux = 0;
+	struct sk_data_info test_sk;
 
 
 	/* Some, such as http_proxy and the LUA, create their connection and
@@ -1675,6 +1680,13 @@ int connect_server(struct stream *s)
 #endif /* USE_OPENSSL */
 
 	}
+
+#if USING_TCP_REPAIR
+	add_vmlist_by_conn(srv_conn, CONN_IS_SERVER);
+	add_vmlist_by_conn(cli_conn, CONN_IS_CLIENT);
+#endif 	
+	//printf("DUMP BACKEND server\n");
+	//dump_tcp_conn_state_conn(srv_conn->handle.fd, &test_sk, srv_conn);
 
 	return SF_ERR_NONE;  /* connection is OK */
 }

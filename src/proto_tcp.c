@@ -581,31 +581,6 @@ int tcp_connect_server(struct connection *conn, int flags)
 		return SF_ERR_RESOURCE;
 	}
 
-#if USING_TCP_REPAIR
-	conn->addr_from = ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr);
-	conn->addr_to = ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr);
-	
-	getshmid(conn->addr_from, conn->addr_to, &direction);
-
-	if (direction == DIR_DEST_GUEST) {
-		printf("[%s] DIR_DEST_GUEST %d\n", __func__, conn->handle.fd);
-
-		add_vm_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr), conn->handle.fd, conn);
-		conn->direction = direction;
-	}
-	else if (direction == DIR_DEST_CLIENT){
-		printf("[%s] DIR_DEST_CLIENT %d\n", __func__, conn->handle.fd);
-
-		add_vm_target(&vm_head.vm_list, ntohl(((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr), conn->handle.fd, conn);
-		conn->direction = direction;	
-	}
-	else {
-		printf("Error!! direction unknown Socket:%d\n", conn->handle.fd);
-	}
-
-		/* add the new fd to TCP MAP */
-#endif 	
-
 	conn_xprt_want_send(conn);  /* for connect status, proxy protocol or SSL */
 	return SF_ERR_NONE;  /* connection is OK */
 }

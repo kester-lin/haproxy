@@ -28,6 +28,15 @@
 #include <proto/tcp_rules.h>
 #include <proto/vars.h>
 
+
+#define DEBUG_SESSION 0
+#if DEBUG_SESSION
+#define SESS_PRINTF(x...) printf(x)
+#else
+#define SESS_PRINTF(x...)
+#endif
+
+
 DECLARE_POOL(pool_head_session, "session", sizeof(struct session));
 DECLARE_POOL(pool_head_sess_srv_list, "session server list",
 		sizeof(struct sess_srv_list));
@@ -43,6 +52,8 @@ static struct task *session_expire_embryonic(struct task *t, void *context, unsi
 struct session *session_new(struct proxy *fe, struct listener *li, enum obj_type *origin)
 {
 	struct session *sess;
+
+	SESS_PRINTF("[%s]\n", __func__);
 
 	sess = pool_alloc(pool_head_session);
 	if (sess) {
@@ -106,6 +117,7 @@ void session_free(struct session *sess)
  */
 void conn_session_free(struct connection *conn)
 {
+	SESS_PRINTF("[%s]\n", __func__);
 	session_free(conn->owner);
 }
 
@@ -115,6 +127,8 @@ static void session_count_new(struct session *sess)
 	struct stkctr *stkctr;
 	void *ptr;
 	int i;
+
+	SESS_PRINTF("[%s]\n", __func__);
 
 	proxy_inc_fe_sess_ctr(sess->listener, sess->fe);
 
@@ -149,6 +163,7 @@ int session_accept_fd(struct listener *l, int cfd, struct sockaddr_storage *addr
 	struct session *sess;
 	int ret;
 
+	SESS_PRINTF("[%s]\n", __func__);
 
 	ret = -1; /* assume unrecoverable error by default */
 
@@ -335,6 +350,8 @@ static void session_prepare_log_prefix(struct session *sess)
 	char *end;
 	struct connection *cli_conn = __objt_conn(sess->origin);
 
+	SESS_PRINTF("[%s]\n", __func__);
+
 	ret = addr_to_str(&cli_conn->addr.from, pn, sizeof(pn));
 	if (ret <= 0)
 		chunk_printf(&trash, "unknown [");
@@ -365,6 +382,8 @@ static void session_kill_embryonic(struct session *sess, unsigned short state)
 	struct task *task = sess->task;
 	unsigned int log = sess->fe->to_log;
 	const char *err_msg;
+
+	SESS_PRINTF("[%s]\n", __func__);
 
 	if (sess->fe->options2 & PR_O2_LOGERRORS)
 		level = LOG_ERR;
@@ -415,6 +434,8 @@ static struct task *session_expire_embryonic(struct task *t, void *context, unsi
 {
 	struct session *sess = context;
 
+	SESS_PRINTF("[%s]\n", __func__);
+
 	if (!(state & TASK_WOKEN_TIMER))
 		return t;
 
@@ -431,6 +452,8 @@ static struct task *session_expire_embryonic(struct task *t, void *context, unsi
 static int conn_complete_session(struct connection *conn)
 {
 	struct session *sess = conn->owner;
+
+	SESS_PRINTF("[%s]\n", __func__);	
 
 	sess->t_handshake = tv_ms_elapsed(&sess->tv_accept, &now);
 

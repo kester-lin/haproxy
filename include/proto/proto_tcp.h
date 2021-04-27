@@ -27,6 +27,14 @@
 #include <types/task.h>
 #include <proto/stick_table.h>
 
+#define DEBUG_PROTO_TCP 0
+#if DEBUG_PROTO_TCP
+#define PTCP_PRINTF(x...) printf(x)
+#else
+#define PTCP_PRINTF(x...)
+#endif
+
+
 int tcp_bind_socket(int fd, int flags, struct sockaddr_storage *local, struct sockaddr_storage *remote);
 int tcp_pause_listener(struct listener *l);
 int tcp_connect_server(struct connection *conn, int flags);

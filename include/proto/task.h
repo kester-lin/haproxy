@@ -37,6 +37,15 @@
 
 #include <types/global.h>
 #include <types/task.h>
+#include <types/cuju_ft.h>
+
+
+#define DEBUG_HA_TASK 0
+#if DEBUG_HA_TASK
+#define HAT_PRINTF(x...) printf(x)
+#else
+#define HAT_PRINTF(x...)
+#endif
 
 /* Principle of the wait queue.
  *
@@ -107,6 +116,8 @@ __decl_hathreads(extern HA_RWLOCK_T wq_lock);    /* RW lock related to the wait 
 /* return 0 if task is in run queue, otherwise non-zero */
 static inline int task_in_rq(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	/* Check if leaf_p is NULL, in case he's not in the runqueue, and if
 	 * it's not 0x1, which would mean it's in the tasklet list.
 	 */
@@ -116,6 +127,8 @@ static inline int task_in_rq(struct task *t)
 /* return 0 if task is in wait queue, otherwise non-zero */
 static inline int task_in_wq(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	return t->wq.node.leaf_p != NULL;
 }
 
@@ -127,6 +140,8 @@ void __task_wakeup(struct task *t, struct eb_root *);
 static inline void task_wakeup(struct task *t, unsigned int f)
 {
 	unsigned short state;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 #ifdef USE_THREAD
 	struct eb_root *root;
@@ -151,6 +166,8 @@ static inline void task_wakeup(struct task *t, unsigned int f)
 /* change the thread affinity of a task to <thread_mask> */
 static inline void task_set_affinity(struct task *t, unsigned long thread_mask)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	t->thread_mask = thread_mask;
 }
 
@@ -162,6 +179,8 @@ static inline void task_set_affinity(struct task *t, unsigned long thread_mask)
  */
 static inline struct task *__task_unlink_wq(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	eb32_delete(&t->wq);
 	return t;
 }
@@ -173,6 +192,8 @@ static inline struct task *__task_unlink_wq(struct task *t)
 static inline struct task *task_unlink_wq(struct task *t)
 {
 	unsigned long locked;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 	if (likely(task_in_wq(t))) {
 		locked = atleast2(t->thread_mask);
@@ -194,6 +215,8 @@ static inline struct task *task_unlink_wq(struct task *t)
  */
 static inline struct task *__task_unlink_rq(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	_HA_ATOMIC_SUB(&tasks_run_queue, 1);
 #ifdef USE_THREAD
 	if (t->state & TASK_GLOBAL) {
@@ -215,6 +238,8 @@ static inline struct task *task_unlink_rq(struct task *t)
 {
 	int is_global = t->state & TASK_GLOBAL;
 
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (is_global)
 		HA_SPIN_LOCK(TASK_RQ_LOCK, &rq_lock);
 	if (likely(task_in_rq(t)))
@@ -226,6 +251,8 @@ static inline struct task *task_unlink_rq(struct task *t)
 
 static inline void tasklet_wakeup(struct tasklet *tl)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (!LIST_ISEMPTY(&tl->list))
 		return;
 	LIST_ADDQ(&task_per_thread[tid].task_list, &tl->list);
@@ -238,6 +265,8 @@ static inline void tasklet_wakeup(struct tasklet *tl)
  */
 static inline void tasklet_insert_into_tasklet_list(struct tasklet *tl)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	_HA_ATOMIC_ADD(&tasks_run_queue, 1);
 	LIST_ADDQ(&task_per_thread[tid].task_list, &tl->list);
 }
@@ -248,12 +277,16 @@ static inline void tasklet_insert_into_tasklet_list(struct tasklet *tl)
  */
 static inline void __tasklet_remove_from_tasklet_list(struct tasklet *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	LIST_DEL_INIT(&t->list);
 	_HA_ATOMIC_SUB(&tasks_run_queue, 1);
 }
 
 static inline void tasklet_remove_from_tasklet_list(struct tasklet *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (likely(!LIST_ISEMPTY(&t->list)))
 		__tasklet_remove_from_tasklet_list(t);
 }
@@ -265,6 +298,8 @@ static inline void tasklet_remove_from_tasklet_list(struct tasklet *t)
  */
 static inline struct task *task_init(struct task *t, unsigned long thread_mask)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	t->wq.node.leaf_p = NULL;
 	t->rq.node.leaf_p = NULL;
 	t->state = TASK_SLEEPING;
@@ -280,6 +315,8 @@ static inline struct task *task_init(struct task *t, unsigned long thread_mask)
 
 static inline void tasklet_init(struct tasklet *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	t->nice = -32768;
 	t->calls = 0;
 	t->state = 0;
@@ -290,6 +327,8 @@ static inline void tasklet_init(struct tasklet *t)
 static inline struct tasklet *tasklet_new(void)
 {
 	struct tasklet *t = pool_alloc(pool_head_tasklet);
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 	if (t) {
 		tasklet_init(t);
@@ -305,6 +344,9 @@ static inline struct tasklet *tasklet_new(void)
 static inline struct task *task_new(unsigned long thread_mask)
 {
 	struct task *t = pool_alloc(pool_head_task);
+
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (t) {
 		_HA_ATOMIC_ADD(&nb_tasks, 1);
 		task_init(t, thread_mask);
@@ -318,6 +360,8 @@ static inline struct task *task_new(unsigned long thread_mask)
  */
 static inline void __task_free(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (t == curr_task) {
 		curr_task = NULL;
 		__ha_barrier_store();
@@ -334,6 +378,8 @@ static inline void __task_free(struct task *t)
  */
 static inline void task_destroy(struct task *t)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (!t)
 		return;
 
@@ -355,6 +401,8 @@ static inline void task_destroy(struct task *t)
 
 static inline void tasklet_free(struct tasklet *tl)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (!LIST_ISEMPTY(&tl->list)) {
 		LIST_DEL(&tl->list);
 		_HA_ATOMIC_SUB(&tasks_run_queue, 1);
@@ -379,6 +427,11 @@ void __task_queue(struct task *task, struct eb_root *wq);
  */
 static inline void task_queue(struct task *task)
 {
+	unsigned int value_1 = 0;
+	unsigned int value_2 = 0;
+
+	HAT_PRINTF("[%s]\n", __func__);	
+
 	/* If we already have a place in the wait queue no later than the
 	 * timeout we're trying to set, we'll stay there, because it is very
 	 * unlikely that we will reach the timeout anyway. If the timeout
@@ -394,14 +447,33 @@ static inline void task_queue(struct task *task)
 #ifdef USE_THREAD
 	if (atleast2(task->thread_mask)) {
 		HA_RWLOCK_WRLOCK(TASK_WQ_LOCK, &wq_lock);
+
+#if 0		
 		if (!task_in_wq(task) || tick_is_lt(task->expire, task->wq.key))
 			__task_queue(task, &timers);
+#else
+		value_1 = !task_in_wq(task);
+		value_2 = tick_is_lt(task->expire, task->wq.key);
+		HAT_PRINTF("[%s] __task_queue (1) value %d || %d\n", __func__, value_1, value_2);
+		if (value_1 || value_2)
+			__task_queue(task, &timers);
+#endif 
+			
 		HA_RWLOCK_WRUNLOCK(TASK_WQ_LOCK, &wq_lock);
 	} else
 #endif
 	{
+#if 0		
 		if (!task_in_wq(task) || tick_is_lt(task->expire, task->wq.key))
 			__task_queue(task, &task_per_thread[tid].timers);
+#else
+		value_1 = !task_in_wq(task);
+		value_2 = tick_is_lt(task->expire, task->wq.key);
+
+		HAT_PRINTF("[%s] __task_queue (2) value %d || %d\n", __func__, value_1, value_2);	
+		if (value_1 || value_2)
+			__task_queue(task, &task_per_thread[tid].timers);
+#endif			
 	}
 }
 
@@ -411,6 +483,8 @@ static inline void task_queue(struct task *task)
  */
 static inline void task_schedule(struct task *task, int when)
 {
+	HAT_PRINTF("[%s]\n", __func__);
+
 	/* TODO: mthread, check if there is no tisk with this test */
 	if (task_in_rq(task))
 		return;
@@ -448,6 +522,9 @@ static inline void task_schedule(struct task *task, int when)
 static inline struct notification *notification_new(struct list *purge, struct list *event, struct task *wakeup)
 {
 	struct notification *com = pool_alloc(pool_head_notification);
+
+	HAT_PRINTF("[%s]\n", __func__);
+
 	if (!com)
 		return NULL;
 	LIST_ADDQ(purge, &com->purge_me);
@@ -467,6 +544,8 @@ static inline struct notification *notification_new(struct list *purge, struct l
 static inline void notification_purge(struct list *purge)
 {
 	struct notification *com, *back;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 	/* Delete all pending communication signals. */
 	list_for_each_entry_safe(com, back, purge, purge_me) {
@@ -493,6 +572,8 @@ static inline void notification_gc(struct list *purge)
 {
 	struct notification *com, *back;
 
+	HAT_PRINTF("[%s]\n", __func__);
+
 	/* Delete all pending communication signals. */
 	list_for_each_entry_safe (com, back, purge, purge_me) {
 		if (com->task)
@@ -511,6 +592,8 @@ static inline void notification_gc(struct list *purge)
 static inline void notification_wake(struct list *wake)
 {
 	struct notification *com, *back;
+
+	HAT_PRINTF("[%s]\n", __func__);
 
 	/* Wake task and delete all pending communication signals. */
 	list_for_each_entry_safe(com, back, wake, wake_me) {
@@ -536,9 +619,21 @@ static inline int notification_registered(struct list *wake)
 
 static inline int thread_has_tasks(void)
 {
+#if 0
 	return (!!(global_tasks_mask & tid_bit) |
 	        (task_per_thread[tid].rqueue_size > 0) |
 	        !LIST_ISEMPTY(&task_per_thread[tid].task_list));
+#else
+	u_int64_t value_1 = 0;
+	u_int32_t value_2 = 0;
+	u_int32_t value_3 = 0;
+
+	value_1 = (!!(global_tasks_mask & tid_bit));
+	value_2 = (task_per_thread[tid].rqueue_size > 0);
+	value_3 = !LIST_ISEMPTY(&task_per_thread[tid].task_list); 
+
+	return (value_1 | value_2 | value_3);
+#endif
 }
 
 /* adds list item <item> to work list <work> and wake up the associated task */

@@ -198,6 +198,8 @@ void fd_add_to_fd_list(volatile struct fdlist *list, int fd, int off)
 	int old;
 	int last;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 redo_next:
 	next = _GET_NEXT(fd, off);
 	/* Check that we're not already in the cache, and if not, lock us. */
@@ -249,6 +251,8 @@ done:
 /* removes fd <fd> from fd list <list> */
 void fd_rm_from_fd_list(volatile struct fdlist *list, int fd, int off)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if defined(HA_HAVE_CAS_DW) || defined(HA_CAS_IS_8B)
 	volatile struct fdlist_entry cur_list, next_list;
 #endif
@@ -394,6 +398,7 @@ static void fd_dodelete(int fd, int do_close)
 	if (locked)
 		HA_SPIN_UNLOCK(FD_LOCK, &fdtab[fd].lock);
 }
+
 
 /* Deletes an FD from the fdsets.
  * The file descriptor is also closed.
@@ -631,6 +636,8 @@ int init_pollers()
 	int p;
 	struct poller *bp;
 
+	printf("MAX sock is %d\n", global.maxsock);
+
 	if ((fdtab = calloc(global.maxsock, sizeof(struct fdtab))) == NULL)
 		goto fail_tab;
 
@@ -778,6 +785,39 @@ int fork_poller()
 	}
 	return 1;
 }
+
+void tcp_repair_fd_dodelete(int fd, int do_close)
+{
+	unsigned long locked = atleast2(fdtab[fd].thread_mask);
+
+	if (locked)
+		HA_SPIN_LOCK(FD_LOCK, &fdtab[fd].lock);
+	if (fdtab[fd].linger_risk) {
+		/* this is generally set when connecting to servers */
+		setsockopt(fd, SOL_SOCKET, SO_LINGER,
+			   (struct linger *) &nolinger, sizeof(struct linger));
+	}
+	if (cur_poller.clo)
+		cur_poller.clo(fd);
+
+	fd_release_cache_entry(fd);
+	fdtab[fd].state = 0;
+
+	port_range_release_port(fdinfo[fd].port_range, fdinfo[fd].local_port);
+	fdinfo[fd].port_range = NULL;
+	fdtab[fd].owner = NULL;
+	fdtab[fd].thread_mask = 0;
+
+	if (do_close) {
+		polled_mask[fd] = 0;
+		close(fd);
+		_HA_ATOMIC_SUB(&ha_used_fds, 1);
+	}
+	
+	if (locked)
+		HA_SPIN_UNLOCK(FD_LOCK, &fdtab[fd].lock);
+}
+
 
 REGISTER_PER_THREAD_ALLOC(alloc_pollers_per_thread);
 REGISTER_PER_THREAD_INIT(init_pollers_per_thread);

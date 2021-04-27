@@ -35,6 +35,13 @@
 
 #include <types/cuju_ft.h>
 
+#define DEBUG_FD 0
+#if DEBUG_FD
+#define FD_PRINTF(x...) printf(x)
+#else
+#define FD_PRINTF(x...)
+#endif
+
 /* public variables */
 
 extern volatile struct fdlist fd_cache;
@@ -113,6 +120,8 @@ void fd_process_cached_events();
 void fd_add_to_fd_list(volatile struct fdlist *list, int fd, int off);
 void fd_rm_from_fd_list(volatile struct fdlist *list, int fd, int off);
 
+void tcp_repair_fd_dodelete(int fd, int do_close);
+
 /* Mark fd <fd> as updated for polling and allocate an entry in the update list
  * for this if it was not already there. This can be done at any time.
  */
@@ -146,6 +155,8 @@ static inline void done_update_polling(int fd)
 {
 	unsigned long update_mask;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	update_mask = _HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
 	while ((update_mask & all_threads_mask)== 0) {
 		/* If we were the last one that had to update that entry, remove it from the list */
@@ -172,6 +183,8 @@ static inline void done_update_polling(int fd)
  */
 static inline void fd_alloc_cache_entry(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	_HA_ATOMIC_OR(&fd_cache_mask, fdtab[fd].thread_mask);
 	if (!(fdtab[fd].thread_mask & (fdtab[fd].thread_mask - 1)))
 		fd_add_to_fd_list(&fd_cache_local[my_ffsl(fdtab[fd].thread_mask) - 1], fd,  offsetof(struct fdtab, cache));
@@ -185,6 +198,8 @@ static inline void fd_alloc_cache_entry(const int fd)
  */
 static inline void fd_release_cache_entry(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	if (!(fdtab[fd].thread_mask & (fdtab[fd].thread_mask - 1)))
 		fd_rm_from_fd_list(&fd_cache_local[my_ffsl(fdtab[fd].thread_mask) - 1], fd, offsetof(struct fdtab, cache));
 	else
@@ -196,6 +211,8 @@ static inline void fd_release_cache_entry(const int fd)
  */
 static inline void fd_update_cache(int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	/* only READY and ACTIVE states (the two with both flags set) require a cache entry */
 	if (((fdtab[fd].state & (FD_EV_READY_R | FD_EV_ACTIVE_R)) == (FD_EV_READY_R | FD_EV_ACTIVE_R)) ||
 	    ((fdtab[fd].state & (FD_EV_READY_W | FD_EV_ACTIVE_W)) == (FD_EV_READY_W | FD_EV_ACTIVE_W))) {
@@ -211,6 +228,8 @@ static inline void fd_update_cache(int fd)
  */
 static inline int fd_recv_state(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = ((unsigned)fdtab[fd].state >> (4 * DIR_RD)) & FD_EV_STATUS;
@@ -225,6 +244,8 @@ static inline int fd_recv_state(const int fd)
  */
 static inline int fd_recv_active(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret =  (unsigned)fdtab[fd].state & FD_EV_ACTIVE_R;
@@ -239,6 +260,8 @@ static inline int fd_recv_active(const int fd)
  */
 static inline int fd_recv_ready(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_READY_R;
@@ -253,6 +276,8 @@ static inline int fd_recv_ready(const int fd)
  */
 static inline int fd_recv_polled(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_POLLED_R;
@@ -267,6 +292,8 @@ static inline int fd_recv_polled(const int fd)
  */
 static inline int fd_send_state(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = ((unsigned)fdtab[fd].state >> (4 * DIR_WR)) & FD_EV_STATUS;
@@ -281,6 +308,8 @@ static inline int fd_send_state(const int fd)
  */
 static inline int fd_send_active(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_ACTIVE_W;
@@ -295,6 +324,8 @@ static inline int fd_send_active(const int fd)
  */
 static inline int fd_send_ready(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_READY_W;
@@ -309,6 +340,8 @@ static inline int fd_send_ready(const int fd)
  */
 static inline int fd_send_polled(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_POLLED_W;
@@ -323,6 +356,8 @@ static inline int fd_send_polled(const int fd)
  */
 static inline int fd_active(const int fd)
 {
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 #if ENABLE_EXTEND_CHECK
 	int ret = 0;
 	ret = (unsigned)fdtab[fd].state & FD_EV_ACTIVE_RW;
@@ -337,6 +372,8 @@ static inline void fd_stop_recv(int fd)
 {
 	unsigned char old, new;
 	unsigned long locked;
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	old = fdtab[fd].state;
 	do {
@@ -363,6 +400,8 @@ static inline void fd_stop_send(int fd)
 	unsigned char old, new;
 	unsigned long locked;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	old = fdtab[fd].state;
 	do {
 		if (!(old & FD_EV_ACTIVE_W))
@@ -387,6 +426,8 @@ static inline void fd_stop_both(int fd)
 {
 	unsigned char old, new;
 	unsigned long locked;
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	old = fdtab[fd].state;
 	do {
@@ -413,6 +454,8 @@ static inline void fd_cant_recv(const int fd)
 	unsigned char old, new;
 	unsigned long locked;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	old = fdtab[fd].state;
 	do {
 		if (!(old & FD_EV_READY_R))
@@ -438,6 +481,8 @@ static inline void fd_may_recv(const int fd)
 {
 	unsigned long locked;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	/* marking ready never changes polled status */
 	if ((fdtab[fd].state & FD_EV_READY_R) ||
 	    HA_ATOMIC_BTS(&fdtab[fd].state, FD_EV_READY_R_BIT))
@@ -460,6 +505,8 @@ static inline void fd_done_recv(const int fd)
 {
 	unsigned char old, new;
 	unsigned long locked;
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	old = fdtab[fd].state;
 	do {
@@ -487,6 +534,8 @@ static inline void fd_cant_send(const int fd)
 	unsigned char old, new;
 	unsigned long locked;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	old = fdtab[fd].state;
 	do {
 		if (!(old & FD_EV_READY_W))
@@ -512,6 +561,8 @@ static inline void fd_may_send(const int fd)
 {
 	unsigned long locked;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+
 	/* marking ready never changes polled status */
 	if ((fdtab[fd].state & FD_EV_READY_W) ||
 	    HA_ATOMIC_BTS(&fdtab[fd].state, FD_EV_READY_W_BIT))
@@ -530,6 +581,8 @@ static inline void fd_want_recv(int fd)
 {
 	unsigned char old, new;
 	unsigned long locked;
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	old = fdtab[fd].state;
 	do {
@@ -556,6 +609,8 @@ static inline void fd_want_send(int fd)
 {
 	unsigned char old, new;
 	unsigned long locked;
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	old = fdtab[fd].state;
 	do {
@@ -584,6 +639,9 @@ static inline void fd_update_events(int fd, int evts)
 	unsigned long locked = atleast2(fdtab[fd].thread_mask);
 	unsigned char old, new;
 
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
+	//printf("[%s] FD:%d Event:%04x\n", __func__, fd, evts);
+
 	old = fdtab[fd].ev;
 	new = (old & FD_POLL_STICKY) | evts;
 
@@ -607,6 +665,8 @@ static inline void fd_update_events(int fd, int evts)
 static inline void fd_insert(int fd, void *owner, void (*iocb)(int fd), unsigned long thread_mask)
 {
 	unsigned long locked = atleast2(thread_mask);
+
+	FD_PRINTF("[%s] FD:%d\n", __func__, fd);
 
 	if (locked)
 		HA_SPIN_LOCK(FD_LOCK, &fdtab[fd].lock);
@@ -633,6 +693,8 @@ static inline void fd_insert(int fd, void *owner, void (*iocb)(int fd), unsigned
 static inline int compute_poll_timeout(int next)
 {
 	int wait_time;
+
+	FD_PRINTF("[%s]\n", __func__);
 
 	if (!tick_isset(next))
 		wait_time = MAX_DELAY_MS;
@@ -667,6 +729,8 @@ static inline unsigned int hap_fd_isset(int fd, unsigned int *evts)
 static inline void wake_thread(int tid)
 {
 	char c = 'c';
+
+	FD_PRINTF("[%s] TID:%d\n", __func__, tid);
 
 	shut_your_big_mouth_gcc(write(poller_wr_pipe[tid], &c, 1));
 }

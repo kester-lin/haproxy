@@ -49,6 +49,10 @@
 #define USING_TCP_REPAIR 1
 #define USING_SNAPSHOT_THREAD 1
 
+#define USING_RQ_RECOVERY	1
+
+
+
 
 #ifndef UNIX_MAX_PATH
 #define UNIX_MAX_PATH 108

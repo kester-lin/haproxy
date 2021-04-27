@@ -14,12 +14,19 @@
 #include <common/libnet-headers.h>
 #include <common/libnet-functions.h>
 
+
+#define TCP_REPAIR_ZEROCOPY	1
+
 #define PB_ALEN_INET	1
 #define PB_ALEN_INET6	4
 
 
 #define USING_SOCCR_LOG 1
 
+#define SK_FLAG_FREE_RQ		0x1
+#define SK_FLAG_FREE_SQ		0x2
+#define SK_FLAG_FREE_SA		0x4
+#define SK_FLAG_FREE_DA		0x8
 
 #define BUILD_BUG_ON(condition)	((void)sizeof(char[1 - 2*!!(condition)]))
 #define memzero_p(p)		memset(p, 0, sizeof(*p))
@@ -84,30 +91,6 @@ enum {
 
 #define SOCR_DATA_MIN_SIZE	(17 * sizeof(__u32))
 
-
-#if 0
-struct libsoccr_sk_data {
-	uint32_t	state;
-	uint32_t	inq_len;
-	uint32_t	inq_seq;
-	uint32_t	outq_len;
-	uint32_t	outq_seq;
-	uint32_t	unsq_len;
-	uint32_t	opt_mask;
-	uint32_t	mss_clamp;
-	uint32_t	snd_wscale;
-	uint32_t	rcv_wscale;
-	uint32_t	timestamp;
-
-	uint32_t	flags; /* SOCCR_FLAGS_... below */
-	uint32_t	snd_wl1;
-	uint32_t	snd_wnd;
-	uint32_t	max_window;
-	uint32_t	rcv_wnd;
-	uint32_t	rcv_wup;
-};
-#endif
-
 struct libsoccr_sk {
 	int fd;
 	unsigned flags;
@@ -117,7 +100,6 @@ struct libsoccr_sk {
 	union libsoccr_addr *dst_addr;
 };
 
-
 struct sk_addr{
     uint32_t src_addr;
     uint32_t dst_addr;
@@ -125,12 +107,22 @@ struct sk_addr{
     uint16_t dst_port;
 };
 
-struct sk_data_info
-{
-    struct sk_addr sk_addr;
+struct sk_data_info {
+    ////struct sk_addr sk_addr;
     struct libsoccr_sk_data sk_data;
-	struct libsoccr_sk *libsoccr_sk;
+	struct libsoccr_sk* libsoccr_sk;
 };
+
+struct soccr_tcp_info {
+	__u8	tcpi_state;
+	__u8	tcpi_ca_state;
+	__u8	tcpi_retransmits;
+	__u8	tcpi_probes;
+	__u8	tcpi_backoff;
+	__u8	tcpi_options;
+	__u8	tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
+};
+
 
 int restore_sockaddr(union libsoccr_addr *sa,
 		int family, u32 pb_port, u32 *pb_addr, u32 ifindex);
@@ -148,7 +140,19 @@ int ipv6_addr_mapped(union libsoccr_addr *addr);
 int libsoccr_set_sk_data_noq_conn(struct libsoccr_sk *sk,
 		struct sk_data_info *data, unsigned int data_size);
 int libsoccr_restore_conn(struct sk_data_info* data, unsigned int data_size);
+int libsoccr_save(struct libsoccr_sk *sk, struct libsoccr_sk_data *data, 
+						   unsigned data_size);
+int libsoccr_restore_zerocopy(struct sk_data_info* data, 
+						  unsigned int data_size);
+int get_queue(int sk, int queue_id,
+		__u32 *seq, __u32 len, char **bufp);
 
+void libsoccr_release_conn(struct libsoccr_sk *sk);		
+int get_seq_ack(int sk, int queue_id, __u32 *seq, __u32 len);
 
+int dump_tcp_number(int fd, u_int32_t *seq_number, u_int32_t *seq_length,
+					u_int32_t *ack_number, u_int32_t *ack_length);
+
+int show_sk_data_info(struct sk_data_info *ski_data);					
 
 #endif /* _TYPES_CUKU_FT_H */
